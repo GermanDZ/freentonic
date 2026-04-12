@@ -1,0 +1,13 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+
+require "freentonic"
+require "freentonic/cli"
+
+at_exit do
+  Freentonic::ChromeCdp.kill_chrome if Freentonic::ChromeCdp.chrome_process_running?
+end
+
+exit(Freentonic::Cli.new.run(ARGV))

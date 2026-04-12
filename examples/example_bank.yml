@@ -1,0 +1,111 @@
+version: 1
+
+config:
+  key: example_bank
+  default_lookback_days: 30
+
+# Edit these entries to set the first-run prompt the CLI displays when it
+# can't find the secret in your backend. The named entries are referenced
+# inside step values below as secret(NAME).
+secrets:
+  USER_DNI:
+    prompt: "Enter your DNI"
+  USER_PIN:
+    prompt: "Enter your 4-digit PIN"
+
+pipeline: [login, capture_credentials]
+
+phases:
+  login:
+    - action: navigate
+      url: https://bank.example/login
+    - action: wait_for_selector
+      selector: "#dni"
+      timeout: 15
+    - action: fill
+      selector: "#dni"
+      value: "secret(USER_DNI)"
+    - action: enter_pin_pad
+      selector: ".container-pinpad"
+      pin: "secret(USER_PIN)"
+    # Optional: handle an SMS OTP challenge. Uncomment for banks that
+    # require an interactive code on first login. The captured value is
+    # never persisted — it lives only for this single fill.
+    # - action: prompt_stdin_and_fill
+    #   selector: "input[name='otp']"
+    #   prompt: "Enter the SMS code: "
+    #   timeout: 300
+    #   submit_selector: "button[type='submit']"
+    #   if_present: true
+    - action: wait_url
+      includes: /dashboard
+      timeout: 60
+
+  # ── Investigation tooling (uncomment during provider authoring) ──
+  # Use record_requests + dump_requests to capture raw HTTP traffic
+  # without touching DevTools. NEVER ship these in a production workflow.
+  # investigate:
+  #   - action: record_requests
+  #     url_matches:
+  #       - "bank.example/v1/"
+  #     include_response_body: true
+  #     max_body_bytes: 131072
+  #     max_entries: 500
+  #   - action: wait
+  #     seconds: 10                  # let traffic flow while you click around
+  #   - action: dump_requests
+  #     path: "/tmp/bank_capture.json"
+  #     format: "ndjson"
+  #     reset: true
+
+  capture_credentials:
+    - action: wait_network_idle
+      seconds: 3
+    - action: capture_cookie_header
+      host: bank.example
+      path: /
+      as: cookie
+    - action: capture_header
+      name: X-CSRF-Token
+      as: csrf_token
+      retries: 5
+      interval_seconds: 1
+
+credentials:
+  require: [cookie]
+  validate:
+    - key: cookie
+      not_empty: true
+  map:
+    - { from: cookie,     as: cookie }
+    - { from: csrf_token, as: csrf_token }
+
+api_client:
+  base_url: https://api.bank.example
+  api_root: /v1
+  credentials: [cookie, csrf_token]
+  auth_headers:
+    Cookie: "{cookie}"
+    X-CSRF: "{csrf_token}"
+  batch_keys: [items]
+  date_format: "%Y-%m-%d"
+  expected_code: 200
+  expected_content_type: application/json
+  endpoints:
+    - name: fetch_accounts
+      method: GET
+      path: /accounts
+    - name: fetch_movements
+      method: GET
+      path: /accounts/{id}/movements
+      params:
+        from: "{from_date|date}"
+        limit: 100
+
+extract:
+  ruby: ./extractor.rb
+  class: ExampleBank::Extractor
+
+normalize:
+  ruby: ./normalizer.rb
+  class: ExampleBank::Normalizer
