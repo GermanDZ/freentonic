@@ -7,14 +7,14 @@ module Freentonic
   #
   # Usage examples:
   #
-  #   freentonic --workflow providers/ing.yml \
+  #   freentonic --workflow providers/acme/workflow.yml \
   #     --export json --export-path out.json
   #
-  #   freentonic --workflow providers/ing.yml \
-  #     --through extract --dump-raw /tmp/ing_raw.json
+  #   freentonic --workflow providers/acme/workflow.yml \
+  #     --through extract --dump-raw /tmp/raw.json
   #
-  #   freentonic --workflow providers/ing.yml \
-  #     --from-raw /tmp/ing_raw.json \
+  #   freentonic --workflow providers/acme/workflow.yml \
+  #     --from-raw /tmp/raw.json \
   #     --export http --export-url https://api.example.com/push --export-token $TOK
   class Cli
     STAGE_NAMES = %w[connect extract normalize export].freeze
