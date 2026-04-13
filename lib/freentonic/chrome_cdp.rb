@@ -141,13 +141,13 @@ module Freentonic
       # Prevent Chrome from exposing automation signals (navigator.webdriver,
       # window.chrome.csi, etc.) that captcha systems fingerprint.
       args << "--disable-blink-features=AutomationControlled"
+      # Suppress the warning info bar that --disable-blink-features triggers —
+      # captcha systems can detect it in the DOM.
+      args << "--test-type"
       if @no_sandbox
         args << "--no-sandbox"
         args << "--disable-dev-shm-usage"
         args << "--disable-gpu"
-        # Suppress the "--no-sandbox is not supported" info bar — captcha
-        # systems can detect it in the DOM.
-        args << "--test-type"
       end
       args << url if url
 
