@@ -30,6 +30,9 @@ See **[docs/getting-started.md](docs/getting-started.md)** for the
 full step-by-step guide covering multiple export formats, offline
 iteration, and pushing to an API.
 
+Prefer Docker? See **[docs/running-in-docker.md](docs/running-in-docker.md)**
+— no Ruby or Chrome install needed on your host.
+
 ## The pipeline
 
 Freentonic runs every workflow through four stages. Each stage is
