@@ -68,6 +68,7 @@ module Freentonic
         workflow: nil,
         lookback_days: nil,
         isolated: false,
+        headless: false,
         cdp_port: nil,
         only_stage: nil,
         through_stage: nil,
@@ -88,6 +89,7 @@ module Freentonic
         opts.on("--workflow PATH", "Path to workflow YAML") { |v| options[:workflow] = v }
         opts.on("--lookback DAYS", Integer, "Days of history to fetch") { |v| options[:lookback_days] = v }
         opts.on("--isolated", "Use a temporary Chrome profile (fresh login)") { options[:isolated] = true }
+        opts.on("--headless", "Run Chrome in headless mode (no visible window)") { options[:headless] = true }
         opts.on("--port PORT", Integer, "Chrome debug port (default 9222)") { |v| options[:cdp_port] = v }
 
         opts.on("--only-stage STAGE", STAGE_NAMES, "Run exactly one stage (#{STAGE_NAMES.join("|")})") { |v| options[:only_stage] = v.to_sym }
@@ -186,6 +188,7 @@ module Freentonic
         secret_resolver: secret_resolver,
         lookback_days: options[:lookback_days] || source&.default_lookback_days || 14,
         isolated: options[:isolated],
+        headless: options[:headless],
         cdp_port: options[:cdp_port],
         only_stage: options[:only_stage],
         through_stage: options[:through_stage],
