@@ -74,6 +74,14 @@ module Freentonic
         case action
         when "note"
           @stdout.puts "    #{resolved(step.fetch("message"))}"
+        when "note_if_selector"
+          selector = step.fetch("selector")
+          present = runtime_deep_call(<<~JS, selector)
+            (selector) => deepQuery(document, selector) !== null
+          JS
+          if present
+            @stdout.puts "    #{resolved(step.fetch("message"))}"
+          end
         when "navigate"
           url = resolved(step.fetch("url"))
           @stdout.puts "    [yml] navigate: #{url}"
@@ -189,6 +197,14 @@ module Freentonic
           pause_for_user(step)
         when "capture_url"
           capture_current_url(step)
+        when "simulate_human"
+          duration = Float(step.fetch("duration", 2))
+          @stdout.puts "    [yml] simulate_human: #{duration}s"
+          simulate_human_behavior(duration)
+        when "screenshot"
+          label = step.fetch("label", "manual")
+          @stdout.puts "    [yml] screenshot: #{label}"
+          save_screenshot(label)
         else
           raise UserError, "unknown workflow action #{action.inspect} for #{@source.key}"
         end
@@ -210,6 +226,7 @@ module Freentonic
         end
 
         @stdout.puts
+        save_timeout_screenshot("wait_url #{expected_fragment.inspect}")
         raise UserError, "workflow wait_url timed out waiting for #{expected_fragment.inspect}"
       end
 
@@ -284,6 +301,7 @@ module Freentonic
           return if found
           if Time.now >= deadline
             scope = within ? " within #{within.inspect}" : ""
+            save_timeout_screenshot("click_text #{role} #{text.inspect}")
             raise UserError, "click_text timed out: #{role} #{text.inspect}#{scope}"
           end
           sleep WAIT_STEP_SECONDS
@@ -482,6 +500,7 @@ module Freentonic
         end
 
         @stdout.puts
+        save_timeout_screenshot("wait_for_selector #{selector.inspect}")
         raise UserError, "workflow wait_for_selector timed out waiting for #{selector.inspect}"
       end
 
@@ -504,6 +523,7 @@ module Freentonic
         end
 
         @stdout.puts
+        save_timeout_screenshot("wait_for_first_of #{selectors.inspect}")
         raise UserError, "workflow wait_for_first_of timed out waiting for any of #{selectors.inspect}"
       end
 
@@ -524,6 +544,7 @@ module Freentonic
         end
 
         @stdout.puts
+        save_timeout_screenshot("wait_for_shadow_selector #{host_selector} >>> #{selector}")
         raise UserError, "workflow wait_for_shadow_selector timed out waiting for #{selector.inspect} in #{host_selector.inspect}"
       end
 
@@ -689,6 +710,67 @@ module Freentonic
           raise UserError, "workflow enter_digits could not find digit #{digit.inspect} inside #{keypad.inspect}" unless found
           sleep WAIT_STEP_SECONDS
         end
+      end
+
+      # Simulate organic mouse movement, scrolling, and pauses so behavioral
+      # captchas (ThreatMetrix, PerimeterX, etc.) see a real user pattern.
+      # Uses CDP Input domain directly — no JS injection.
+      def simulate_human_behavior(duration)
+        deadline = Time.now + duration
+        x = rand(200..600)
+        y = rand(150..400)
+
+        while Time.now < deadline
+          # Pick a random target and move toward it in small steps (bezier-ish).
+          target_x = rand(80..900)
+          target_y = rand(80..600)
+          steps = rand(10..25)
+          steps.times do |i|
+            break if Time.now >= deadline
+            t = (i + 1).to_f / steps
+            # Ease-out curve with jitter
+            ease = 1 - (1 - t)**2
+            cx = (x + (target_x - x) * ease + rand(-5..5)).round
+            cy = (y + (target_y - y) * ease + rand(-5..5)).round
+            @session.send_command("Input.dispatchMouseEvent", {
+              type: "mouseMoved", x: cx, y: cy
+            })
+            sleep(rand(8..30) / 1000.0)
+          end
+          x, y = target_x, target_y
+
+          # Pause like a human reading the page
+          sleep(rand(150..500) / 1000.0)
+
+          # Occasionally scroll
+          if rand < 0.3
+            delta = rand(-80..80)
+            @session.send_command("Input.dispatchMouseEvent", {
+              type: "mouseWheel", x: x, y: y, deltaX: 0, deltaY: delta
+            })
+            sleep(rand(100..300) / 1000.0)
+          end
+        end
+      end
+
+      def save_screenshot(label)
+        result = @session.send_command("Page.captureScreenshot", { format: "png" }, timeout: 10)
+        data = result&.dig("data")
+        raise UserError, "screenshot: empty response from Chrome" unless data
+
+        timestamp = Time.now.strftime("%Y%m%d-%H%M%S")
+        filename = "freentonic-#{label}-#{timestamp}.png"
+        dir = ["/workspace", Dir.pwd].find { |d| File.directory?(d) && File.writable?(d) } || Dir.pwd
+        path = File.join(dir, filename)
+        File.binwrite(path, Base64.decode64(data))
+        @stderr.puts "    screenshot saved: #{path}"
+      end
+
+      # Best-effort screenshot on timeout — never raises.
+      def save_timeout_screenshot(description)
+        save_screenshot("timeout")
+      rescue StandardError => e
+        @stderr.puts "    (screenshot failed: #{e.message})"
       end
 
       def current_url_value
