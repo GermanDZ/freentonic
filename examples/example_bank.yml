@@ -3,6 +3,11 @@ version: 1
 config:
   key: example_bank
   default_lookback_days: 30
+  # Abort immediately if the bank's anti-fraud system blocks the session.
+  # Checked during wait loops (wait_for_selector, wait_url, etc.).
+  error_signals:
+    - text: "Ha ocurrido un error"
+    - title: "Bloqueo Ciberseguridad"
 
 # Edit these entries to set the first-run prompt the CLI displays when it
 # can't find the secret in your backend. The named entries are referenced

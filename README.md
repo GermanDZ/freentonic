@@ -166,6 +166,7 @@ list, or jump directly to the most commonly used actions:
 - [`prompt_stdin_and_fill`](docs/workflow-action-prompt-stdin-and-fill.md) — read SMS OTP from terminal
 - [`record_requests`](docs/workflow-action-record-requests.md) / [`dump_requests`](docs/workflow-action-dump-requests.md) — capture network traffic during investigation
 - [`when_context`](docs/workflow-when-context.md) — conditional step execution
+- [`error_signals`](docs/workflow-error-signals.md) — early abort when the bank blocks the session
 
 ## Exporters
 

@@ -51,6 +51,10 @@ module Freentonic
       secrets.fetch(name.to_s, {})
     end
 
+    def error_signals
+      Array(config["error_signals"])
+    end
+
     # Declarative Normalizer spec: normalize: { ruby: "./normalizer.rb", class: "My::Normalizer" }
     def normalizer
       @raw["normalize"]
@@ -181,6 +185,26 @@ module Freentonic
 
       unless secrets.is_a?(Hash)
         raise UserError, "workflow #{@path} secrets must be a hash"
+      end
+
+      validate_error_signals!
+    end
+
+    def validate_error_signals!
+      signals = config["error_signals"]
+      return if signals.nil?
+
+      unless signals.is_a?(Array)
+        raise UserError, "workflow #{@path} config.error_signals must be an array"
+      end
+
+      signals.each_with_index do |sig, i|
+        unless sig.is_a?(Hash)
+          raise UserError, "workflow #{@path} config.error_signals[#{i}] must be a hash"
+        end
+        unless sig.key?("text") || sig.key?("selector") || sig.key?("title")
+          raise UserError, "workflow #{@path} config.error_signals[#{i}] must have text:, selector:, or title:"
+        end
       end
     end
 

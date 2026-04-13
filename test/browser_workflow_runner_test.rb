@@ -31,6 +31,8 @@ module Freentonic
       end
 
       class SchemaDouble
+        def error_signals = []
+
         def phase(name)
           return [] unless name == "login"
 
@@ -58,6 +60,8 @@ module Freentonic
       end
 
       class CaptureSchemaDouble
+        def error_signals = []
+
         def phase(name)
           return [] unless name == "capture_credentials"
 
@@ -176,6 +180,8 @@ module Freentonic
       end
 
       class ResponseJsonSchemaDouble
+        def error_signals = []
+
         def phase(name)
           return [] unless name == "capture_credentials"
 
@@ -234,6 +240,8 @@ module Freentonic
         def initialize(steps)
           @steps = steps
         end
+
+        def error_signals = []
 
         def phase(name)
           name == "login" ? @steps : []
