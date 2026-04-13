@@ -78,6 +78,14 @@ module Freentonic
       assert_includes stderr.string, "--force is only valid with --purge"
     end
 
+    def test_no_sandbox_flag_is_accepted
+      stderr = StringIO.new
+      status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--no-sandbox"])
+      assert_equal 1, status
+      assert_includes stderr.string, "missing --workflow"
+      refute_includes stderr.string, "invalid option"
+    end
+
     def test_invalid_option_returns_error
       stderr = StringIO.new
       status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--headless-disable"])
