@@ -13,29 +13,22 @@ Freentonic has **zero runtime gem dependencies**. It's pure Ruby stdlib.
 
 ```sh
 gem install freentonic
-
-# Clone a provider repo (or point at your own YAML).
 git clone https://github.com/GermanDZ/freentonic-providers
 
-# Full pipeline: log in, fetch, normalize, POST to your receiver.
-#
-# --export-url is the FULL endpoint URL, not a base URL. Freentonic does
-# not know the path your receiver listens on — you tell it.
-freentonic --workflow freentonic-providers/ing/workflow.yml \
-  --export http \
-  --export-url https://receiver.example.com/v1/ingest \
-  --export-token $FREENTONIC_HTTP_TOKEN
-
-# Iterate on a normalizer without re-logging into the bank each time.
-freentonic --workflow freentonic-providers/ing/workflow.yml \
-  --through extract --dump-raw /tmp/ing_raw.json
-
-freentonic --workflow freentonic-providers/ing/workflow.yml \
-  --from-raw /tmp/ing_raw.json \
-  --export json --export-path /tmp/ing_normalized.json \
-  --export jsonl --export-path /tmp/ing_movements.jsonl \
+# Export your last 30 days of movements as a CSV:
+freentonic \
+  --workflow freentonic-providers/ing/workflow.yml \
+  --export csv --export-path ~/Desktop/movements.csv \
   --export-csv-select accounts.movements
 ```
+
+That's it — freentonic launches Chrome, logs into your bank, fetches
+your data, and writes a spreadsheet-ready CSV. On macOS, credentials
+are saved in your Keychain so the next run is hands-free.
+
+See **[docs/getting-started.md](docs/getting-started.md)** for the
+full step-by-step guide covering multiple export formats, offline
+iteration, and pushing to an API.
 
 ## The pipeline
 
@@ -177,8 +170,8 @@ Pass `--export NAME` one or more times. Subsequent `--export-*` flags
 attach to the most-recently-declared exporter:
 
 ```
-freentonic --workflow ing.yml \
-  --export json  --export-path ing.json \
+freentonic --workflow workflow.yml \
+  --export json  --export-path data.json \
   --export jsonl --export-path movements.jsonl --export-csv-select accounts.movements \
   --export http  --export-url https://api.example.com/push --export-token $TOK
 ```
@@ -257,6 +250,31 @@ how to load your plugin via `freentonic -r ./my_plugin.rb`.
 Adding an entire new **provider** belongs in
 `freentonic-providers`, not here — see that repo's
 [`docs/creating-a-provider.md`](https://github.com/GermanDZ/freentonic-providers/blob/main/docs/creating-a-provider.md).
+
+## Removing freentonic data
+
+To remove all sensitive data freentonic created on your machine:
+
+```sh
+freentonic --purge
+```
+
+This deletes:
+
+- The Chrome profile at `~/.cache/freentonic/chrome` (cookies, session
+  state, device trust)
+- All macOS Keychain entries with service prefix `freentonic.`
+- Any leftover temp profiles in `/tmp/freentonic-chrome-*`
+
+You will be prompted for confirmation. Use `--force` to skip:
+
+```sh
+freentonic --purge --force
+```
+
+**Note:** Export files (JSON, CSV, etc.) at user-specified paths and
+`--secrets plain_file` files are not deleted automatically — remove
+those manually if they contain sensitive data.
 
 ## Security
 
