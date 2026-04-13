@@ -78,6 +78,13 @@ module Freentonic
       assert_includes stderr.string, "--force is only valid with --purge"
     end
 
+    def test_invalid_option_returns_error
+      stderr = StringIO.new
+      status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--headless-disable"])
+      assert_equal 1, status
+      assert_includes stderr.string, "invalid option: --headless-disable"
+    end
+
     def test_purge_rejects_from_raw
       stderr = StringIO.new
       status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--purge", "--from-raw", "x.json"])

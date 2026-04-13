@@ -130,6 +130,8 @@ module Freentonic
 
       parser.parse!(argv)
       options
+    rescue OptionParser::ParseError => e
+      raise UserError, e.message
     end
 
     def attach(options, key, value)
