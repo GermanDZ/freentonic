@@ -1,0 +1,16 @@
+.git
+.github
+.ruby-lsp
+.claude
+.DS_Store
+docs
+test
+AGENTS.md
+Gemfile
+Gemfile.lock
+freentonic.gemspec
+Rakefile
+*.gem
+.bundle
+coverage
+tmp
