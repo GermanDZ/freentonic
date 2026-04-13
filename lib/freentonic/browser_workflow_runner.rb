@@ -46,6 +46,7 @@ module Freentonic
         @stderr = stderr
         @stdin = stdin
         @runtime_context = runtime_context
+        @error_signals = schema.error_signals
       end
 
       def execute_phase(name)
@@ -216,6 +217,7 @@ module Freentonic
         while Time.now < deadline
           current_url = current_url_value
           return if current_url.include?(resolved(expected_fragment))
+          check_error_signals!
 
           if Time.now - last_dot >= 2
             @stdout.print "."
@@ -490,6 +492,7 @@ module Freentonic
           return if runtime_deep_call(<<~JS, selector)
             (selector) => deepQuery(document, selector) !== null
           JS
+          check_error_signals!
 
           if Time.now - last_dot >= 2
             @stdout.print "."
@@ -513,6 +516,7 @@ module Freentonic
               (selector) => deepQuery(document, selector) !== null
             JS
           end
+          check_error_signals!
 
           if Time.now - last_dot >= 2
             @stdout.print "."
@@ -534,6 +538,7 @@ module Freentonic
           return if runtime_shadow_eval(host_selector, <<~JS, selector)
             (shadowRoot, sel) => shadowRoot.querySelector(sel) !== null
           JS
+          check_error_signals!
 
           if Time.now - last_dot >= 2
             @stdout.print "."
@@ -771,6 +776,41 @@ module Freentonic
         save_screenshot("timeout")
       rescue StandardError => e
         @stderr.puts "    (screenshot failed: #{e.message})"
+      end
+
+      def check_error_signals!
+        return if @error_signals.empty?
+
+        now = Time.now
+        @last_error_signal_check ||= Time.at(0)
+        return if (now - @last_error_signal_check) < 2
+        @last_error_signal_check = now
+
+        @error_signals.each do |signal|
+          matched = if signal["text"]
+            runtime_call(<<~JS, signal["text"])
+              (text) => document.body && document.body.innerText.includes(text)
+            JS
+          elsif signal["title"]
+            runtime_call(<<~JS, signal["title"])
+              (text) => document.title.includes(text)
+            JS
+          elsif signal["selector"]
+            runtime_deep_call(<<~JS, signal["selector"])
+              (selector) => deepQuery(document, selector) !== null
+            JS
+          end
+
+          next unless matched
+
+          message = signal["message"] || signal["text"] || signal["title"] || "element #{signal["selector"]} found"
+          save_screenshot("error-signal")
+          raise UserError, "Screen error detected: #{message}"
+        end
+      rescue UserError
+        raise
+      rescue StandardError
+        # Don't let a failed error-signal check break the workflow
       end
 
       def current_url_value

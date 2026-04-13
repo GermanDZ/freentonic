@@ -57,6 +57,13 @@ option tables, behaviour notes, and examples.
 
 ## Cross-cutting features
 
+### `error_signals` (early abort on screen errors)
+
+Define patterns in `config.error_signals` to detect bank error pages
+(anti-fraud blocks, session errors) during wait loops. When matched,
+the workflow takes a screenshot and aborts immediately instead of waiting
+for the full timeout. See [workflow-error-signals.md](workflow-error-signals.md).
+
 ### `when_context` (conditional execution)
 
 Any step can include a `when_context` gate to run conditionally based
