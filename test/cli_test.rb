@@ -54,5 +54,35 @@ module Freentonic
       assert_equal 1, status
       assert_includes stderr.string, "missing --workflow"
     end
+
+    def test_purge_rejects_workflow_flag
+      stderr = StringIO.new
+      status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--purge", "--workflow", "x.yml"])
+      assert_equal 1, status
+      assert_includes stderr.string, "--purge cannot be combined with --workflow"
+    end
+
+    def test_purge_rejects_export_flag
+      stderr = StringIO.new
+      status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--purge", "--export", "json"])
+      assert_equal 1, status
+      assert_includes stderr.string, "--export cannot be combined with --purge"
+    end
+
+    def test_force_without_purge_rejects
+      stderr = StringIO.new
+      status = Cli.new(stdout: StringIO.new, stderr: stderr).run([
+        "--force", "--workflow", "x.yml", "--export", "json", "--export-path", "x"
+      ])
+      assert_equal 1, status
+      assert_includes stderr.string, "--force is only valid with --purge"
+    end
+
+    def test_purge_rejects_from_raw
+      stderr = StringIO.new
+      status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--purge", "--from-raw", "x.json"])
+      assert_equal 1, status
+      assert_includes stderr.string, "--purge cannot be combined with --from-raw"
+    end
   end
 end

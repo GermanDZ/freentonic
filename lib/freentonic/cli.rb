@@ -77,7 +77,9 @@ module Freentonic
         from_normalized: nil,
         secrets_backend: nil,
         secrets_file: nil,
-        exporters: [] # array of { name:, options: {} }
+        exporters: [], # array of { name:, options: {} }
+        purge: false,
+        force: false
       }
 
       parser = OptionParser.new do |opts|
@@ -117,6 +119,9 @@ module Freentonic
         end
         opts.on("--export-csv-select PATH", "Nested path for csv/jsonl flattening (e.g. accounts.movements)") { |v| attach(options, :select, v) }
 
+        opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
+        opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }
+
         opts.on("-h", "--help") { puts opts; exit 0 }
         opts.on("--version") { puts "freentonic #{Freentonic::VERSION}"; exit 0 }
       end
@@ -135,6 +140,18 @@ module Freentonic
     end
 
     def validate!(options)
+      if options[:purge]
+        pipeline_flags = %i[workflow from_raw from_normalized only_stage through_stage dump_raw dump_normalized]
+        conflict = pipeline_flags.find { |f| options[f] }
+        raise UserError, "--purge cannot be combined with --#{conflict.to_s.tr("_", "-")}" if conflict
+        raise UserError, "--export cannot be combined with --purge" unless options[:exporters].empty?
+        return
+      end
+
+      if options[:force]
+        raise UserError, "--force is only valid with --purge"
+      end
+
       unless options[:workflow] || options[:from_raw] || options[:from_normalized]
         raise UserError, "missing --workflow PATH"
       end
@@ -149,6 +166,12 @@ module Freentonic
     end
 
     def execute(options)
+      if options[:purge]
+        require_relative "purge"
+        Purge.new(stdout: @stdout, stderr: @stderr, force: options[:force]).run
+        return
+      end
+
       source = options[:workflow] ? Source.new(workflow_path: File.expand_path(options[:workflow])) : nil
 
       secret_store = build_secret_store(options)

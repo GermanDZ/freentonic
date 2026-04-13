@@ -251,6 +251,31 @@ Adding an entire new **provider** belongs in
 `freentonic-providers`, not here — see that repo's
 [`docs/creating-a-provider.md`](https://github.com/GermanDZ/freentonic-providers/blob/main/docs/creating-a-provider.md).
 
+## Removing freentonic data
+
+To remove all sensitive data freentonic created on your machine:
+
+```sh
+freentonic --purge
+```
+
+This deletes:
+
+- The Chrome profile at `~/.cache/freentonic/chrome` (cookies, session
+  state, device trust)
+- All macOS Keychain entries with service prefix `freentonic.`
+- Any leftover temp profiles in `/tmp/freentonic-chrome-*`
+
+You will be prompted for confirmation. Use `--force` to skip:
+
+```sh
+freentonic --purge --force
+```
+
+**Note:** Export files (JSON, CSV, etc.) at user-specified paths and
+`--secrets plain_file` files are not deleted automatically — remove
+those manually if they contain sensitive data.
+
 ## Security
 
 Workflow YAMLs have the same blast radius as Ruby scripts run as your
