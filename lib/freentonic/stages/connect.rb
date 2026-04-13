@@ -91,6 +91,10 @@ module Freentonic
 
       def close_chrome
         stdout.puts "Closing Chrome..."
+        # Ask Chrome to close gracefully via CDP so it flushes cookies,
+        # localStorage, and "remember me" state to disk before exiting.
+        @session&.send_command("Browser.close") rescue nil
+        sleep 1
         chrome_cdp.kill_chrome
       end
 
