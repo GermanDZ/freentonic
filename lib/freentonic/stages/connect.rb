@@ -39,7 +39,8 @@ module Freentonic
         chrome_cdp.configure(
           port: @context[:cdp_port] || DEFAULT_CDP_PORT,
           isolated: @context[:isolated] || false,
-          headless: @context[:headless] || false
+          headless: @context[:headless] || false,
+          no_sandbox: @context[:no_sandbox] || false
         )
       end
 
