@@ -38,14 +38,16 @@ module Freentonic
     @pid = nil
     @profile_dir = nil
     @isolated = false
+    @headless = false
 
     class << self
       attr_reader :port, :profile_dir
     end
 
-    def self.configure(port: DEFAULT_PORT, isolated: false)
+    def self.configure(port: DEFAULT_PORT, isolated: false, headless: false)
       @port = port
       @isolated = isolated
+      @headless = headless
       if isolated
         require "tmpdir"
         require "fileutils"
@@ -130,6 +132,11 @@ module Freentonic
         "--disable-infobars",
         "--lang=es-ES"
       ]
+      if @headless
+        args << "--headless=new"
+        args << "--window-size=1920,1080"
+        args << "--disable-blink-features=AutomationControlled"
+      end
       args << url if url
 
       @pid = Process.spawn(*args, out: "/dev/null", err: "/dev/null")

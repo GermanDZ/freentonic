@@ -18,9 +18,12 @@ module Freentonic
         launch_chrome
         @chrome_started = true
         open_login_session
+        apply_headless_stealth if @context[:headless]
         run_pipeline
         @context[:credentials] = extract_credentials
         @context
+      rescue RuntimeError => e
+        raise UserError, "Browser workflow failed: #{e.message}"
       ensure
         @session&.close rescue nil
         close_chrome if @chrome_started
@@ -35,12 +38,14 @@ module Freentonic
       def configure_chrome
         chrome_cdp.configure(
           port: @context[:cdp_port] || DEFAULT_CDP_PORT,
-          isolated: @context[:isolated] || false
+          isolated: @context[:isolated] || false,
+          headless: @context[:headless] || false
         )
       end
 
       def launch_chrome
         mode = @context[:isolated] ? "isolated temp profile" : "system profile"
+        mode = "headless, #{mode}" if @context[:headless]
         stdout.puts "Launching Chrome (#{mode})..."
 
         result = chrome_cdp.launch_chrome
@@ -60,6 +65,26 @@ module Freentonic
         @session = chrome_cdp.open_session(ws_url)
         @session.send_command("Network.enable")
         @session.send_command("Page.enable")
+      end
+
+      # In headless mode, mask automation signals so banking sites that
+      # fingerprint the browser don't reject the session outright.
+      #
+      # Chrome headless sends "HeadlessChrome/..." in the User-Agent header,
+      # which many banking sites block server-side. We read the current UA,
+      # strip the "Headless" prefix, and override both the HTTP header
+      # (Network.setUserAgentOverride) and the JS property (navigator.webdriver).
+      def apply_headless_stealth
+        result = @session.send_command("Runtime.evaluate", {
+          expression: "navigator.userAgent"
+        })
+        headless_ua = result.dig("result", "value") || ""
+        headed_ua = headless_ua.gsub("HeadlessChrome", "Chrome")
+        @session.send_command("Network.setUserAgentOverride", { userAgent: headed_ua })
+
+        @session.send_command("Page.addScriptToEvaluateOnNewDocument", {
+          source: "Object.defineProperty(navigator, 'webdriver', { get: () => false })"
+        })
       end
 
       def close_chrome

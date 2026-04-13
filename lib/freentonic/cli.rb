@@ -7,14 +7,14 @@ module Freentonic
   #
   # Usage examples:
   #
-  #   freentonic --workflow providers/ing.yml \
+  #   freentonic --workflow providers/acme/workflow.yml \
   #     --export json --export-path out.json
   #
-  #   freentonic --workflow providers/ing.yml \
-  #     --through extract --dump-raw /tmp/ing_raw.json
+  #   freentonic --workflow providers/acme/workflow.yml \
+  #     --through extract --dump-raw /tmp/raw.json
   #
-  #   freentonic --workflow providers/ing.yml \
-  #     --from-raw /tmp/ing_raw.json \
+  #   freentonic --workflow providers/acme/workflow.yml \
+  #     --from-raw /tmp/raw.json \
   #     --export http --export-url https://api.example.com/push --export-token $TOK
   class Cli
     STAGE_NAMES = %w[connect extract normalize export].freeze
@@ -68,6 +68,7 @@ module Freentonic
         workflow: nil,
         lookback_days: nil,
         isolated: false,
+        headless: false,
         cdp_port: nil,
         only_stage: nil,
         through_stage: nil,
@@ -77,7 +78,9 @@ module Freentonic
         from_normalized: nil,
         secrets_backend: nil,
         secrets_file: nil,
-        exporters: [] # array of { name:, options: {} }
+        exporters: [], # array of { name:, options: {} }
+        purge: false,
+        force: false
       }
 
       parser = OptionParser.new do |opts|
@@ -86,6 +89,7 @@ module Freentonic
         opts.on("--workflow PATH", "Path to workflow YAML") { |v| options[:workflow] = v }
         opts.on("--lookback DAYS", Integer, "Days of history to fetch") { |v| options[:lookback_days] = v }
         opts.on("--isolated", "Use a temporary Chrome profile (fresh login)") { options[:isolated] = true }
+        opts.on("--headless", "Run Chrome in headless mode (no visible window)") { options[:headless] = true }
         opts.on("--port PORT", Integer, "Chrome debug port (default 9222)") { |v| options[:cdp_port] = v }
 
         opts.on("--only-stage STAGE", STAGE_NAMES, "Run exactly one stage (#{STAGE_NAMES.join("|")})") { |v| options[:only_stage] = v.to_sym }
@@ -117,12 +121,17 @@ module Freentonic
         end
         opts.on("--export-csv-select PATH", "Nested path for csv/jsonl flattening (e.g. accounts.movements)") { |v| attach(options, :select, v) }
 
+        opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
+        opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }
+
         opts.on("-h", "--help") { puts opts; exit 0 }
         opts.on("--version") { puts "freentonic #{Freentonic::VERSION}"; exit 0 }
       end
 
       parser.parse!(argv)
       options
+    rescue OptionParser::ParseError => e
+      raise UserError, e.message
     end
 
     def attach(options, key, value)
@@ -135,6 +144,18 @@ module Freentonic
     end
 
     def validate!(options)
+      if options[:purge]
+        pipeline_flags = %i[workflow from_raw from_normalized only_stage through_stage dump_raw dump_normalized]
+        conflict = pipeline_flags.find { |f| options[f] }
+        raise UserError, "--purge cannot be combined with --#{conflict.to_s.tr("_", "-")}" if conflict
+        raise UserError, "--export cannot be combined with --purge" unless options[:exporters].empty?
+        return
+      end
+
+      if options[:force]
+        raise UserError, "--force is only valid with --purge"
+      end
+
       unless options[:workflow] || options[:from_raw] || options[:from_normalized]
         raise UserError, "missing --workflow PATH"
       end
@@ -149,6 +170,12 @@ module Freentonic
     end
 
     def execute(options)
+      if options[:purge]
+        require_relative "purge"
+        Purge.new(stdout: @stdout, stderr: @stderr, force: options[:force]).run
+        return
+      end
+
       source = options[:workflow] ? Source.new(workflow_path: File.expand_path(options[:workflow])) : nil
 
       secret_store = build_secret_store(options)
@@ -163,6 +190,7 @@ module Freentonic
         secret_resolver: secret_resolver,
         lookback_days: options[:lookback_days] || source&.default_lookback_days || 14,
         isolated: options[:isolated],
+        headless: options[:headless],
         cdp_port: options[:cdp_port],
         only_stage: options[:only_stage],
         through_stage: options[:through_stage],
