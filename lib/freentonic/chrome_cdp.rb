@@ -166,21 +166,48 @@ module Freentonic
       false
     end
 
+    # Ask Chrome to close via CDP and wait for it to exit on its own. Chrome
+    # needs time to flush SQLite journals (Cookies, DIPS, etc.) and clean up
+    # temp files in the profile. Only fall back to signals if it doesn't
+    # exit on its own within the grace period.
+    def self.close_gracefully(session)
+      return true unless @pid
+      session&.send_command("Browser.close") rescue nil
+      return finalize_chrome_exit if wait_for_chrome_exit(timeout: 10)
+
+      Process.kill("TERM", @pid) rescue nil
+      return finalize_chrome_exit if wait_for_chrome_exit(timeout: 5)
+
+      Process.kill("KILL", @pid) rescue nil
+      wait_for_chrome_exit(timeout: 2)
+      finalize_chrome_exit
+    end
+
     def self.kill_chrome
       return unless @pid
       Process.kill("TERM", @pid) rescue nil
-      20.times do
+      return finalize_chrome_exit if wait_for_chrome_exit(timeout: 6)
+
+      Process.kill("KILL", @pid) rescue nil
+      wait_for_chrome_exit(timeout: 2)
+      finalize_chrome_exit
+    end
+
+    def self.wait_for_chrome_exit(timeout:)
+      return true unless @pid
+      deadline = Time.now + timeout
+      while Time.now < deadline
         begin
           Process.kill(0, @pid)
         rescue Errno::ESRCH
-          @pid = nil
-          cleanup_isolated_profile!
           return true
         end
-        sleep 0.3
+        sleep 0.2
       end
-      Process.kill("KILL", @pid) rescue nil
-      sleep 0.5
+      false
+    end
+
+    def self.finalize_chrome_exit
       @pid = nil
       cleanup_isolated_profile!
       true
