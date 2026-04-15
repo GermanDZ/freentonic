@@ -147,11 +147,12 @@ docker volume rm freentonic-chrome-profile
 
 ## Debugging with VNC
 
-Sometimes you need to see what Chrome is doing — a captcha to solve,
-a login flow to inspect, or an error to diagnose. Enable VNC mode:
+VNC is enabled by default so you can see what Chrome is doing — solve a
+captcha, inspect a login flow, or diagnose an error. To disable VNC, set
+`FREENTONIC_VNC=0`:
 
 ```sh
-FREENTONIC_VNC=1 ./docker-run-freentonic.sh \
+./docker-run-freentonic.sh \
   --workflow /home/freentonic/providers/freentonic-providers/ing/workflow.yml \
   --secrets cli \
   --export json --export-path /workspace/out.json
@@ -192,7 +193,7 @@ your local directory.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FREENTONIC_SECRETS_FILE` | *(none)* | Host path to a secrets file. Auto-mounted and wired up. |
-| `FREENTONIC_VNC` | `0` | Set to `1` to enable VNC server on port 5900. |
+| `FREENTONIC_VNC` | `1` | VNC server on port 5900 (enabled by default). Set to `0` to disable. |
 | `FREENTONIC_SKIP_PROVIDERS` | `0` | Set to `1` to skip cloning/updating providers from GitHub. |
 | `FREENTONIC_PROVIDERS_REPO` | GitHub URL | Override the providers git repo URL. |
 | `FREENTONIC_PROVIDERS_REF` | `main` | Pin providers to a specific branch, tag, or commit. |
@@ -225,7 +226,7 @@ Key flags to remember:
 - `-v "...chrome-profile:/home/freentonic/.cache/freentonic/chrome"` — persist login state
 - `--shm-size=256m` — Chrome needs more shared memory than Docker's 64 MB default
 - `-e FREENTONIC_SKIP_PROVIDERS=1` — when mounting local providers
-- `-p 5900:5900 -e FREENTONIC_VNC=1` — when you need VNC
+- `-p 5900:5900` — when you need VNC (on by default via the wrapper)
 
 ## Cleaning up
 
