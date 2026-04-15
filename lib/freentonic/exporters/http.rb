@@ -93,7 +93,7 @@ module Freentonic
                 "http exporter: POST #{url} returned HTTP 404. Double-check that " \
                 "--export-url points at the full endpoint path, not just the host."
         else
-          raise ExportError, "http exporter: POST #{url} failed with HTTP #{status}: #{resp.body.to_s.slice(0, 200)}"
+          raise ExportError, "http exporter: POST #{url} failed with HTTP #{status}: #{format_error_body(resp.body)}"
         end
       end
 
@@ -102,6 +102,14 @@ module Freentonic
         ::JSON.parse(body)
       rescue ::JSON::ParserError
         { "_raw" => body.to_s }
+      end
+
+      MAX_ERROR_BODY = 4000
+
+      def format_error_body(body)
+        text = body.to_s
+        return text if text.length <= MAX_ERROR_BODY
+        "#{text.slice(0, MAX_ERROR_BODY)}…[truncated, #{text.length} bytes total]"
       end
     end
 
