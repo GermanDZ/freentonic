@@ -129,6 +129,7 @@ its own `meta:` block.
 {
   "run_id":      "2026-04-21T12-34-56Z-abc123",
   "exit_code":   0,
+  "error_kind":  null,
   "duration_ms": 12345,
   "artifacts": [
     { "path": "runs/2026-04-21T12-34-56Z-abc123/log", "size": 9412 },
@@ -150,6 +151,18 @@ its own `meta:` block.
   - `2` — `ExportError` (receiver rejected the payload, connection refused).
   - `128 + N` — child exited on signal N (e.g. `143` for SIGTERM, typically
     from `timeout_sec`).
+- `error_kind` classifies the failure so the caller doesn't have to grep
+  the log. One of:
+  - `null` — `exit_code == 0`, workflow succeeded.
+  - `"timeout"` — the server's watchdog killed the child because
+    `timeout_sec` elapsed. Takes precedence over the signal used to kill it.
+  - `"signal"` — the child died on a signal (SIGSEGV, SIGBUS, external
+    kill, etc.), not because of our timeout watchdog.
+  - `"user_error"` — `UserError` (exit 1). Retrying verbatim won't help;
+    the request or workflow is wrong.
+  - `"export_error"` — `ExportError` (exit 2). Receiver rejected the
+    payload; retrying may or may not help depending on the receiver.
+  - `"unknown"` — non-zero exit code that doesn't match any of the above.
 - `duration_ms` is wall time from subprocess spawn to `Process.wait` return.
 - `warnings` contains informational messages like `"timeout reached (...); child was terminated"`.
 
