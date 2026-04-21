@@ -183,7 +183,7 @@ the server logs a warning if missing).
 | `FREENTONIC_RUNS_DIR` | `/workspace/runs` | Per-run artifact root inside the container. |
 | `FREENTONIC_TMPFS_DIR` | `/dev/shm/freentonic/runs` | Where inline credentials are written during a run (auto-cleaned). |
 | `FREENTONIC_CHROME_PROFILE_ROOT` | `/home/freentonic/.cache/freentonic/chrome` | Chrome profile parent. Subdirectories are created per `profile_key`. |
-| `FREENTONIC_VNC` | `0` | Set `1` to start x11vnc on `:5900` for debugging. Password: `freentonic`. Publish 5900 with `-p 127.0.0.1:5900:5900`. |
+| `FREENTONIC_VNC` | `1` | Starts x11vnc on `:5900` for debugging. Password: `freentonic`. The wrapper publishes `-p 127.0.0.1:5900:5900` whenever this is `1`. Set to `0` to skip VNC entirely. |
 
 The wrapper script `docker-run-freentonic.sh` also reads:
 
