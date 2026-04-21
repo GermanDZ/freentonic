@@ -55,10 +55,24 @@ module Freentonic
         require "fileutils"
         @profile_dir = Dir.mktmpdir("freentonic-chrome-")
       else
-        @profile_dir = DEFAULT_PROFILE_DIR
+        @profile_dir = resolve_profile_dir_from_env
         require "fileutils"
         FileUtils.mkdir_p(@profile_dir)
       end
+    end
+
+    # Precedence when running under the invoke server (non-isolated mode):
+    #   1. FREENTONIC_CHROME_PROFILE_DIR  — absolute path, wins outright
+    #   2. FREENTONIC_CHROME_PROFILE_KEY  — subdir under DEFAULT_PROFILE_DIR
+    #   3. DEFAULT_PROFILE_DIR            — legacy single-profile CLI usage
+    def self.resolve_profile_dir_from_env
+      if (explicit = ENV["FREENTONIC_CHROME_PROFILE_DIR"]) && !explicit.empty?
+        return explicit
+      end
+      if (key = ENV["FREENTONIC_CHROME_PROFILE_KEY"]) && !key.empty?
+        return File.join(DEFAULT_PROFILE_DIR, key)
+      end
+      DEFAULT_PROFILE_DIR
     end
 
     # ─── Chrome lifecycle ───
@@ -103,6 +117,32 @@ module Freentonic
       pids.each { |pid| Process.kill("KILL", pid) rescue nil }
       sleep 1
       !owned_chrome_running?
+    end
+
+    # Same contract as kill_owned_chrome!, but parameterized on a profile dir
+    # rather than the module-level @profile_dir. Used by the invoke server to
+    # clean up after a child that died before closing Chrome gracefully.
+    # Safe to call when no Chrome is running for that profile (returns true).
+    def self.kill_chrome_for(profile_dir)
+      return true if profile_dir.nil? || profile_dir.empty?
+      probe = lambda do
+        output = IO.popen(["pgrep", "-f", "user-data-dir=#{profile_dir}"], err: File::NULL, &:read).to_s
+        !output.strip.empty?
+      end
+
+      return true unless probe.call
+
+      pids = IO.popen(["pgrep", "-f", "user-data-dir=#{profile_dir}"], err: File::NULL, &:read).to_s.split.map(&:to_i)
+      pids.each { |pid| Process.kill("TERM", pid) rescue nil }
+      10.times do
+        return true unless probe.call
+        sleep 0.5
+      end
+      pids.each { |pid| Process.kill("KILL", pid) rescue nil }
+      sleep 1
+      !probe.call
+    rescue StandardError
+      false
     end
 
     def self.launch_chrome(url: nil)
