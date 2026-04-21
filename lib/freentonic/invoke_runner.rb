@@ -1,0 +1,273 @@
+# frozen_string_literal: true
+
+require "fileutils"
+require "rbconfig"
+
+module Freentonic
+  # Per-invoke work unit. Owns the filesystem side of running one freentonic
+  # subprocess: creating the run directory, writing the tmpfs secrets file,
+  # spawning the child with a scoped ENV, enforcing the timeout, and cleaning
+  # up the tmpfs file afterwards. Never touches the host-owned run directory
+  # or the chrome profile directory (both are meant to persist).
+  #
+  # Serialization is the server's responsibility — this class assumes the
+  # caller only runs one InvokeRunner#run at a time.
+  class InvokeRunner
+    Result = Struct.new(
+      :run_id, :exit_code, :duration_ms, :artifacts,
+      :log_path, :warnings, :chrome_profile_dir,
+      keyword_init: true
+    )
+
+    Artifact = Struct.new(:path, :size, keyword_init: true) do
+      def to_h
+        { "path" => path, "size" => size }
+      end
+    end
+
+    DEFAULT_TMPFS_DIR            = "/dev/shm/freentonic/runs"
+    DEFAULT_RUNS_DIR             = "/workspace/runs"
+    DEFAULT_WORKFLOWS_DIR        = "/home/freentonic/workflows"
+    DEFAULT_CHROME_PROFILE_ROOT  = File.expand_path("~/.cache/freentonic/chrome")
+    DEFAULT_FREENTONIC_CMD       = [RbConfig.ruby, "-I/opt/freentonic/lib", "/opt/freentonic/bin/freentonic"].freeze
+    DEFAULT_ARTIFACT_ROOT        = "/workspace"
+
+    SIGTERM_GRACE_SECONDS = 10
+
+    attr_reader :workflows_dir, :runs_dir, :tmpfs_dir, :chrome_profile_root
+
+    def initialize(
+      workflows_dir:          DEFAULT_WORKFLOWS_DIR,
+      runs_dir:               DEFAULT_RUNS_DIR,
+      tmpfs_dir:              DEFAULT_TMPFS_DIR,
+      chrome_profile_root:    DEFAULT_CHROME_PROFILE_ROOT,
+      freentonic_cmd:         DEFAULT_FREENTONIC_CMD,
+      artifact_root:          DEFAULT_ARTIFACT_ROOT,
+      logger:                 nil
+    )
+      @workflows_dir       = workflows_dir
+      @runs_dir            = runs_dir
+      @tmpfs_dir           = tmpfs_dir
+      @chrome_profile_root = chrome_profile_root
+      @freentonic_cmd      = Array(freentonic_cmd).dup.freeze
+      @artifact_root       = artifact_root
+      @logger              = logger
+    end
+
+    # Run one validated InvokeRequest.
+    #
+    # @param request [InvokeRequest]
+    # @yieldparam pid [Integer], pgid [Integer] yielded once, right after
+    #   Process.spawn returns, so the caller can register the child for
+    #   external cancel support.
+    # @return [Result]
+    def run(request, &on_start)
+      run_dir = File.join(@runs_dir, request.run_id)
+      FileUtils.mkdir_p(run_dir, mode: 0o750)
+
+      chrome_profile_dir = File.join(@chrome_profile_root, request.profile_key)
+      FileUtils.mkdir_p(chrome_profile_dir, mode: 0o750)
+
+      tmpfs_run_dir = nil
+      secrets_path  = nil
+
+      started_at = Time.now
+      warnings   = []
+
+      if request.credentials_inline
+        tmpfs_run_dir = File.join(@tmpfs_dir, request.run_id)
+        FileUtils.mkdir_p(@tmpfs_dir, mode: 0o700)
+        FileUtils.mkdir_p(tmpfs_run_dir, mode: 0o700)
+        secrets_path = File.join(tmpfs_run_dir, "secrets.env")
+        write_secrets_file(secrets_path, request.credentials_inline)
+      else
+        secrets_path = request.credentials_file
+      end
+
+      env  = build_env(request, chrome_profile_dir: chrome_profile_dir, run_dir: run_dir)
+      argv = build_argv(request, secrets_path: secrets_path, run_dir: run_dir)
+
+      log_path = File.join(run_dir, "log")
+      exit_code, timed_out = spawn_and_wait(env, argv, log_path, request.timeout_sec, &on_start)
+      warnings << "timeout reached (#{request.timeout_sec}s); child was terminated" if timed_out
+
+      Result.new(
+        run_id:             request.run_id,
+        exit_code:          exit_code,
+        duration_ms:        ((Time.now - started_at) * 1000).to_i,
+        artifacts:          collect_artifacts(run_dir),
+        log_path:           relative_artifact_path(log_path),
+        warnings:           warnings,
+        chrome_profile_dir: chrome_profile_dir
+      )
+    ensure
+      cleanup_chrome(chrome_profile_dir) if chrome_profile_dir
+      cleanup_tmpfs(tmpfs_run_dir)       if tmpfs_run_dir
+    end
+
+    private
+
+    def write_secrets_file(path, inline)
+      File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |f|
+        inline.each do |key, value|
+          f.puts("#{key}=#{value}")
+        end
+      end
+    end
+
+    def build_env(request, chrome_profile_dir:, run_dir:)
+      env = {
+        "PATH"                           => ENV["PATH"] || "/usr/local/bin:/usr/bin:/bin",
+        "HOME"                           => ENV["HOME"] || "/home/freentonic",
+        "LANG"                           => ENV["LANG"] || "en_US.UTF-8",
+        "DISPLAY"                        => ENV["DISPLAY"] || ":99",
+        "FREENTONIC_RUN_ID"              => request.run_id,
+        "FREENTONIC_RUN_DIR"             => run_dir,
+        "FREENTONIC_CHROME_PROFILE_DIR"  => chrome_profile_dir
+      }
+      if request.export && request.export["mode"] == "http" && request.export["token"]
+        env["FREENTONIC_HTTP_TOKEN"] = request.export["token"]
+      end
+      env
+    end
+
+    def build_argv(request, secrets_path:, run_dir:)
+      argv = @freentonic_cmd.dup
+      argv << "--no-sandbox"
+      argv.push("--workflow", request.workflow_path)
+      argv.push("--secrets", "plain_file", "--secrets-file", secrets_path)
+      argv.push("--lookback", request.lookback.to_s) if request.lookback
+      argv << "--isolated" if request.chrome["isolated"]
+      argv << "--headless" if request.chrome["headless"]
+
+      if (export = request.export)
+        argv.push("--export", export["mode"])
+        case export["mode"]
+        when "http"
+          argv.push("--export-url", export["url"])
+          argv.push("--export-method", export["method"]) if export["method"]
+          argv.push("--export-content-type", export["content_type"]) if export["content_type"]
+          Array(export["headers"]).each do |name, value|
+            argv.push("--export-header", "#{name}=#{value}")
+          end
+          # NOTE: --export-token intentionally omitted. The HTTP exporter at
+          # lib/freentonic/exporters/http.rb falls back to
+          # ENV["FREENTONIC_HTTP_TOKEN"], which build_env sets. Keeping the
+          # token off argv avoids /proc/<pid>/cmdline exposure.
+        else
+          argv.push("--export-path", File.join(run_dir, export["path"]))
+          argv.push("--export-csv-select", export["select"]) if export["select"]
+        end
+      end
+
+      argv
+    end
+
+    def spawn_and_wait(env, argv, log_path, timeout_sec, &on_start)
+      log_fd = File.open(log_path, File::WRONLY | File::CREAT | File::TRUNC, 0o640)
+      begin
+        pid = Process.spawn(
+          env, *argv,
+          unsetenv_others: true,
+          close_others:    true,
+          pgroup:          true,
+          out:             log_fd,
+          err:             log_fd
+        )
+      ensure
+        log_fd.close rescue nil
+      end
+
+      pgid = begin
+        Process.getpgid(pid)
+      rescue Errno::ESRCH
+        pid
+      end
+
+      on_start&.call(pid, pgid)
+
+      deadline = Time.now + timeout_sec
+      timed_out = false
+      status = nil
+
+      loop do
+        result = Process.wait2(pid, Process::WNOHANG)
+        if result
+          _, status = result
+          break
+        end
+
+        if Time.now >= deadline && !timed_out
+          timed_out = true
+          send_signal_to_group(pgid, "TERM")
+          grace_deadline = Time.now + SIGTERM_GRACE_SECONDS
+          while Time.now < grace_deadline
+            result = Process.wait2(pid, Process::WNOHANG)
+            if result
+              _, status = result
+              break
+            end
+            sleep 0.2
+          end
+          unless status
+            send_signal_to_group(pgid, "KILL")
+            _, status = Process.wait2(pid)
+          end
+          break
+        end
+
+        sleep 0.2
+      end
+
+      exit_code = if status.exited?
+        status.exitstatus
+      elsif status.signaled?
+        128 + status.termsig
+      else
+        -1
+      end
+
+      [exit_code, timed_out]
+    end
+
+    def send_signal_to_group(pgid, signal)
+      Process.kill("-#{signal}", pgid)
+    rescue Errno::ESRCH
+      nil
+    end
+
+    def cleanup_tmpfs(tmpfs_run_dir)
+      return unless tmpfs_run_dir && Dir.exist?(tmpfs_run_dir)
+      # rm_rf handles the secrets file + any stragglers the child might have written.
+      FileUtils.rm_rf(tmpfs_run_dir)
+    rescue StandardError => e
+      log("tmpfs cleanup failed at #{tmpfs_run_dir}: #{e.class}: #{e.message}")
+    end
+
+    def cleanup_chrome(profile_dir)
+      return unless ChromeCdp.respond_to?(:kill_chrome_for)
+      ChromeCdp.kill_chrome_for(profile_dir)
+    rescue StandardError => e
+      log("chrome cleanup failed for #{profile_dir}: #{e.class}: #{e.message}")
+    end
+
+    def collect_artifacts(run_dir)
+      return [] unless Dir.exist?(run_dir)
+      entries = Dir.glob(File.join(run_dir, "**", "*"), File::FNM_DOTMATCH).reject do |p|
+        File.basename(p) == "." || File.basename(p) == ".." || File.directory?(p)
+      end
+      entries.sort.map do |p|
+        Artifact.new(path: relative_artifact_path(p), size: File.size(p))
+      end
+    end
+
+    def relative_artifact_path(absolute)
+      root = @artifact_root.chomp(File::SEPARATOR) + File::SEPARATOR
+      absolute.start_with?(root) ? absolute[root.length..] : absolute
+    end
+
+    def log(message)
+      @logger&.call(message)
+    end
+  end
+end
