@@ -28,17 +28,22 @@ module Freentonic
     STATUS_REASONS = {
       200 => "OK",
       202 => "Accepted",
+      206 => "Partial Content",
       400 => "Bad Request",
       401 => "Unauthorized",
       404 => "Not Found",
       405 => "Method Not Allowed",
       409 => "Conflict",
       413 => "Payload Too Large",
+      416 => "Range Not Satisfiable",
       422 => "Unprocessable Entity",
       500 => "Internal Server Error",
       503 => "Service Unavailable",
       504 => "Gateway Timeout"
     }.freeze
+
+    RUN_ID_PATTERN     = /\A[A-Za-z0-9_\-:.]{1,64}\z/.freeze
+    LOG_CHUNK_BYTES    = 64 * 1024
 
     def initialize(
       runner:,
@@ -107,6 +112,19 @@ module Freentonic
         return
       end
       return unless request
+
+      # The log route streams bytes directly to the socket (logs can be large
+      # and we support Range requests), so it can't use the [status, hash]
+      # dispatcher like the JSON endpoints. Handle it here before dispatch.
+      path = request.path.split("?", 2).first
+      if (match = path.match(%r{\A/runs/([^/]+)/log\z}))
+        if request.method == "GET"
+          handle_log(client, request, match[1])
+        else
+          write_response(client, 405, { "error" => "method not allowed" })
+        end
+        return
+      end
 
       status, body = dispatch(request)
       write_response(client, status, body)
@@ -328,6 +346,130 @@ module Freentonic
         "log_path"    => result.log_path,
         "warnings"    => result.warnings
       }]
+    end
+
+    def handle_log(client, req, run_id)
+      unless authenticated?(req)
+        return write_response(client, 401, { "error" => "missing or invalid bearer token" })
+      end
+
+      unless run_id =~ RUN_ID_PATTERN
+        return write_response(client, 404, { "error" => "run_id not found" })
+      end
+
+      log_path = File.join(@runner.runs_dir, run_id, "log")
+      unless File.file?(log_path)
+        return write_response(client, 404, { "error" => "log not found for run_id=#{run_id}" })
+      end
+
+      # realpath guard: reject if the resolved file isn't under runs_dir
+      # (belt-and-braces against any future symlink shenanigans in the runs dir).
+      begin
+        runs_real = File.realpath(@runner.runs_dir)
+        file_real = File.realpath(log_path)
+      rescue Errno::ENOENT
+        return write_response(client, 404, { "error" => "log not found" })
+      end
+      unless file_real.start_with?(runs_real + File::SEPARATOR)
+        return write_response(client, 404, { "error" => "log path escapes runs dir" })
+      end
+
+      size = File.size(log_path)
+      range = parse_range_header(req.headers["range"], size)
+
+      case range
+      when :bad_range
+        write_response(client, 400, { "error" => "malformed Range header" })
+      when :not_satisfiable
+        write_range_not_satisfiable(client, size)
+      when nil
+        stream_log(client, log_path, 0, size - 1, size, partial: false)
+      else
+        first, last = range
+        stream_log(client, log_path, first, last, size, partial: true)
+      end
+    rescue Errno::EPIPE, Errno::ECONNRESET
+      # Client went away mid-stream. Not our problem.
+    end
+
+    # Returns:
+    #   nil              — no Range header (client wants the whole file)
+    #   [first, last]    — inclusive byte range, 0-indexed
+    #   :not_satisfiable — Range is well-formed but can't be satisfied
+    #   :bad_range       — Range header is malformed
+    #
+    # Supported forms: "bytes=N-", "bytes=N-M", "bytes=-N" (last N bytes).
+    def parse_range_header(header, size)
+      return nil if header.nil? || header.empty?
+      return :bad_range unless header =~ /\Abytes=(\d*)-(\d*)\z/
+      first_s = Regexp.last_match(1)
+      last_s  = Regexp.last_match(2)
+
+      return :bad_range if first_s.empty? && last_s.empty?
+
+      # Empty file: any numeric Range is not satisfiable.
+      return :not_satisfiable if size.zero?
+
+      if first_s.empty?
+        # suffix form: last N bytes
+        suffix = last_s.to_i
+        return :not_satisfiable if suffix.zero?
+        first = [size - suffix, 0].max
+        last  = size - 1
+      elsif last_s.empty?
+        first = first_s.to_i
+        return :not_satisfiable if first >= size
+        last = size - 1
+      else
+        first = first_s.to_i
+        last  = last_s.to_i
+        return :not_satisfiable if first > last || first >= size
+        last = [last, size - 1].min
+      end
+
+      [first, last]
+    end
+
+    def stream_log(client, path, first, last, size, partial:)
+      length = size.zero? ? 0 : (last - first + 1)
+      status = partial ? 206 : 200
+
+      headers = [
+        "HTTP/1.1 #{status} #{STATUS_REASONS[status]}",
+        "Content-Type: text/plain; charset=utf-8",
+        "Content-Length: #{length}",
+        "Accept-Ranges: bytes",
+        "Cache-Control: no-store",
+        "Connection: close"
+      ]
+      headers << "Content-Range: bytes #{first}-#{last}/#{size}" if partial
+
+      client.write(headers.join("\r\n") + "\r\n\r\n")
+      return if length.zero?
+
+      File.open(path, "rb") do |f|
+        f.seek(first) if first.positive?
+        remaining = length
+        while remaining.positive?
+          chunk = f.read([remaining, LOG_CHUNK_BYTES].min)
+          break if chunk.nil? || chunk.empty?
+          client.write(chunk)
+          remaining -= chunk.bytesize
+        end
+      end
+    end
+
+    def write_range_not_satisfiable(client, size)
+      body = JSON.generate({ "error" => "range not satisfiable" })
+      client.write(
+        "HTTP/1.1 416 Range Not Satisfiable\r\n" \
+        "Content-Type: application/json\r\n" \
+        "Content-Length: #{body.bytesize}\r\n" \
+        "Content-Range: bytes */#{size}\r\n" \
+        "Connection: close\r\n" \
+        "\r\n" \
+        "#{body}"
+      )
     end
 
     def handle_cancel(req, run_id)
