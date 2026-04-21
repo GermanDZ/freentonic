@@ -284,7 +284,74 @@ which is also what makes VNC debugging tractable.
 
 ---
 
-## Step 9 — Cleanup
+## Step 9 — Inspecting and pruning Chrome profiles
+
+Chrome profiles live in the `freentonic-chrome-profile` named volume,
+one subdirectory per `profile_key`. Over time — as tenants come and
+go, credentials rotate, or workflows are retired — you'll want to see
+what's in there and remove stale entries.
+
+### List all profiles
+
+Works whether the server is running or not; spins up a throwaway
+container that read-mounts the volume:
+
+```sh
+docker run --rm -v freentonic-chrome-profile:/profiles:ro alpine \
+  sh -c 'cd /profiles && du -sh */ 2>/dev/null | sort -rh'
+```
+
+Typical output:
+
+```
+28M	ing__owner42/
+24M	revolut__owner42/
+19M	ing__owner99/
+2.1M	acme__demo/
+```
+
+The first column is the profile's on-disk size, the second is the
+`profile_key` (directory name) your web app passes on `/invoke`.
+
+If the server is running, `docker exec` works too:
+
+```sh
+docker exec freentonic-server \
+  sh -c 'cd /home/freentonic/.cache/freentonic/chrome && du -sh */ | sort -rh'
+```
+
+### Remove a single profile by name
+
+**Preferred** — via the `/profiles/prune` HTTP endpoint. It acquires
+the invoke mutex so it can't race an in-flight Chrome session:
+
+```sh
+curl -sS -X POST \
+  -H "Authorization: Bearer $FREENTONIC_INVOKE_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"profile_key":"ing__owner42"}' \
+  http://127.0.0.1:7878/profiles/prune
+# {"deleted":["ing__owner42"],"count":1}
+```
+
+See [invoke-server-api.md](invoke-server-api.md#post-profilesprune) for
+the prefix form (bulk delete by prefix) and full error semantics.
+
+**Escape hatch** — when the server isn't running or you need raw
+filesystem access:
+
+```sh
+docker run --rm -v freentonic-chrome-profile:/profiles alpine \
+  rm -rf /profiles/ing__owner42
+```
+
+Don't use the escape hatch while the server is running: Chrome may be
+holding the profile open, and blowing it out from under a live session
+corrupts the remaining state. Use the API.
+
+---
+
+## Step 10 — Cleanup
 
 ```sh
 ./docker-run-freentonic.sh stop
