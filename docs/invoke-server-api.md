@@ -14,6 +14,7 @@ For deployment and container setup, see
 | `GET` | `/status` | List in-flight invokes. Auth required if token is set. |
 | `POST` | `/invoke` | Run one workflow end-to-end. Blocks until it finishes. |
 | `POST` | `/cancel/{run_id}` | Best-effort SIGTERM to an in-flight invoke. |
+| `GET` | `/runs/{run_id}/log` | Stream (or `Range`-poll) a run's log file. |
 
 Base URL on the host that runs the container: `http://127.0.0.1:7878`
 (configurable via `FREENTONIC_LISTEN_PORT`). All responses are JSON
@@ -284,6 +285,92 @@ If the run id is unknown or the child hasn't been spawned yet
 
 ---
 
+## `GET /runs/{run_id}/log`
+
+Stream the merged stdout+stderr of a run's subprocess. Works for both
+completed runs (reads the final log file) and in-flight runs (reads
+the current bytes and returns — no long-poll, use `Range` to pick up
+where you left off).
+
+**Auth required.**
+
+```sh
+curl -sS -H "Authorization: Bearer $FREENTONIC_INVOKE_TOKEN" \
+  http://127.0.0.1:7878/runs/2026-04-21T12-34-56Z-abc123/log
+```
+
+Response:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 9412
+Accept-Ranges: bytes
+Cache-Control: no-store
+Connection: close
+
+<log bytes>
+```
+
+### Range requests (for live tailing)
+
+Supply a `Range: bytes=<first>-<last>` header to fetch a byte window.
+This is how a live-tail UI can poll without re-fetching the whole log
+on every tick.
+
+| `Range` | Semantics |
+|---|---|
+| *(absent)* | Full file, `200 OK`. |
+| `bytes=N-` | From offset N to end, `206 Partial Content`. |
+| `bytes=N-M` | Inclusive window [N..M], clamped to file end, `206`. |
+| `bytes=-N` | Last N bytes (suffix), `206`. |
+
+The response always includes `Accept-Ranges: bytes` to advertise support.
+A partial response carries `Content-Range: bytes <first>-<last>/<total>`.
+
+### Error statuses
+
+| Status | When |
+|---|---|
+| `400` | `Range` header is malformed (e.g. `kilobytes=…`, both ends empty). |
+| `401` | Missing or wrong bearer token. |
+| `404` | `run_id` charset violates `[A-Za-z0-9_\-:.]{1,64}`, or the run dir / log file doesn't exist, or the realpath escapes the runs root. |
+| `405` | Anything other than `GET`. |
+| `416` | `Range` is well-formed but can't be satisfied (offset past end of file). Response carries `Content-Range: bytes */<total>`. |
+
+### Live-tail caller sketch
+
+```ruby
+offset = 0
+loop do
+  res = Net::HTTP.start("127.0.0.1", 7878) do |h|
+    req = Net::HTTP::Get.new("/runs/#{run_id}/log")
+    req["Authorization"] = "Bearer #{ENV['FREENTONIC_INVOKE_TOKEN']}"
+    req["Range"]         = "bytes=#{offset}-" if offset.positive?
+    h.request(req)
+  end
+
+  break unless %w[200 206].include?(res.code)
+  $stdout.write(res.body)
+
+  # Advance offset by what we just received.
+  if (content_range = res["Content-Range"]) && content_range =~ %r{bytes (\d+)-(\d+)/\d+}
+    offset = Regexp.last_match(2).to_i + 1
+  else
+    offset = res["Content-Length"].to_i
+  end
+
+  sleep 1   # poll interval; tune for your UI
+end
+```
+
+The run is considered finished from the caller's perspective once
+`POST /invoke` returns (the blocking call). After that, the log file
+is stable and `Range` isn't strictly necessary — but it's the same
+code path.
+
+---
+
 ## Artifact retrieval
 
 The server writes per-run artifacts under `/workspace/runs/<run_id>/`,
@@ -474,8 +561,9 @@ console.log(await res.json());
 ## What's NOT in v1
 
 - Parallelism (planned: per-`profile_key` mutex + subprocess port/display pools).
-- Log streaming (`/logs/{run_id}` SSE). Today the log file is written
-  during the run, so the web app can `tail -f` it on the host directly.
+- Server-push log streaming (SSE/chunked). `GET /runs/{run_id}/log` with
+  `Range`-based polling covers the live-tail use case; SSE is a future
+  nicety.
 - Metrics endpoint (`/metrics` Prometheus-style).
 - Retry/backoff built into `/invoke`. Handle retries in the web app.
 - Per-user sockets / multi-tenant auth. One token, one server.
