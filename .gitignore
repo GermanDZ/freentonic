@@ -4,5 +4,6 @@ Gemfile.lock
 pkg/
 coverage/
 tmp/
+.tmp/
 .DS_Store
 .claude/
