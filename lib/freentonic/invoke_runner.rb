@@ -186,7 +186,7 @@ module Freentonic
     end
 
     def spawn_and_wait(env, argv, log_path, timeout_sec, &on_start)
-      log_fd = File.open(log_path, File::WRONLY | File::CREAT | File::TRUNC, 0o640)
+      log_fd = File.open(log_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600)
       begin
         pid = Process.spawn(
           env, *argv,

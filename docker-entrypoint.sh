@@ -1,6 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
+# Container runs as a single user (`freentonic`), so any file we create
+# should be owner-only. This tightens defaults for every child process
+# (Xvfb, x11vnc, novnc_proxy, the ruby freentonic subprocess, and Chrome)
+# so per-run artifacts — logs, screenshots, dumped payloads — don't end up
+# group- or world-readable on a bind-mounted host directory.
+umask 0077
+
 # Start x11vnc + noVNC if FREENTONIC_VNC=1. Shared by both the default
 # server path and the `cli` escape hatch.
 start_vnc_stack_if_enabled() {
