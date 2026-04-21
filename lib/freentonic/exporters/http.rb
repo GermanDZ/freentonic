@@ -54,6 +54,7 @@ module Freentonic
         Array(@options[:headers]).each { |name, value| req[name] = value }
         req.body = ::JSON.generate(with_run_id_meta(payload))
 
+        started_at = Time.now
         resp = begin
           http.request(req)
         rescue Errno::ECONNREFUSED
@@ -63,7 +64,15 @@ module Freentonic
         rescue SocketError => e
           raise ExportError, "http exporter: could not resolve #{uri.host} (#{e.message})"
         end
-        handle_response(resp, url)
+
+        result = handle_response(resp, url)
+        # Emit a success line so the run log doesn't end at "Exporting via
+        # http..." with nothing after — makes in-flight UIs look hung when
+        # they're actually just done. Goes to $stdout to match the
+        # "Exporting via ..." line that the Export stage writes; subprocess
+        # stdout is redirected to the run's log under the invoke server.
+        $stdout.puts "  → #{(@options[:method] || 'POST').to_s.upcase} #{url} → #{resp.code} in #{((Time.now - started_at) * 1000).to_i}ms"
+        result
       end
 
       private
