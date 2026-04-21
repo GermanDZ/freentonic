@@ -98,6 +98,31 @@ response.
 | `chrome.isolated` | no | If `true`, use a throwaway Chrome profile (ignores `profile_key`). Useful for debugging. |
 | `chrome.headless` | no | Passes `--headless=new` to Chrome. Most banks detect and reject this; avoid unless you know the provider tolerates it. |
 
+#### Auto-injection: `meta.freentonic_run_id`
+
+When `export.mode == "http"`, the server's child process runs with
+`FREENTONIC_RUN_ID` set, and the http exporter automatically merges
+that id into the outgoing payload at `meta.freentonic_run_id`:
+
+```json
+{
+  "source_tag": "acme",
+  "accounts":   [...],
+  "meta":       { "freentonic_run_id": "2026-04-21T12-34-56Z-abc123" }
+}
+```
+
+- If the payload already contains a `meta` object, the id is merged
+  into it (other keys are preserved).
+- If the payload already contains `meta.freentonic_run_id` (e.g. set
+  explicitly by the workflow), the existing value is NOT overwritten.
+- If the payload's root is not a JSON object (top-level array, etc.),
+  no injection happens.
+
+This lets the receiver correlate its ingest with the originating
+`/invoke` call without every workflow having to wire the run_id through
+its own `meta:` block.
+
 ### Response — success (HTTP 200)
 
 ```json
