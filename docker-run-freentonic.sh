@@ -15,7 +15,7 @@
 #   FREENTONIC_INVOKE_TOKEN    bearer token for /invoke (REQUIRED for server)
 #   FREENTONIC_LISTEN_PORT     host port to expose the invoke server on (default 7878)
 #   FREENTONIC_CONTAINER_NAME  container name (default freentonic-server)
-#   FREENTONIC_VNC             0|1 (default 0) — expose VNC on 5900 for debug
+#   FREENTONIC_VNC             0|1 (default 1) — expose VNC on 5900 for debug. Set to 0 to skip.
 #   FREENTONIC_CHROME_PROFILE_VOLUME  Docker volume name for the Chrome profile root
 #                                     (default freentonic-chrome-profile)
 
@@ -25,7 +25,7 @@ IMAGE_NAME="${FREENTONIC_IMAGE:-freentonic:latest}"
 CONTAINER_NAME="${FREENTONIC_CONTAINER_NAME:-freentonic-server}"
 CHROME_PROFILE_VOLUME="${FREENTONIC_CHROME_PROFILE_VOLUME:-freentonic-chrome-profile}"
 LISTEN_PORT="${FREENTONIC_LISTEN_PORT:-7878}"
-VNC="${FREENTONIC_VNC:-0}"
+VNC="${FREENTONIC_VNC:-1}"
 
 require_env() {
   local name="$1"
