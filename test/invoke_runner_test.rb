@@ -99,6 +99,7 @@ class InvokeRunnerTest < Minitest::Test
     result = runner.run(request)
 
     assert_equal 0, result.exit_code
+    assert_nil result.error_kind, "success should carry error_kind=nil"
     run_dir = File.join(@runs_dir, request.run_id)
 
     argv = read_stub(run_dir, "argv")
@@ -178,6 +179,30 @@ class InvokeRunnerTest < Minitest::Test
     request = build_request
     result = runner.run(request)
     assert_equal 42, result.exit_code
+    assert_equal "unknown", result.error_kind
+  end
+
+  def test_exit_1_classified_as_user_error
+    stub = write_stub("exit 1")
+    result = build_runner(stub).run(build_request)
+    assert_equal 1, result.exit_code
+    assert_equal "user_error", result.error_kind
+  end
+
+  def test_exit_2_classified_as_export_error
+    stub = write_stub("exit 2")
+    result = build_runner(stub).run(build_request)
+    assert_equal 2, result.exit_code
+    assert_equal "export_error", result.error_kind
+  end
+
+  def test_signal_death_classified_as_signal
+    # bash `kill -TERM $$` kills the shell itself. The parent sees a
+    # signaled status distinct from any watchdog action (timed_out=false).
+    stub = write_stub("kill -TERM $$")
+    result = build_runner(stub).run(build_request)
+    assert_equal "signal", result.error_kind
+    assert_operator result.exit_code, :>=, 128
   end
 
   # ─── timeout ───
@@ -202,6 +227,17 @@ class InvokeRunnerTest < Minitest::Test
     refute_equal 0, result.exit_code, "timed-out child should not exit 0"
     assert result.warnings.any? { |w| w.include?("timeout") }, "expected timeout warning: #{result.warnings.inspect}"
     assert elapsed < 15, "expected child to exit fast on SIGTERM, took #{elapsed}s"
+    assert_equal "timeout", result.error_kind,
+      "timeout must take precedence over the signal that killed the child"
+  end
+
+  def test_classify_error_unit
+    assert_nil             Freentonic::InvokeRunner.classify_error(0, false, false)
+    assert_equal "timeout",      Freentonic::InvokeRunner.classify_error(143, true,  true)
+    assert_equal "signal",       Freentonic::InvokeRunner.classify_error(134, false, true)
+    assert_equal "user_error",   Freentonic::InvokeRunner.classify_error(1,   false, false)
+    assert_equal "export_error", Freentonic::InvokeRunner.classify_error(2,   false, false)
+    assert_equal "unknown",      Freentonic::InvokeRunner.classify_error(42,  false, false)
   end
 
   # ─── traversal & missing workflow already covered in InvokeRequestTest ───

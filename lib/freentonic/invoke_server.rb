@@ -322,6 +322,7 @@ module Freentonic
       [200, {
         "run_id"      => result.run_id,
         "exit_code"   => result.exit_code,
+        "error_kind"  => result.error_kind,
         "duration_ms" => result.duration_ms,
         "artifacts"   => result.artifacts.map(&:to_h),
         "log_path"    => result.log_path,

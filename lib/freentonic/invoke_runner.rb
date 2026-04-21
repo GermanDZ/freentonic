@@ -14,10 +14,31 @@ module Freentonic
   # caller only runs one InvokeRunner#run at a time.
   class InvokeRunner
     Result = Struct.new(
-      :run_id, :exit_code, :duration_ms, :artifacts,
+      :run_id, :exit_code, :error_kind, :duration_ms, :artifacts,
       :log_path, :warnings, :chrome_profile_dir,
       keyword_init: true
     )
+
+    # Maps (exit_code, timed_out, signaled) to a coarse error_kind the web
+    # app can branch on for retry / UX without grepping the log:
+    #   nil          — success (exit_code == 0)
+    #   "timeout"    — the watchdog killed the child after timeout_sec
+    #   "signal"     — child died on a signal (SIGSEGV, SIGBUS, external kill...)
+    #   "user_error" — UserError (CLI exits 1 for bad YAML, missing secrets, etc.)
+    #   "export_error" — ExportError (CLI exits 2 for receiver rejection, etc.)
+    #   "unknown"    — any other non-zero exit code
+    ERROR_KINDS = %w[user_error export_error timeout signal unknown].freeze
+
+    def self.classify_error(exit_code, timed_out, signaled)
+      return nil if exit_code.to_i.zero?
+      return "timeout" if timed_out
+      return "signal"  if signaled
+      case exit_code
+      when 1 then "user_error"
+      when 2 then "export_error"
+      else        "unknown"
+      end
+    end
 
     Artifact = Struct.new(:path, :size, keyword_init: true) do
       def to_h
@@ -88,12 +109,13 @@ module Freentonic
       argv = build_argv(request, secrets_path: secrets_path, run_dir: run_dir)
 
       log_path = File.join(run_dir, "log")
-      exit_code, timed_out = spawn_and_wait(env, argv, log_path, request.timeout_sec, &on_start)
+      exit_code, timed_out, signaled = spawn_and_wait(env, argv, log_path, request.timeout_sec, &on_start)
       warnings << "timeout reached (#{request.timeout_sec}s); child was terminated" if timed_out
 
       Result.new(
         run_id:             request.run_id,
         exit_code:          exit_code,
+        error_kind:         self.class.classify_error(exit_code, timed_out, signaled),
         duration_ms:        ((Time.now - started_at) * 1000).to_i,
         artifacts:          collect_artifacts(run_dir),
         log_path:           relative_artifact_path(log_path),
@@ -227,7 +249,7 @@ module Freentonic
         -1
       end
 
-      [exit_code, timed_out]
+      [exit_code, timed_out, status.signaled?]
     end
 
     def send_signal_to_group(pgid, signal)
