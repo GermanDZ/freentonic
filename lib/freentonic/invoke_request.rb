@@ -197,12 +197,20 @@ module Freentonic
         end
         normalized["url"] = url
 
-        if export["token"]
-          unless export["token"].is_a?(String)
-            raise InvokeError.new(:bad_request, "export.token must be a string")
-          end
-          normalized["token"] = export["token"]
+        # The runner scopes the child ENV (unsetenv_others: true), so the only
+        # way the http exporter sees a token is through export.token → child
+        # FREENTONIC_HTTP_TOKEN. An absent token would silently POST without
+        # Authorization and 401 at the receiver, surfacing as a late
+        # ExportError. Fail fast here instead.
+        token = export["token"]
+        if token.nil?
+          raise InvokeError.new(:bad_request,
+            "export.token is required for mode=http (pass an empty string if the receiver truly expects no Authorization header)")
         end
+        unless token.is_a?(String)
+          raise InvokeError.new(:bad_request, "export.token must be a string")
+        end
+        normalized["token"] = token unless token.empty?
 
         if export["method"]
           method = export["method"].to_s.upcase

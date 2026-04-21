@@ -161,6 +161,20 @@ class InvokeRequestTest < Minitest::Test
     assert_equal 400, err.status_code
   end
 
+  def test_export_http_requires_token
+    err = assert_raises(Freentonic::InvokeError) do
+      parse(base_body.merge("export" => { "mode" => "http", "url" => "http://host/x" }))
+    end
+    assert_equal 400, err.status_code
+    assert_match(/export\.token is required/, err.message)
+  end
+
+  def test_export_http_allows_empty_token_as_explicit_opt_out
+    req = parse(base_body.merge("export" => { "mode" => "http", "url" => "http://host/x", "token" => "" }))
+    refute req.export.key?("token"),
+      "empty-string token should not propagate into the normalized export (opts out of Authorization)"
+  end
+
   def test_export_http_accepts_token_and_headers
     req = parse(base_body.merge("export" => {
       "mode" => "http",

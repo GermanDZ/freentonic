@@ -87,7 +87,7 @@ response.
 | `export` | no | Output configuration. If omitted, you must use a workflow that has a `--dump-raw`-equivalent — in practice always include this. |
 | `export.mode` | yes *(within export)* | One of `http`, `json`, `jsonl`, `csv`. |
 | `export.url` | if `mode=http` | Full receiver URL (include the path — `https://host/api/push`, not just `https://host`). |
-| `export.token` | no | Passed to the child via `FREENTONIC_HTTP_TOKEN` env var; never appears on argv or in logs. |
+| `export.token` | if `mode=http` | Bearer token for the receiver. Passed to the child via `FREENTONIC_HTTP_TOKEN` env var; never appears on argv or in logs. Pass an empty string (`""`) to explicitly opt out of sending an `Authorization` header. |
 | `export.method` | no | `POST` (default) or `PUT`. |
 | `export.content_type` | no | Default `application/json`. |
 | `export.headers` | no | Extra request headers. Names match HTTP token charset; values cannot contain CRLF. |
@@ -136,6 +136,7 @@ response.
 | `400` | `"... is required and must be a non-empty string"` | Required field missing. |
 | `400` | `"... contains invalid characters or is too long"` | Charset/length violation. |
 | `400` | `"export.url is required for mode=http"` etc. | Export block is malformed. |
+| `400` | `"export.token is required for mode=http ..."` | `mode=http` with no token. Pass `""` to opt out of the `Authorization` header. |
 | `401` | `"missing or invalid bearer token"` | Auth failure. |
 | `404` | `"workflow not found: ..."` | Workflow path doesn't exist under the root. |
 | `404` | `"workflow not found under workflows root"` | Path traversal (`..`, absolute path) blocked. |
