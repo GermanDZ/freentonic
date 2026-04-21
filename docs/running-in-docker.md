@@ -116,7 +116,7 @@ docker volume rm freentonic-chrome-profile
 
 ## Debugging with VNC
 
-Enable VNC and publish port 5900:
+Enable VNC and publish ports 5900 (raw VNC) + 6080 (noVNC browser client):
 
 ```sh
 FREENTONIC_VNC=1 ./docker-run-freentonic.sh cli \
@@ -125,7 +125,12 @@ FREENTONIC_VNC=1 ./docker-run-freentonic.sh cli \
   --export json --export-path /workspace/out.json
 ```
 
-On macOS, `open vnc://localhost:5900`, password `freentonic`.
+Two ways to attach:
+
+- Browser (no client install): <http://localhost:6080/vnc.html?host=localhost&port=6080&password=freentonic&autoconnect=true>
+- Native macOS client: `open vnc://localhost:5900`
+
+Password: `freentonic`.
 
 ## Running without the wrapper
 

@@ -59,7 +59,11 @@ cmd_server() {
   )
 
   if [ "${VNC}" = "1" ]; then
-    args+=(-p "127.0.0.1:5900:5900" -e "FREENTONIC_VNC=1")
+    args+=(
+      -p "127.0.0.1:5900:5900"
+      -p "127.0.0.1:6080:6080"
+      -e "FREENTONIC_VNC=1"
+    )
   fi
 
   args+=("${IMAGE_NAME}")
@@ -67,6 +71,9 @@ cmd_server() {
   echo "starting ${CONTAINER_NAME} (workflows=${workflows_dir}, runs=${runs_dir})"
   "${args[@]}"
   echo "listening on http://127.0.0.1:${LISTEN_PORT}"
+  if [ "${VNC}" = "1" ]; then
+    echo "noVNC at http://127.0.0.1:6080/vnc.html?host=localhost&port=6080&password=freentonic&autoconnect=true"
+  fi
 }
 
 cmd_stop() {
@@ -114,7 +121,11 @@ cmd_cli() {
   )
 
   if [ "${VNC}" = "1" ]; then
-    args+=(-p "127.0.0.1:5900:5900" -e "FREENTONIC_VNC=1")
+    args+=(
+      -p "127.0.0.1:5900:5900"
+      -p "127.0.0.1:6080:6080"
+      -e "FREENTONIC_VNC=1"
+    )
   fi
 
   if [ -n "${FREENTONIC_SECRETS_FILE:-}" ]; then

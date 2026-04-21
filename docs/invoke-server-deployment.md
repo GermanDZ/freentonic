@@ -183,7 +183,7 @@ the server logs a warning if missing).
 | `FREENTONIC_RUNS_DIR` | `/workspace/runs` | Per-run artifact root inside the container. |
 | `FREENTONIC_TMPFS_DIR` | `/dev/shm/freentonic/runs` | Where inline credentials are written during a run (auto-cleaned). |
 | `FREENTONIC_CHROME_PROFILE_ROOT` | `/home/freentonic/.cache/freentonic/chrome` | Chrome profile parent. Subdirectories are created per `profile_key`. |
-| `FREENTONIC_VNC` | `1` | Starts x11vnc on `:5900` for debugging. Password: `freentonic`. The wrapper publishes `-p 127.0.0.1:5900:5900` whenever this is `1`. Set to `0` to skip VNC entirely. |
+| `FREENTONIC_VNC` | `1` | Starts x11vnc on `:5900` and noVNC (HTML client) on `:6080`. Password: `freentonic`. The wrapper publishes both ports on `127.0.0.1` whenever this is `1`. Set to `0` to skip both. See [Step 8](#step-8--debugging-with-vnc). |
 
 The wrapper script `docker-run-freentonic.sh` also reads:
 
@@ -260,13 +260,41 @@ subprocess re-loads them.
 
 ## Step 8 — Debugging with VNC
 
-Set `FREENTONIC_VNC=1` and publish port 5900:
+When `FREENTONIC_VNC=1` is set, the container starts **two** debug
+surfaces pointing at the same Chrome session:
+
+- **Raw VNC** on port **5900** — for a native VNC viewer.
+- **noVNC** on port **6080** — an HTML+WebSocket client bundled in
+  the image, so anyone with a browser can attach without installing a
+  VNC app. `websockify` proxies `localhost:6080` → `localhost:5900`
+  inside the container.
+
+Both are gated on the single `FREENTONIC_VNC` toggle. There is no
+separate sidecar container.
+
+### Using the wrapper
+
+```sh
+FREENTONIC_VNC=1 ./docker-run-freentonic.sh server
+```
+
+This publishes 5900 and 6080 on `127.0.0.1` and prints a ready-to-click URL:
+
+```
+noVNC at http://127.0.0.1:6080/vnc.html?host=localhost&port=6080&password=freentonic&autoconnect=true
+```
+
+Open that URL in any browser and you see the live Chrome window
+during each invoke. Password is `freentonic`.
+
+### Raw `docker run`
 
 ```sh
 docker run -d \
   --name freentonic-server \
   -p 127.0.0.1:7878:7878 \
   -p 127.0.0.1:5900:5900 \
+  -p 127.0.0.1:6080:6080 \
   -e FREENTONIC_VNC=1 \
   -e "FREENTONIC_INVOKE_TOKEN=$FREENTONIC_INVOKE_TOKEN" \
   -v "$FREENTONIC_WORKFLOWS_DIR:/home/freentonic/workflows:ro" \
@@ -276,8 +304,18 @@ docker run -d \
   freentonic:latest
 ```
 
-On macOS: `open vnc://localhost:5900`, password `freentonic`.
-You see the live Chrome window during each invoke.
+Native macOS client: `open vnc://localhost:5900`, password `freentonic`.
+
+### Security note
+
+The noVNC HTML client carries the Chrome session of every tenant that
+runs while you're watching — v1 is serialized, so you see them
+sequentially. Keep `-p 127.0.0.1:6080:6080` on loopback only; the
+password is hard-coded to `freentonic`, which is fine for a local
+debug bind but trivial to brute-force over a network. If you need to
+attach from another machine, tunnel through SSH (`ssh -L
+6080:127.0.0.1:6080 host`) rather than publishing to a non-loopback
+interface.
 
 Because v1 is serialized, you only ever see one workflow at a time —
 which is also what makes VNC debugging tractable.

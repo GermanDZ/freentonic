@@ -1,6 +1,28 @@
 #!/bin/bash
 set -euo pipefail
 
+# Start x11vnc + noVNC if FREENTONIC_VNC=1. Shared by both the default
+# server path and the `cli` escape hatch.
+start_vnc_stack_if_enabled() {
+  if [ "${FREENTONIC_VNC:-0}" != "1" ]; then
+    return 0
+  fi
+  x11vnc -display :99 -forever -passwd freentonic -quiet &
+  sleep 0.3
+  # noVNC wrapper launches websockify + serves the HTML client. Background
+  # it and let its stdout/stderr land in the container logs; useful for
+  # diagnosing the rare port-in-use / python-missing problem.
+  /opt/novnc/utils/novnc_proxy \
+    --vnc localhost:5900 \
+    --listen 6080 \
+    --web /opt/novnc &
+  sleep 0.3
+  echo "[entrypoint] VNC ready. Connect with:"
+  echo "[entrypoint]   Browser:   http://localhost:6080/vnc.html?host=localhost&port=6080&password=freentonic&autoconnect=true"
+  echo "[entrypoint]   Raw VNC:   vnc://localhost:5900"
+  echo "[entrypoint]   Password:  freentonic"
+}
+
 # Backward-compat escape hatch: `docker run freentonic:latest cli --workflow ...`
 # runs the single-shot CLI exactly like before the server refactor. Handy for
 # local debugging; the default mode is the long-running invoke server.
@@ -10,11 +32,7 @@ if [ "${1:-}" = "cli" ]; then
   Xvfb :99 -screen 0 1920x1080x24 &>/dev/null &
   export DISPLAY=:99
   sleep 0.3
-  if [ "${FREENTONIC_VNC:-0}" = "1" ]; then
-    x11vnc -display :99 -forever -passwd freentonic -quiet &
-    sleep 0.3
-    echo "[entrypoint] VNC server ready at vnc://localhost:5900 (password: freentonic)"
-  fi
+  start_vnc_stack_if_enabled
   exec ruby -I/opt/freentonic/lib /opt/freentonic/bin/freentonic --no-sandbox "$@"
 fi
 
@@ -40,15 +58,7 @@ Xvfb :99 -screen 0 1920x1080x24 &>/dev/null &
 export DISPLAY=:99
 sleep 0.3
 
-# Optional VNC for interactive debugging.
-if [ "${FREENTONIC_VNC:-0}" = "1" ]; then
-  x11vnc -display :99 -forever -passwd freentonic -quiet &
-  sleep 0.3
-  echo "[entrypoint] VNC server ready. Connect with:"
-  echo "[entrypoint]   macOS:  open vnc://localhost:5900"
-  echo "[entrypoint]   Linux:  vncviewer localhost:5900"
-  echo "[entrypoint]   Password: freentonic"
-fi
+start_vnc_stack_if_enabled
 
 # Inside a container, binding to 127.0.0.1 would be unreachable from the host.
 # Docker's port forwarding (e.g. -p 127.0.0.1:7878:7878) requires the server

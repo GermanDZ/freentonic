@@ -1,8 +1,26 @@
+# ─── builder stage: fetch noVNC + websockify ─────────────────────────────
+# Isolated so git + its transitive deps don't end up in the final image.
+# Pinned versions; bump when you want a noVNC UI refresh.
+FROM debian:bookworm-slim AS novnc-builder
+
+ARG NOVNC_REF=v1.5.0
+ARG WEBSOCKIFY_REF=v0.12.0
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && git clone --depth 1 -b "${NOVNC_REF}"      https://github.com/novnc/noVNC       /opt/novnc \
+  && git clone --depth 1 -b "${WEBSOCKIFY_REF}" https://github.com/novnc/websockify  /opt/novnc/utils/websockify \
+  && rm -rf /opt/novnc/.git /opt/novnc/utils/websockify/.git /opt/novnc/tests
+
+
+# ─── final stage ──────────────────────────────────────────────────────────
 FROM ruby:3.2-slim-bookworm
 
 # Chromium for CDP, procps for pgrep (used by ChromeCdp process management),
 # fonts for proper page rendering, xvfb + x11vnc for non-headless mode,
-# tini so PID 1 reaps the per-invoke child processes cleanly.
+# tini so PID 1 reaps the per-invoke child processes cleanly,
+# python3 so websockify can run (pure-python, no pip deps needed).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     procps \
@@ -12,10 +30,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     x11vnc \
     tini \
+    python3 \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for defense-in-depth.
 RUN groupadd -r freentonic && useradd -r -g freentonic -m -s /bin/bash freentonic
+
+# noVNC static assets + websockify. Runs under the freentonic user at
+# runtime; read-only access is enough.
+COPY --from=novnc-builder /opt/novnc /opt/novnc
 
 WORKDIR /opt/freentonic
 COPY lib/ lib/
@@ -43,7 +66,9 @@ USER freentonic
 ENV HOME=/home/freentonic
 ENV PATH="/opt/freentonic/bin:${PATH}"
 
-# 5900: optional VNC (debug). 7878: invoke HTTP server.
-EXPOSE 5900 7878
+# 5900: raw VNC (optional, debug).
+# 6080: noVNC HTML client (optional, debug) — same content as 5900, over HTTP+WebSocket.
+# 7878: invoke HTTP server.
+EXPOSE 5900 6080 7878
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
