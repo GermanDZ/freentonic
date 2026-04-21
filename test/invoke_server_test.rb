@@ -15,12 +15,13 @@ require "freentonic/invoke_runner"
 # Focus is on /runs/:run_id/log (#3 feature) plus the basics of /healthz
 # and auth. Full /invoke coverage is in invoke_runner_test.rb.
 class InvokeServerTest < Minitest::Test
-  FakeRunner = Struct.new(:runs_dir, :workflows_dir)
+  FakeRunner = Struct.new(:runs_dir, :workflows_dir, :chrome_profile_root)
 
   def setup
-    @runs_dir      = Dir.mktmpdir("freentonic-server-test-runs-")
-    @workflows_dir = Dir.mktmpdir("freentonic-server-test-workflows-")
-    @runner        = FakeRunner.new(@runs_dir, @workflows_dir)
+    @runs_dir            = Dir.mktmpdir("freentonic-server-test-runs-")
+    @workflows_dir       = Dir.mktmpdir("freentonic-server-test-workflows-")
+    @chrome_profile_root = Dir.mktmpdir("freentonic-server-test-chrome-")
+    @runner              = FakeRunner.new(@runs_dir, @workflows_dir, @chrome_profile_root)
     @port          = find_free_port
     @token         = "test-token-#{rand(1_000_000)}"
 
@@ -40,6 +41,7 @@ class InvokeServerTest < Minitest::Test
     @thread.join(3)
     FileUtils.rm_rf(@runs_dir)
     FileUtils.rm_rf(@workflows_dir)
+    FileUtils.rm_rf(@chrome_profile_root)
   end
 
   # ── helpers ───────────────────────────────────────────────
@@ -67,6 +69,15 @@ class InvokeServerTest < Minitest::Test
   def get(path, headers = {})
     uri = URI("http://127.0.0.1:#{@port}#{path}")
     req = Net::HTTP::Get.new(uri.request_uri)
+    headers.each { |k, v| req[k] = v }
+    Net::HTTP.start(uri.host, uri.port) { |h| h.request(req) }
+  end
+
+  def post(path, body, headers = {})
+    uri = URI("http://127.0.0.1:#{@port}#{path}")
+    req = Net::HTTP::Post.new(uri.request_uri)
+    req["Content-Type"] = "application/json"
+    req.body = body.is_a?(String) ? body : JSON.generate(body)
     headers.each { |k, v| req[k] = v }
     Net::HTTP.start(uri.host, uri.port) { |h| h.request(req) }
   end
@@ -220,5 +231,125 @@ class InvokeServerTest < Minitest::Test
     write_log("run-a", "hi")
     res = get("/runs/run-a", auth)
     assert_equal "404", res.code
+  end
+
+  # ── POST /profiles/prune ──────────────────────────────────
+
+  def make_profile(key, file_name: "Cookies", file_bytes: "cookies-blob")
+    dir = File.join(@chrome_profile_root, key)
+    FileUtils.mkdir_p(dir)
+    File.write(File.join(dir, file_name), file_bytes)
+    dir
+  end
+
+  def profile_exists?(key)
+    Dir.exist?(File.join(@chrome_profile_root, key))
+  end
+
+  def test_prune_requires_auth
+    res = post("/profiles/prune", { "profile_key" => "x" })
+    assert_equal "401", res.code
+  end
+
+  def test_prune_rejects_both_profile_key_and_prefix
+    res = post("/profiles/prune", { "profile_key" => "a", "prefix" => "b" }, auth)
+    assert_equal "400", res.code
+  end
+
+  def test_prune_rejects_neither_profile_key_nor_prefix
+    res = post("/profiles/prune", {}, auth)
+    assert_equal "400", res.code
+  end
+
+  def test_prune_rejects_invalid_body
+    res = post("/profiles/prune", "{not json", auth)
+    assert_equal "400", res.code
+  end
+
+  def test_prune_rejects_profile_key_charset
+    res = post("/profiles/prune", { "profile_key" => "bad/key" }, auth)
+    assert_equal "400", res.code
+  end
+
+  def test_prune_rejects_traversal_in_profile_key
+    res = post("/profiles/prune", { "profile_key" => "../etc" }, auth)
+    # Either charset (slash) or realpath guard catches it; both acceptable.
+    assert_equal "400", res.code
+  end
+
+  def test_prune_exact_profile_deletes_dir
+    make_profile("ing__owner42")
+    assert profile_exists?("ing__owner42")
+
+    res = post("/profiles/prune", { "profile_key" => "ing__owner42" }, auth)
+    assert_equal "200", res.code
+    body = JSON.parse(res.body)
+    assert_equal 1, body["count"]
+    assert_equal ["ing__owner42"], body["deleted"]
+    refute profile_exists?("ing__owner42"), "profile dir should be gone"
+  end
+
+  def test_prune_exact_profile_missing_is_idempotent
+    res = post("/profiles/prune", { "profile_key" => "never-existed" }, auth)
+    assert_equal "200", res.code
+    body = JSON.parse(res.body)
+    assert_equal 0, body["count"]
+    assert_equal [], body["deleted"]
+  end
+
+  def test_prune_by_prefix_deletes_matching
+    make_profile("ing__owner42")
+    make_profile("ing__owner99")
+    make_profile("revolut__owner42")
+
+    res = post("/profiles/prune", { "prefix" => "ing__" }, auth)
+    assert_equal "200", res.code
+    body = JSON.parse(res.body)
+    assert_equal 2, body["count"]
+    assert_equal %w[ing__owner42 ing__owner99], body["deleted"].sort
+    refute profile_exists?("ing__owner42")
+    refute profile_exists?("ing__owner99")
+    assert profile_exists?("revolut__owner42"), "non-matching profile must survive"
+  end
+
+  def test_prune_by_prefix_no_matches
+    make_profile("revolut__owner42")
+    res = post("/profiles/prune", { "prefix" => "ing__" }, auth)
+    assert_equal "200", res.code
+    body = JSON.parse(res.body)
+    assert_equal 0, body["count"]
+    assert profile_exists?("revolut__owner42")
+  end
+
+  def test_prune_by_empty_prefix_is_rejected
+    res = post("/profiles/prune", { "prefix" => "" }, auth)
+    assert_equal "400", res.code
+  end
+
+  def test_prune_by_prefix_charset_rejected
+    res = post("/profiles/prune", { "prefix" => "bad/prefix" }, auth)
+    assert_equal "400", res.code
+  end
+
+  def test_prune_skips_symlink_escaping_root
+    # Create a symlink inside the profile root pointing at /tmp/<something>.
+    # A charset-matching prefix should still NOT delete the symlink target.
+    outside = Dir.mktmpdir("freentonic-outside-")
+    link_name = "ing__symlink"
+    File.symlink(outside, File.join(@chrome_profile_root, link_name))
+
+    res = post("/profiles/prune", { "prefix" => "ing__" }, auth)
+    assert_equal "200", res.code
+    body = JSON.parse(res.body)
+    refute_includes body["deleted"], link_name, "symlink must not appear in deleted list"
+    assert Dir.exist?(outside), "symlink target outside the profile root must survive"
+  ensure
+    FileUtils.rm_rf(outside) if outside
+    File.unlink(File.join(@chrome_profile_root, link_name)) rescue nil
+  end
+
+  def test_prune_405_on_get
+    res = get("/profiles/prune", auth)
+    assert_equal "405", res.code
   end
 end

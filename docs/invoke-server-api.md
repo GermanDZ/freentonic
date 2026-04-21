@@ -15,6 +15,7 @@ For deployment and container setup, see
 | `POST` | `/invoke` | Run one workflow end-to-end. Blocks until it finishes. |
 | `POST` | `/cancel/{run_id}` | Best-effort SIGTERM to an in-flight invoke. |
 | `GET` | `/runs/{run_id}/log` | Stream (or `Range`-poll) a run's log file. |
+| `POST` | `/profiles/prune` | Delete one or more Chrome profile directories. |
 
 Base URL on the host that runs the container: `http://127.0.0.1:7878`
 (configurable via `FREENTONIC_LISTEN_PORT`). All responses are JSON
@@ -368,6 +369,94 @@ The run is considered finished from the caller's perspective once
 `POST /invoke` returns (the blocking call). After that, the log file
 is stable and `Range` isn't strictly necessary — but it's the same
 code path.
+
+---
+
+## `POST /profiles/prune`
+
+Delete one or more Chrome profile directories from the chrome profile
+root. Useful when a user rotates credentials, uninstalls a provider,
+or needs a fresh-login reset. **Auth required.**
+
+The request acquires the server's invoke mutex before touching the
+filesystem, so a prune can never race an in-flight Chrome session —
+it just queues behind whatever `/invoke` is running.
+
+### Request
+
+Exactly one of `profile_key` or `prefix` must be provided.
+
+```json
+{ "profile_key": "ing__owner42" }
+```
+
+```json
+{ "prefix": "ing__" }
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `profile_key` | string | Exact directory name under the chrome profile root. Charset `[A-Za-z0-9_.\-]{1,128}`. |
+| `prefix` | string | Non-empty prefix; every directory whose name starts with it is removed. Same charset as `profile_key`. Empty strings rejected with 400 to prevent accidental full wipes. |
+
+### Response — success (HTTP 200)
+
+```json
+{
+  "deleted": ["ing__owner42", "ing__owner99"],
+  "count":   2
+}
+```
+
+- `deleted` is sorted alphabetically.
+- For the `profile_key` form, `deleted` has either 1 entry (existed and was removed) or 0 entries (already gone).
+- For the `prefix` form, `deleted` contains every directory actually removed; missing matches are not an error.
+- Both forms are **idempotent**: retrying returns `count: 0` the second time.
+
+### Errors
+
+| Status | When |
+|---|---|
+| `400` | Malformed JSON; both `profile_key` and `prefix` supplied; neither supplied; charset violation; empty prefix. |
+| `401` | Missing or wrong bearer token. |
+| `405` | Anything other than `POST`. |
+
+### Examples
+
+Reset a single user's cached Chrome state after they change their bank password:
+
+```sh
+curl -sS \
+  -H "Authorization: Bearer $FREENTONIC_INVOKE_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"profile_key":"ing__owner42"}' \
+  http://127.0.0.1:7878/profiles/prune
+# {"deleted":["ing__owner42"],"count":1}
+```
+
+Wipe every profile for a deprecated provider:
+
+```sh
+curl -sS \
+  -H "Authorization: Bearer $FREENTONIC_INVOKE_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"prefix":"old_bank__"}' \
+  http://127.0.0.1:7878/profiles/prune
+# {"deleted":["old_bank__a","old_bank__b"],"count":2}
+```
+
+### Safety notes
+
+- **Symlinks are skipped** even if their names match the prefix. The handler
+  only removes plain directories whose realpath stays under the chrome
+  profile root, so a malicious or accidental symlink inside the root can't
+  be used to delete anything outside it.
+- **Isolated-mode profiles** (from `"chrome": {"isolated": true}` invokes)
+  live under `Dir.mktmpdir` outside the chrome profile root and are
+  auto-cleaned by the runner. Prune does not touch them.
+- **There is no "delete everything" shortcut.** If you really want to wipe
+  all profiles, `docker volume rm freentonic-chrome-profile` is the
+  authoritative reset (see the deployment doc).
 
 ---
 

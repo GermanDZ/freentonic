@@ -3,6 +3,9 @@
 require "socket"
 require "json"
 require "time"
+require "fileutils"
+
+require_relative "invoke_request"
 
 module Freentonic
   # Long-running HTTP server that accepts /invoke requests and hands each one
@@ -252,10 +255,12 @@ module Freentonic
         handle_status(request)
       when method == "POST" && path == "/invoke"
         handle_invoke(request)
+      when method == "POST" && path == "/profiles/prune"
+        handle_prune_profiles(request)
       when path.start_with?("/cancel/")
         return method_not_allowed unless method == "POST"
         handle_cancel(request, path[("/cancel/".length)..])
-      when path == "/healthz" || path == "/status" || path == "/invoke" || path.start_with?("/cancel/")
+      when path == "/healthz" || path == "/status" || path == "/invoke" || path == "/profiles/prune" || path.start_with?("/cancel/")
         method_not_allowed
       else
         [404, { "error" => "not found" }]
@@ -470,6 +475,96 @@ module Freentonic
         "\r\n" \
         "#{body}"
       )
+    end
+
+    # POST /profiles/prune
+    #
+    # Body must contain exactly one of:
+    #   { "profile_key": "<key>" }  — delete one profile directory
+    #   { "prefix":      "<str>" }  — delete every profile dir whose name starts with <str>
+    #
+    # Acquires the invoke mutex, so a prune can never race an in-flight
+    # Chrome session (v1 serialization). Deleted paths are charset-validated
+    # and realpath-guarded against escaping the chrome profile root.
+    def handle_prune_profiles(req)
+      return unauthorized unless authenticated?(req)
+
+      body = parse_json_body(req)
+      return [400, { "error" => "invalid or missing JSON body" }] if body.nil?
+
+      profile_key = body["profile_key"]
+      prefix      = body["prefix"]
+
+      if profile_key && prefix
+        return [400, { "error" => "provide exactly one of profile_key or prefix, not both" }]
+      end
+      if profile_key.nil? && prefix.nil?
+        return [400, { "error" => "provide one of profile_key or prefix" }]
+      end
+
+      root = @runner.chrome_profile_root
+
+      begin
+        deleted = @invoke_mutex.synchronize do
+          if profile_key
+            prune_exact_profile(root, profile_key)
+          else
+            prune_profiles_by_prefix(root, prefix)
+          end
+        end
+      rescue InvokeError => e
+        return [e.status_code, { "error" => e.message }]
+      end
+
+      [200, { "deleted" => deleted, "count" => deleted.size }]
+    end
+
+    PROFILE_KEY_PATTERN_SRV = /\A[A-Za-z0-9_.\-]{1,128}\z/.freeze
+
+    def prune_exact_profile(root, profile_key)
+      unless profile_key.is_a?(String) && profile_key =~ PROFILE_KEY_PATTERN_SRV
+        raise InvokeError.new(:bad_request,
+          "profile_key has invalid characters or is too long")
+      end
+
+      target = safe_profile_path(root, profile_key)
+      raise InvokeError.new(:bad_request, "profile_key escapes the profile root") if target.nil?
+      return [] unless Dir.exist?(target)
+
+      FileUtils.rm_rf(target)
+      [profile_key]
+    end
+
+    def prune_profiles_by_prefix(root, prefix)
+      unless prefix.is_a?(String) && !prefix.empty? && prefix =~ PROFILE_KEY_PATTERN_SRV
+        raise InvokeError.new(:bad_request,
+          "prefix must be a non-empty string of [A-Za-z0-9_.-] up to 128 chars")
+      end
+
+      return [] unless Dir.exist?(root)
+      root_real = File.realpath(root)
+
+      deleted = []
+      Dir.each_child(root).sort.each do |name|
+        next unless name.start_with?(prefix)
+        # Defense-in-depth: skip anything that isn't a plain directory or
+        # whose realpath escapes the profile root (symlink tricks, etc.).
+        target = File.join(root, name)
+        next unless File.directory?(target) && !File.symlink?(target)
+        real = File.realpath(target) rescue nil
+        next if real.nil? || !real.start_with?(root_real + File::SEPARATOR)
+
+        FileUtils.rm_rf(target)
+        deleted << name
+      end
+      deleted
+    end
+
+    def safe_profile_path(root, key)
+      candidate = File.expand_path(File.join(root, key))
+      root_abs  = File.expand_path(root)
+      return nil unless candidate.start_with?(root_abs + File::SEPARATOR)
+      candidate
     end
 
     def handle_cancel(req, run_id)
