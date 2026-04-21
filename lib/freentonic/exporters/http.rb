@@ -52,7 +52,7 @@ module Freentonic
           req["Authorization"] = "Bearer #{token}"
         end
         Array(@options[:headers]).each { |name, value| req[name] = value }
-        req.body = ::JSON.generate(payload)
+        req.body = ::JSON.generate(with_run_id_meta(payload))
 
         resp = begin
           http.request(req)
@@ -79,6 +79,26 @@ module Freentonic
 
       def resolved_token
         @options[:token] || ENV["FREENTONIC_HTTP_TOKEN"]
+      end
+
+      # When the invoke server sets FREENTONIC_RUN_ID on the child process,
+      # merge it into payload["meta"]["freentonic_run_id"] so the receiver
+      # can correlate its ingest with the originating invoke. An explicit
+      # meta.freentonic_run_id already set by the workflow takes precedence
+      # (we never clobber). Payloads whose root isn't a Hash are returned
+      # as-is — top-level arrays or primitives can't carry a meta key.
+      def with_run_id_meta(payload)
+        run_id = ENV["FREENTONIC_RUN_ID"]
+        return payload if run_id.nil? || run_id.empty?
+        return payload unless payload.is_a?(Hash)
+
+        existing_meta = payload["meta"]
+        if existing_meta.is_a?(Hash)
+          return payload if existing_meta.key?("freentonic_run_id")
+          payload.merge("meta" => existing_meta.merge("freentonic_run_id" => run_id))
+        else
+          payload.merge("meta" => { "freentonic_run_id" => run_id })
+        end
       end
 
       def handle_response(resp, url)
