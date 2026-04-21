@@ -779,7 +779,12 @@ module Freentonic
           path = File.join(dir, filename)
         end
 
-        File.binwrite(path, Base64.decode64(data))
+        # Explicit 0600 so screenshots of bank pages (balances, transactions,
+        # 2FA codes mid-flow) aren't group/world-readable even when the
+        # umask hasn't been tightened (e.g. outside the container).
+        File.open(path, File::WRONLY | File::CREAT | File::TRUNC | File::BINARY, 0o600) do |f|
+          f.write(Base64.decode64(data))
+        end
         @stderr.puts "    screenshot saved: #{path}"
       end
 

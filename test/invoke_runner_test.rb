@@ -160,6 +160,17 @@ class InvokeRunnerTest < Minitest::Test
     refute Dir.exist?(tmpfs_run), "tmpfs run dir should be cleaned up: #{tmpfs_run}"
   end
 
+  def test_log_file_is_written_with_mode_0600
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    request = build_request
+    runner.run(request)
+    log_path = File.join(@runs_dir, request.run_id, "log")
+    mode = File.stat(log_path).mode & 0o777
+    assert_equal 0o600, mode,
+      "log file must be owner-only (got #{mode.to_s(8).rjust(3, "0")})"
+  end
+
   def test_artifact_list_includes_files_written_during_run
     stub = write_stub(%(touch "$FREENTONIC_RUN_DIR/evidence.png"\nexit 0))
     runner = build_runner(stub)
