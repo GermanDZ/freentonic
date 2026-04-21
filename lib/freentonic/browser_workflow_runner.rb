@@ -763,10 +763,22 @@ module Freentonic
         data = result&.dig("data")
         raise UserError, "screenshot: empty response from Chrome" unless data
 
-        timestamp = Time.now.strftime("%Y%m%d-%H%M%S")
-        filename = "freentonic-#{label}-#{timestamp}.png"
-        dir = ["/workspace", Dir.pwd].find { |d| File.directory?(d) && File.writable?(d) } || Dir.pwd
-        path = File.join(dir, filename)
+        run_dir = ENV["FREENTONIC_RUN_DIR"]
+        run_id  = ENV["FREENTONIC_RUN_ID"]
+
+        now = Time.now
+        timestamp = now.strftime("%Y%m%d-%H%M%S-") + format("%03d", (now.usec / 1000))
+
+        if run_dir && File.directory?(run_dir) && File.writable?(run_dir)
+          prefix = run_id && !run_id.empty? ? "#{run_id}-" : ""
+          filename = "#{prefix}freentonic-#{label}-#{timestamp}.png"
+          path = File.join(run_dir, filename)
+        else
+          filename = "freentonic-#{label}-#{timestamp}.png"
+          dir = ["/workspace", Dir.pwd].find { |d| File.directory?(d) && File.writable?(d) } || Dir.pwd
+          path = File.join(dir, filename)
+        end
+
         File.binwrite(path, Base64.decode64(data))
         @stderr.puts "    screenshot saved: #{path}"
       end
