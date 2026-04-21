@@ -30,8 +30,16 @@ See **[docs/getting-started.md](docs/getting-started.md)** for the
 full step-by-step guide covering multiple export formats, offline
 iteration, and pushing to an API.
 
-Prefer Docker? See **[docs/running-in-docker.md](docs/running-in-docker.md)**
-— no Ruby or Chrome install needed on your host.
+Prefer Docker? Two paths:
+
+- **Run freentonic as a long-running HTTP server** that your web app
+  drives over `/invoke` — see
+  **[docs/invoke-server-deployment.md](docs/invoke-server-deployment.md)**
+  and **[docs/invoke-server-api.md](docs/invoke-server-api.md)**. This
+  is the recommended path for automation across multiple providers /
+  credentials.
+- **Run one-off workflows in a throwaway container** from your
+  terminal — see **[docs/running-in-docker.md](docs/running-in-docker.md)**.
 
 ## The pipeline
 
