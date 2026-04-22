@@ -26,6 +26,12 @@ module Freentonic
     MAX_HEADER_BYTES = 16 * 1024
     READ_TIMEOUT    = 30
 
+    # Cap on concurrent connection handler threads. /invoke is serialized by
+    # @invoke_mutex anyway; this cap protects us from log-tail clients (or
+    # slow/stuck clients) that don't. When exceeded, new connections get a
+    # 503 with Retry-After and the socket closes.
+    MAX_CONCURRENT_CONNECTIONS = 64
+
     CANCEL_GRACE_SECONDS = 10
 
     STATUS_REASONS = {
@@ -53,7 +59,8 @@ module Freentonic
       invoke_token: nil,
       listen_addr: DEFAULT_ADDR,
       listen_port: DEFAULT_PORT,
-      logger: $stdout
+      logger: $stdout,
+      max_concurrent_connections: MAX_CONCURRENT_CONNECTIONS
     )
       @runner          = runner
       @invoke_token    = (invoke_token && !invoke_token.empty?) ? invoke_token : nil
@@ -61,11 +68,14 @@ module Freentonic
       @listen_port     = listen_port
       @logger          = logger
 
-      @invoke_mutex    = Mutex.new
-      @in_flight_mutex = Mutex.new
-      @in_flight       = {}
-      @shutting_down   = false
-      @server_socket   = nil
+      @invoke_mutex        = Mutex.new
+      @in_flight_mutex     = Mutex.new
+      @in_flight           = {}
+      @shutting_down       = false
+      @server_socket       = nil
+      @connection_mutex    = Mutex.new
+      @active_connections  = 0
+      @max_connections     = max_concurrent_connections
     end
 
     def start
@@ -80,7 +90,27 @@ module Freentonic
         rescue IOError, Errno::EBADF, Errno::EINVAL, Errno::ENOTSOCK
           break
         end
-        Thread.new(client) { |c| handle_connection(c) }
+
+        admitted = @connection_mutex.synchronize do
+          if @active_connections >= @max_connections
+            false
+          else
+            @active_connections += 1
+            true
+          end
+        end
+
+        if admitted
+          Thread.new(client) do |c|
+            begin
+              handle_connection(c)
+            ensure
+              @connection_mutex.synchronize { @active_connections -= 1 }
+            end
+          end
+        else
+          refuse_over_capacity(client)
+        end
       end
     ensure
       @server_socket&.close rescue nil
@@ -97,9 +127,60 @@ module Freentonic
       @shutting_down
     end
 
+    # Accessor for the concurrency-cap counter. Exposed so tests can block
+    # until a slow connection has actually been accepted (rather than
+    # guessing with sleep). Thread-safe via the connection mutex.
+    def active_connection_count
+      @connection_mutex.synchronize { @active_connections }
+    end
+
     private
 
     # ─── HTTP wire protocol ───
+
+    # Short, body-less 503 when the concurrency cap is hit. We intentionally
+    # don't spin up a full handler thread — that would defeat the cap. Just
+    # write a minimal response directly and close.
+    #
+    # SO_LINGER(1, 2) makes close() wait up to 2 s for the kernel to flush
+    # our 503 to the client before the socket is torn down. Without it,
+    # close() with unread bytes in the receive buffer (the client's GET)
+    # can send a TCP RST, and the client sees ECONNRESET instead of 503.
+    def refuse_over_capacity(client)
+      client.sync = true
+      client.write(
+        "HTTP/1.1 503 Service Unavailable\r\n" \
+        "Content-Type: application/json\r\n" \
+        "Content-Length: 0\r\n" \
+        "Retry-After: 1\r\n" \
+        "Connection: close\r\n" \
+        "\r\n"
+      )
+      # Half-close the write side (FIN) so the client sees EOF cleanly.
+      # Then drain anything the client sent so the final close() doesn't
+      # RST. Without this dance, a client whose request is still buffered
+      # by the kernel when we close() sees ECONNRESET instead of our 503.
+      begin
+        client.shutdown(Socket::SHUT_WR)
+      rescue StandardError
+        # ok
+      end
+      deadline = Time.now + 0.5
+      while Time.now < deadline
+        ready = IO.select([client], nil, nil, 0.1)
+        break unless ready
+        begin
+          chunk = client.read_nonblock(4096)
+          break if chunk.nil? || chunk.empty?
+        rescue IO::WaitReadable, EOFError, Errno::ECONNRESET, StandardError
+          break
+        end
+      end
+    rescue StandardError
+      # client gave up / network blip — not our problem
+    ensure
+      client.close rescue nil
+    end
 
     def handle_connection(client)
       client.sync = true
