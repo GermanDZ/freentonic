@@ -763,6 +763,11 @@ module Freentonic
         data = result&.dig("data")
         raise UserError, "screenshot: empty response from Chrome" unless data
 
+        # Labels can come from a workflow YAML's `screenshot:` action, which
+        # is trusted code in our threat model — but cheap to defend in depth
+        # anyway. Collapse anything outside [A-Za-z0-9_.-] to `_` so a label
+        # like "../escape" or "foo/bar" can't write outside the run dir.
+        safe_label = sanitize_screenshot_label(label)
         run_dir = ENV["FREENTONIC_RUN_DIR"]
         run_id  = ENV["FREENTONIC_RUN_ID"]
 
@@ -771,10 +776,10 @@ module Freentonic
 
         if run_dir && File.directory?(run_dir) && File.writable?(run_dir)
           prefix = run_id && !run_id.empty? ? "#{run_id}-" : ""
-          filename = "#{prefix}freentonic-#{label}-#{timestamp}.png"
+          filename = "#{prefix}freentonic-#{safe_label}-#{timestamp}.png"
           path = File.join(run_dir, filename)
         else
-          filename = "freentonic-#{label}-#{timestamp}.png"
+          filename = "freentonic-#{safe_label}-#{timestamp}.png"
           dir = ["/workspace", Dir.pwd].find { |d| File.directory?(d) && File.writable?(d) } || Dir.pwd
           path = File.join(dir, filename)
         end
@@ -793,6 +798,20 @@ module Freentonic
         save_screenshot("timeout")
       rescue StandardError => e
         @stderr.puts "    (screenshot failed: #{e.message})"
+      end
+
+      SAFE_LABEL_PATTERN = /[^A-Za-z0-9_.\-]/.freeze
+      MAX_LABEL_BYTES    = 64
+
+      # Module method so it's unit-testable without instantiating the whole
+      # runner. Called from #save_screenshot; see the note there.
+      def self.sanitize_screenshot_label(label)
+        cleaned = label.to_s.gsub(SAFE_LABEL_PATTERN, "_")[0, MAX_LABEL_BYTES]
+        cleaned.empty? ? "unlabelled" : cleaned
+      end
+
+      def sanitize_screenshot_label(label)
+        self.class.sanitize_screenshot_label(label)
       end
 
       def check_error_signals!
