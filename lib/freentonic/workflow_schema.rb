@@ -205,6 +205,10 @@ module Freentonic
         unless sig.key?("text") || sig.key?("selector") || sig.key?("title")
           raise UserError, "workflow #{@path} config.error_signals[#{i}] must have text:, selector:, or title:"
         end
+        if sig.key?("kind") && !%w[error reauth].include?(sig["kind"])
+          raise UserError,
+            "workflow #{@path} config.error_signals[#{i}] kind: must be \"error\" or \"reauth\""
+        end
       end
     end
 

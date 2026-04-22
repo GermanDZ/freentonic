@@ -15,9 +15,12 @@ module Freentonic
     # returns JSON. Charset-validates every user-supplied id before
     # touching disk. Never returns plaintext credentials on reads.
     class AdminApi
-      def initialize(feature:, workflows_dir:)
+      MAX_LOG_BYTES = 256 * 1024
+
+      def initialize(feature:, workflows_dir:, runs_dir: nil)
         @feature       = feature
         @workflows_dir = workflows_dir
+        @runs_dir      = runs_dir
       end
 
       def dispatch(client, method, path, request)
@@ -46,6 +49,9 @@ module Freentonic
         when (match = pathname.match(%r{\A/admin/api/profiles/([^/]+)/runs\z}))
           return method_not_allowed(client) unless method == "GET"
           handle_runs(client, match[1])
+        when (match = pathname.match(%r{\A/admin/api/profiles/([^/]+)/runs/([^/]+)/log\z}))
+          return method_not_allowed(client) unless method == "GET"
+          handle_run_log(client, match[1], match[2])
         else
           Http.write_json(client, 404, { "error" => "not found" })
         end
@@ -202,6 +208,47 @@ module Freentonic
       def handle_runs(client, key)
         return not_found(client) unless @feature.profile_store.exists?(key)
         Http.write_json(client, 200, { "runs" => @feature.run_log.recent(key, limit: 20) })
+      end
+
+      # Return the last N bytes of the underlying freentonic child's run log
+      # (same file served by the main /runs/<run_id>/log route). We cap the
+      # response at MAX_LOG_BYTES so large logs don't blow up the browser —
+      # the UI uses this for a quick peek, not for live tailing.
+      #
+      # Path-traversal safe: run_id is charset-validated, and we verify the
+      # realpath stays under the configured runs dir before reading.
+      def handle_run_log(client, profile_key, run_id)
+        return not_found(client) unless @feature.profile_store.exists?(profile_key)
+        return not_found(client) unless run_id =~ Paths::FILENAME_PATTERN
+        return not_found(client) if @runs_dir.nil? || @runs_dir.empty?
+
+        log_path = File.join(@runs_dir, run_id, "log")
+        unless File.file?(log_path)
+          return Http.write_json(client, 404, { "error" => "log not found" })
+        end
+
+        begin
+          runs_real = File.realpath(@runs_dir)
+          file_real = File.realpath(log_path)
+        rescue Errno::ENOENT
+          return Http.write_json(client, 404, { "error" => "log not found" })
+        end
+        unless file_real.start_with?(runs_real + File::SEPARATOR)
+          return Http.write_json(client, 404, { "error" => "log path escapes runs dir" })
+        end
+
+        size = File.size(log_path)
+        offset = [size - MAX_LOG_BYTES, 0].max
+        body = File.open(log_path, "rb") do |f|
+          f.seek(offset) if offset.positive?
+          f.read(size - offset)
+        end
+        Http.write_json(client, 200, {
+          "run_id"    => run_id,
+          "truncated" => offset.positive?,
+          "size"      => size,
+          "log"       => body.to_s
+        })
       end
 
       # ── helpers ─────────────────────────────────────────────

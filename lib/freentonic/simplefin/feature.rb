@@ -49,6 +49,42 @@ module Freentonic
         @queue = queue
       end
 
+      # Background sweeper that periodically GCs expired claims and stale
+      # cache files. Returns self so the caller can chain .stop later.
+      #
+      # The interval is long enough (1h) that this is nearly free even on
+      # a container running many profiles; short enough that a long-lived
+      # process doesn't accumulate consumed claims or 14-day-stale caches
+      # forever.
+      def start_housekeeper(interval_seconds: 3600, cache_max_age_seconds: 14 * 24 * 3600)
+        @housekeeper_stopping = false
+        @housekeeper_thread = Thread.new do
+          until @housekeeper_stopping
+            interval_seconds.times do
+              break if @housekeeper_stopping
+              sleep 1
+            end
+            break if @housekeeper_stopping
+            begin
+              removed_claims = @claim_store.gc!
+              removed_cache  = @cache_store.gc!(max_age_seconds: cache_max_age_seconds)
+              if removed_claims.positive? || removed_cache.positive?
+                log("housekeeper: removed #{removed_claims} claim(s), #{removed_cache} stale cache(s)")
+              end
+            rescue StandardError => e
+              log("housekeeper error: #{e.class}: #{e.message}")
+            end
+          end
+        end
+        self
+      end
+
+      def stop_housekeeper(timeout: 5)
+        @housekeeper_stopping = true
+        @housekeeper_thread&.join(timeout)
+        @housekeeper_thread = nil
+      end
+
       # Reset any `queued` / `running` state to `idle` on boot — the
       # in-memory queue is ephemeral and Actual will re-enqueue on the
       # next /accounts call.

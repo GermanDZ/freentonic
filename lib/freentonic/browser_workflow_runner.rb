@@ -841,7 +841,11 @@ module Freentonic
 
           message = signal["message"] || signal["text"] || signal["title"] || "element #{signal["selector"]} found"
           save_screenshot("error-signal")
-          raise UserError, "Screen error detected: #{message}"
+          if signal["kind"] == "reauth"
+            raise ReauthRequired, "Re-authentication required: #{message}"
+          else
+            raise UserError, "Screen error detected: #{message}"
+          end
         end
       rescue UserError
         raise

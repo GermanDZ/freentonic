@@ -71,6 +71,7 @@ if Freentonic::Simplefin::Feature.enabled?
   simplefin_router = Freentonic::Simplefin::Router.new(
     feature:       simplefin_feature,
     workflows_dir: options[:workflows_dir],
+    runs_dir:      options[:runs_dir],
     asset_dir:     ui_dir
   )
 end
@@ -92,6 +93,7 @@ if simplefin_feature
     workflows_dir: options[:workflows_dir]
   ).start
   simplefin_feature.install_queue(queue)
+  simplefin_feature.start_housekeeper
 end
 
 %w[TERM INT].each do |sig|
@@ -107,3 +109,4 @@ end
 
 server.start
 queue&.stop
+simplefin_feature&.stop_housekeeper

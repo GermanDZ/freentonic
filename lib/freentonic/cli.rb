@@ -30,12 +30,19 @@ module Freentonic
       validate!(options)
       execute(options)
       0
-    rescue UserError => error
+    rescue ReauthRequired => error
+      # Distinct exit code so callers (invoke server, SimpleFIN sync queue)
+      # can distinguish "bank session expired, hand off to a human via VNC"
+      # from a generic UserError. ReauthRequired inherits UserError so it
+      # has to be rescued BEFORE the broader UserError branch below.
       @stderr.puts(error.message)
-      1
+      3
     rescue ExportError => error
       @stderr.puts(error.message)
       2
+    rescue UserError => error
+      @stderr.puts(error.message)
+      1
     end
 
     private

@@ -12,9 +12,9 @@ module Freentonic
     # the path doesn't belong here (so InvokeServer's existing dispatch can
     # keep its precedence rules).
     class Router
-      def initialize(feature:, workflows_dir:, asset_dir:)
+      def initialize(feature:, workflows_dir:, asset_dir:, runs_dir: nil)
         @protocol   = Protocol.new(feature: feature)
-        @admin_api  = AdminApi.new(feature: feature, workflows_dir: workflows_dir)
+        @admin_api  = AdminApi.new(feature: feature, workflows_dir: workflows_dir, runs_dir: runs_dir)
         @admin_ui   = AdminUi.new(feature: feature, asset_dir: asset_dir)
       end
 

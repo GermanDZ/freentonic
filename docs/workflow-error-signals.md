@@ -31,8 +31,35 @@ config:
 | `title`    | Matches if the page title contains the given substring |
 | `selector` | Matches if the CSS selector exists in the DOM |
 | `message`  | Optional custom error message (defaults to the matched text/title/selector) |
+| `kind`     | `"error"` (default) or `"reauth"` — see below |
 
 Each signal must have at least one of `text`, `title`, or `selector`.
+
+## `kind: reauth` — distinguishing re-authentication from hard errors
+
+By default a matched signal raises `UserError` and the CLI exits with
+status **1**. If the signal represents a session-level problem that the
+user can resolve by logging in again (expired device trust, rotated MFA,
+session idle-out), set `kind: reauth`:
+
+```yaml
+config:
+  key: my_bank
+  error_signals:
+    - text: "session has expired"
+      kind: reauth
+      message: "bank session expired — log in again in the VNC window"
+```
+
+The runner then raises `ReauthRequired` (a subclass of `UserError`), and
+the CLI exits with status **3**. The invoke server records this as
+`error_kind: "needs_reauth"`, and the SimpleFIN bridge transitions the
+profile into the `needs_reauth` state — surfacing a *Re-authenticate via
+VNC* button to the operator instead of auto-retrying headlessly.
+
+Use `kind: reauth` sparingly. Only use it for signals that unambiguously
+mean "the user needs to log in again." Generic fraud-block screens
+should remain the default `kind: error`.
 
 ## When are signals checked?
 

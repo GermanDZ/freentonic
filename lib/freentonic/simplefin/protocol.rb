@@ -16,8 +16,18 @@ module Freentonic
     #   POST /simplefin/claim/:id       — one-shot token exchange
     #   GET  /simplefin/accounts/:key   — Basic-auth sync endpoint
     class Protocol
-      def initialize(feature:)
+      # Minimum seconds between enqueue-from-GET-/accounts per profile.
+      # Actual's sync button is one click per user action, but a runaway
+      # client (or a test script) could hammer us and trigger a stream of
+      # Chrome spawns. The window is conservative — one minute is way more
+      # frequent than any sane bank-sync cadence.
+      MIN_ENQUEUE_INTERVAL_SECONDS = 60
+
+      def initialize(feature:, min_enqueue_interval: MIN_ENQUEUE_INTERVAL_SECONDS)
         @feature = feature
+        @min_enqueue_interval = min_enqueue_interval
+        @last_enqueue_mu = Mutex.new
+        @last_enqueue    = {}
       end
 
       def dispatch(client, method, path, request)
@@ -139,9 +149,26 @@ module Freentonic
 
       def enqueue_if_possible(profile_key)
         return unless @feature.queue
+        return unless allow_enqueue?(profile_key)
         @feature.queue.enqueue(profile_key, headed: false, trigger: "accounts")
       rescue StandardError => e
         @feature.log("enqueue failed for #{profile_key}: #{e.class}: #{e.message}")
+      end
+
+      # Per-profile rate limit on auto-enqueue triggered by GET /accounts.
+      # Returns true (and records "now" as the last enqueue time) if the
+      # last auto-enqueue was more than @min_enqueue_interval seconds ago;
+      # false otherwise. Thread-safe against concurrent /accounts handlers.
+      def allow_enqueue?(profile_key)
+        now = Time.now.to_f
+        @last_enqueue_mu.synchronize do
+          last = @last_enqueue[profile_key]
+          if last && (now - last) < @min_enqueue_interval
+            return false
+          end
+          @last_enqueue[profile_key] = now
+          true
+        end
       end
 
       def unauthorized(client)

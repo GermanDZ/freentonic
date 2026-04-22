@@ -153,6 +153,42 @@ textarea {
   word-break: break-all;
 }
 
+.runs-panel {
+  margin: 0 0 12px 0;
+  padding: 12px 14px;
+  background: rgba(0,0,0,0.02);
+  border-radius: 8px;
+  border: 1px solid rgba(0,0,0,0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+  .runs-panel { background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.06); }
+}
+
+.run-row { padding: 8px 0; border-top: 1px solid rgba(0,0,0,0.05); }
+.run-row:first-child { border-top: none; }
+.run-row-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.run-row-head button { padding: 2px 8px; font-size: 12px; }
+
+.run-log {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: #0c0c10;
+  color: #d8d9e0;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 body.login {
   display: grid;
   min-height: 100vh;

@@ -166,6 +166,41 @@ module Freentonic
         log = RunLog.new(root: @root)
         assert_raises(ArgumentError) { log.record("bad/key", run_id: "r", outcome: "ready") }
       end
+
+      # ── Feature housekeeper ─────────────────────────────────
+
+      def test_housekeeper_gcs_expired_claims_and_old_caches
+        feature = Feature.new(
+          root: @root, master_key: @master,
+          admin_password: "pw", public_url: "http://x"
+        )
+        feature.profile_store.create(key: "acme", workflow: "x.yml")
+        feature.cache_store.write("acme", { "accounts" => [], "errors" => [] })
+        # Age the cache file past the retention window.
+        File.utime(Time.now - (30 * 24 * 3600), Time.now - (30 * 24 * 3600),
+                   feature.cache_store.path_for("acme"))
+
+        # Mint an expired claim.
+        claim = ClaimStore.new(root: @root, ttl_seconds: 0).mint("acme")
+        sleep 0.01
+
+        # Force a single housekeeper pass synchronously (don't spin the thread).
+        assert_equal 1, feature.claim_store.gc!
+        assert_equal 1, feature.cache_store.gc!(max_age_seconds: 14 * 24 * 3600)
+
+        refute File.exist?(Paths.claim_path(claim["claim_id"], @root))
+        refute feature.cache_store.exists?("acme")
+      end
+
+      def test_housekeeper_thread_stops_cleanly
+        feature = Feature.new(
+          root: @root, master_key: @master,
+          admin_password: "pw", public_url: "http://x"
+        )
+        feature.start_housekeeper(interval_seconds: 60)
+        feature.stop_housekeeper(timeout: 3)
+        assert_nil feature.instance_variable_get(:@housekeeper_thread)
+      end
     end
   end
 end

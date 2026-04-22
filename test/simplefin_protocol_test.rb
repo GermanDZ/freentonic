@@ -60,7 +60,9 @@ module Freentonic
 
         ui_dir = File.expand_path("../lib/freentonic/simplefin/ui", __dir__)
         @router = Router.new(feature: @feature,
-                             workflows_dir: @workflows_dir, asset_dir: ui_dir)
+                             workflows_dir: @workflows_dir,
+                             runs_dir: @runs,
+                             asset_dir: ui_dir)
 
         @runner = FakeRunner.new(@runs, @workflows_dir, Dir.mktmpdir("chrome-"))
         @port   = find_free_port
@@ -217,6 +219,16 @@ module Freentonic
         refute @feature.cache_store.exists?("acme")
       end
 
+      def test_accounts_rate_limits_auto_enqueue
+        provision_profile_with_access_url("acme")
+        url, user, password = current_access_url("acme")
+        headers = basic_auth(user, password)
+
+        3.times { req("GET", url, headers: headers) }
+        assert_equal 1, @queue.enqueued.size,
+          "repeated GET /accounts within the rate-limit window must enqueue only once"
+      end
+
       def test_accounts_needs_reauth_does_not_enqueue
         provision_profile_with_access_url("acme")
         @feature.state_store.force_state("acme", "needs_reauth", "last_error" => "session expired")
@@ -226,6 +238,34 @@ module Freentonic
         body = JSON.parse(res.body)
         assert_match(/re-authentication required/i, body["errors"].first)
         assert_empty @queue.enqueued
+      end
+
+      # ── Run log proxy ──────────────────────────────────────
+
+      def test_admin_api_serves_run_log
+        req("POST", "/admin/api/profiles", body: { profile_key: "acme", workflow: @workflow_name }, headers: admin)
+        @feature.run_log.record("acme", run_id: "run_1", outcome: "ready",
+                                exit_code: 0, message: "ok")
+        FileUtils.mkdir_p(File.join(@runs, "run_1"))
+        File.write(File.join(@runs, "run_1", "log"), "hello from the invoke child\n")
+
+        res = req("GET", "/admin/api/profiles/acme/runs/run_1/log", headers: admin)
+        assert_equal "200", res.code
+        body = JSON.parse(res.body)
+        assert_equal "run_1", body["run_id"]
+        assert_equal "hello from the invoke child\n", body["log"]
+      end
+
+      def test_admin_api_run_log_rejects_bad_run_id
+        req("POST", "/admin/api/profiles", body: { profile_key: "acme", workflow: @workflow_name }, headers: admin)
+        res = req("GET", "/admin/api/profiles/acme/runs/..%2Fescape/log", headers: admin)
+        assert_equal "404", res.code
+      end
+
+      def test_admin_api_run_log_404_when_missing
+        req("POST", "/admin/api/profiles", body: { profile_key: "acme", workflow: @workflow_name }, headers: admin)
+        res = req("GET", "/admin/api/profiles/acme/runs/never/log", headers: admin)
+        assert_equal "404", res.code
       end
 
       # ── Admin UI: login cookie drives the API ───────────────

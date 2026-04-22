@@ -27,8 +27,11 @@ module Freentonic
     #   "signal"     — child died on a signal (SIGSEGV, SIGBUS, external kill...)
     #   "user_error" — UserError (CLI exits 1 for bad YAML, missing secrets, etc.)
     #   "export_error" — ExportError (CLI exits 2 for receiver rejection, etc.)
+    #   "needs_reauth" — ReauthRequired (CLI exits 3; SimpleFIN bridge maps
+    #                    this to the needs_reauth state and prompts the
+    #                    operator to re-login through VNC).
     #   "unknown"    — any other non-zero exit code
-    ERROR_KINDS = %w[user_error export_error timeout signal unknown].freeze
+    ERROR_KINDS = %w[user_error export_error needs_reauth timeout signal unknown].freeze
 
     def self.classify_error(exit_code, timed_out, signaled)
       return nil if exit_code.to_i.zero?
@@ -37,6 +40,7 @@ module Freentonic
       case exit_code
       when 1 then "user_error"
       when 2 then "export_error"
+      when 3 then "needs_reauth"
       else        "unknown"
       end
     end
