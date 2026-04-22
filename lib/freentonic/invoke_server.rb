@@ -602,9 +602,22 @@ module Freentonic
         # already gone
       end
 
-      Thread.new(entry[:pgid]) do |pgid|
+      # Grace window, then SIGKILL the whole pgroup — BUT only after
+      # verifying the original pid is still alive and still in the same
+      # pgroup. Without this re-check, a child that exited during the
+      # grace and whose pid was recycled by the OS could be killed by
+      # mistake, along with whichever unrelated process now sits in the
+      # recycled pgroup.
+      Thread.new(entry[:pid], entry[:pgid]) do |pid, pgid|
         sleep CANCEL_GRACE_SECONDS
-        Process.kill("-KILL", pgid) rescue nil
+        begin
+          current_pgid = Process.getpgid(pid)
+          Process.kill("-KILL", pgid) if current_pgid == pgid
+        rescue Errno::ESRCH
+          # Original child already exited — nothing to KILL.
+        rescue StandardError
+          # Any other kill/getpgid failure: swallow; we're best-effort here.
+        end
       end
 
       [202, { "accepted" => true, "run_id" => run_id }]
