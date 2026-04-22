@@ -60,8 +60,7 @@ module Freentonic
       listen_addr: DEFAULT_ADDR,
       listen_port: DEFAULT_PORT,
       logger: $stdout,
-      max_concurrent_connections: MAX_CONCURRENT_CONNECTIONS,
-      simplefin_router: nil
+      max_concurrent_connections: MAX_CONCURRENT_CONNECTIONS
     )
       @runner          = runner
       @invoke_token    = (invoke_token && !invoke_token.empty?) ? invoke_token : nil
@@ -77,12 +76,11 @@ module Freentonic
       @connection_mutex    = Mutex.new
       @active_connections  = 0
       @max_connections     = max_concurrent_connections
-      @simplefin_router    = simplefin_router
     end
 
-    # The shared mutex that serializes /invoke. SimpleFIN's sync worker
-    # acquires it so concurrent headless syncs can't race a manual /invoke
-    # (one-Chrome-at-a-time invariant).
+    # The shared mutex that serializes /invoke. Exposed so external
+    # dispatchers can hold it across a richer operation (e.g. the
+    # simplefreen scheduler serializing its outbound /invoke calls).
     attr_reader :invoke_mutex
 
     def start
@@ -215,11 +213,6 @@ module Freentonic
           write_response(client, 405, { "error" => "method not allowed" })
         end
         return
-      end
-
-      if @simplefin_router && (path.start_with?("/simplefin/") || path == "/admin" || path.start_with?("/admin/"))
-        outcome = @simplefin_router.dispatch(client, request)
-        return if outcome == :handled
       end
 
       status, body = dispatch(request)

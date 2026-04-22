@@ -194,12 +194,6 @@ module Freentonic
       if request.export && request.export["mode"] == "http" && request.export["token"]
         env["FREENTONIC_HTTP_TOKEN"] = request.export["token"]
       end
-      if request.export && request.export["mode"] == "simplefin"
-        env["FREENTONIC_SIMPLEFIN_PROFILE_KEY"] = request.export["profile_key"]
-        if (root = ENV["FREENTONIC_SIMPLEFIN_ROOT"]) && !root.empty?
-          env["FREENTONIC_SIMPLEFIN_ROOT"] = root
-        end
-      end
       env
     end
 
@@ -226,12 +220,6 @@ module Freentonic
           # lib/freentonic/exporters/http.rb falls back to
           # ENV["FREENTONIC_HTTP_TOKEN"], which build_env sets. Keeping the
           # token off argv avoids /proc/<pid>/cmdline exposure.
-        when "simplefin"
-          # The profile_key is passed via FREENTONIC_SIMPLEFIN_PROFILE_KEY
-          # (build_env sets it) so it doesn't appear on /proc/<pid>/cmdline.
-          # Same pattern as --export-token above. The child still needs to
-          # know which exporter to invoke — no extra argv needed beyond
-          # "--export simplefin".
         else
           argv.push("--export-path", File.join(run_dir, export["path"]))
           argv.push("--export-csv-select", export["select"]) if export["select"]

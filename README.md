@@ -30,7 +30,7 @@ See **[docs/getting-started.md](docs/getting-started.md)** for the
 full step-by-step guide covering multiple export formats, offline
 iteration, and pushing to an API.
 
-Prefer Docker? Three paths:
+Prefer Docker? Two paths:
 
 - **Run freentonic as a long-running HTTP server** that your web app
   drives over `/invoke` — see
@@ -38,12 +38,14 @@ Prefer Docker? Three paths:
   and **[docs/invoke-server-api.md](docs/invoke-server-api.md)**. This
   is the recommended path for automation across multiple providers /
   credentials.
-- **Use freentonic as a SimpleFIN bridge for self-hosted
-  [Actual Budget](https://actualbudget.org/)** — point Actual's bank sync
-  at freentonic, provision profiles through an admin UI, get real bank
-  transactions. See **[docs/simplefin-bridge.md](docs/simplefin-bridge.md)**.
 - **Run one-off workflows in a throwaway container** from your
   terminal — see **[docs/running-in-docker.md](docs/running-in-docker.md)**.
+
+Looking to **plug freentonic into [Actual Budget](https://actualbudget.org/)** as
+a SimpleFIN backend? See the sibling
+[`simplefreen`](https://github.com/GermanDZ/simplefreen) project — a
+SimpleFIN emulator that calls freentonic over `/invoke` and speaks the
+SimpleFIN protocol to Actual.
 
 ## The pipeline
 

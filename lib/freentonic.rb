@@ -33,7 +33,6 @@ require_relative "freentonic/exporters/json"
 require_relative "freentonic/exporters/jsonl"
 require_relative "freentonic/exporters/csv"
 require_relative "freentonic/exporters/http"
-require_relative "freentonic/exporters/simplefin"
 
 require_relative "freentonic/stages/base"
 require_relative "freentonic/stages/connect"

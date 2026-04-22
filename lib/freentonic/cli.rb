@@ -129,7 +129,6 @@ module Freentonic
           headers[k] = val
         end
         opts.on("--export-csv-select PATH", "Nested path for csv/jsonl flattening (e.g. accounts.movements)") { |v| attach(options, :select, v) }
-        opts.on("--export-simplefin-key KEY", "Profile key for the simplefin exporter (or set FREENTONIC_SIMPLEFIN_PROFILE_KEY)") { |v| attach(options, :profile_key, v) }
 
         opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
         opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }

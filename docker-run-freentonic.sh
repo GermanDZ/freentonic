@@ -19,13 +19,8 @@
 #   FREENTONIC_CHROME_PROFILE_VOLUME  Docker volume name for the Chrome profile root
 #                                     (default freentonic-chrome-profile)
 #
-# SimpleFIN bridge (optional — see docs/simplefin-bridge.md):
-#   FREENTONIC_SIMPLEFIN_ENABLED  0|1 — enables the SimpleFIN routes + admin UI.
-#   FREENTONIC_SIMPLEFIN_DIR      host path bind-mounted at /workspace/simplefin
-#                                 (default: $(pwd)/freentonic-simplefin).
-#   FREENTONIC_SECRETS_KEY        32-byte base64 master key (REQUIRED when enabled).
-#   FREENTONIC_ADMIN_PASSWORD     admin UI / admin API bearer (REQUIRED when enabled).
-#   FREENTONIC_PUBLIC_URL         external URL Actual will reach (REQUIRED when enabled).
+# For the SimpleFIN-bridge-to-Actual-Budget use case, run the sibling
+# `simplefreen` container alongside this one. See its README for setup.
 
 set -euo pipefail
 
@@ -74,46 +69,15 @@ cmd_server() {
     )
   fi
 
-  # Optional SimpleFIN bridge. When enabled, require the three secrets env
-  # vars and bind-mount a host directory for the encrypted-at-rest state.
-  if [ "${FREENTONIC_SIMPLEFIN_ENABLED:-0}" = "1" ]; then
-    require_env FREENTONIC_SECRETS_KEY    "32-byte base64 master key for SimpleFIN credential storage"
-    require_env FREENTONIC_ADMIN_PASSWORD "admin UI / admin API bearer password"
-    require_env FREENTONIC_PUBLIC_URL     "external URL actual-server will reach (e.g. https://freentonic.example.com)"
-
-    local simplefin_dir
-    simplefin_dir="${FREENTONIC_SIMPLEFIN_DIR:-$(pwd)/freentonic-simplefin}"
-    mkdir -p "${simplefin_dir}"
-    chmod 0700 "${simplefin_dir}" 2>/dev/null || true
-    simplefin_dir="$(cd "${simplefin_dir}" && pwd)"
-
-    args+=(
-      -v "${simplefin_dir}:/workspace/simplefin"
-      -e "FREENTONIC_SIMPLEFIN_ENABLED=1"
-      -e "FREENTONIC_SECRETS_KEY=${FREENTONIC_SECRETS_KEY}"
-      -e "FREENTONIC_ADMIN_PASSWORD=${FREENTONIC_ADMIN_PASSWORD}"
-      -e "FREENTONIC_PUBLIC_URL=${FREENTONIC_PUBLIC_URL}"
-    )
-    echo "SimpleFIN bridge enabled (state dir: ${simplefin_dir})"
-  fi
-
   args+=("${IMAGE_NAME}")
 
   echo "starting ${CONTAINER_NAME} (workflows=${workflows_dir}, runs=${runs_dir})"
   "${args[@]}"
   echo "listening on http://127.0.0.1:${LISTEN_PORT}"
-  if [ "${FREENTONIC_SIMPLEFIN_ENABLED:-0}" = "1" ]; then
-    echo "admin UI at http://127.0.0.1:${LISTEN_PORT}/admin/ (password: \$FREENTONIC_ADMIN_PASSWORD)"
-  fi
   if [ "${VNC}" = "1" ]; then
     echo "noVNC at http://127.0.0.1:6080/vnc.html"
-    if [ "${FREENTONIC_SIMPLEFIN_ENABLED:-0}" = "1" ]; then
-      echo "  server mode: the VNC password is minted per headed sync —"
-      echo "  click 'Re-authenticate (VNC)' in the admin UI to get one."
-    else
-      echo "  server mode: VNC is locked between invokes; pass"
-      echo "  {\"vnc_password\": \"...\"} on /invoke to unlock for one run."
-    fi
+    echo "  server mode: VNC is locked between invokes; pass"
+    echo "  {\"vnc_password\": \"...\"} on /invoke to unlock for one run."
   fi
 }
 
