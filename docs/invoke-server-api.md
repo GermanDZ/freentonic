@@ -41,9 +41,11 @@ Missing or wrong token returns `401 Unauthorized` with body:
 `/healthz` is never authenticated — it's intended for readiness probes
 and should work even if the caller doesn't have the token.
 
-If `FREENTONIC_INVOKE_TOKEN` is unset, the server runs in OPEN mode
-and logs a warning on startup. Acceptable for local development; not
-for production.
+If `FREENTONIC_INVOKE_TOKEN` is unset, the server binary runs in OPEN
+mode and logs a warning on startup. Acceptable for local development;
+never for production. The bundled `./docker-run-freentonic.sh server`
+wrapper refuses to start without a token — to experiment with OPEN
+mode, spawn the container with raw `docker run` instead.
 
 ---
 
