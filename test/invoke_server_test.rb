@@ -100,6 +100,38 @@ class InvokeServerTest < Minitest::Test
     assert_equal true, JSON.parse(res.body)["ok"]
   end
 
+  # Direct raw-socket access lets us craft requests the high-level HTTP
+  # client would mangle or refuse (oversized headers, odd Content-Length,
+  # Transfer-Encoding, etc.).
+  def raw_request(payload)
+    sock = TCPSocket.new("127.0.0.1", @port)
+    sock.write(payload)
+    response = +""
+    while (chunk = sock.read(4096))
+      response << chunk
+    end
+    sock.close
+    response
+  end
+
+  def parse_status(raw_response)
+    raw_response.lines.first.to_s.split(" ", 3)[1]
+  end
+
+  def test_oversized_header_rejected_even_on_final_line
+    # Single header that individually exceeds the 16 KiB cap. Prior to the
+    # check-after-read fix, an oversized *final* header could bypass the cap.
+    giant = "X-Huge: " + ("a" * 20_000) + "\r\n"
+    raw = raw_request(
+      "GET /healthz HTTP/1.1\r\n" \
+      "Host: x\r\n" \
+      "#{giant}" \
+      "\r\n"
+    )
+    assert_equal "400", parse_status(raw)
+    assert_match(/headers too large/, raw)
+  end
+
   # ── /runs/:run_id/log auth + validation ───────────────────
 
   def test_log_requires_auth
