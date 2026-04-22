@@ -158,6 +158,83 @@ class InvokeServerTest < Minitest::Test
     assert_match(/Transfer-Encoding not supported/, raw)
   end
 
+  def test_over_capacity_returns_503
+    # Spin up a second server with a cap of 1 to make the assertion
+    # deterministic. Hold one slow connection open (sends no data, server's
+    # readline blocks in IO.select) and verify a second connection is
+    # refused immediately with 503 Service Unavailable.
+    capped_port = find_free_port
+    capped_server = Freentonic::InvokeServer.new(
+      runner:                     @runner,
+      invoke_token:               @token,
+      listen_addr:                "127.0.0.1",
+      listen_port:                capped_port,
+      logger:                     nil,
+      max_concurrent_connections: 1
+    )
+    thread = Thread.new { capped_server.start }
+    # Wait for the server to be up AND to have fully processed one request.
+    # A "TCPSocket.new; close" probe returns before the server has necessarily
+    # accepted the connection, so any counter bump could still be pending when
+    # we start the real test scenario below. Completing a GET /healthz
+    # request/response proves the server did a full accept-handle-release
+    # cycle before we proceed.
+    deadline = Time.now + 5
+    loop do
+      raise "capped server never came up" if Time.now > deadline
+      begin
+        sock = TCPSocket.new("127.0.0.1", capped_port)
+        sock.write("GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        IO.select([sock], nil, nil, 2)
+        sock.read(256)
+        sock.close
+        break
+      rescue
+        sleep 0.02
+      end
+    end
+
+    # Drain any residual counter bump so our next assertion on the counter
+    # only sees `slow`'s bump.
+    drain_deadline = Time.now + 2
+    while capped_server.active_connection_count > 0
+      raise "server never drained probe connection(s)" if Time.now > drain_deadline
+      sleep 0.01
+    end
+
+    slow = TCPSocket.new("127.0.0.1", capped_port)
+    begin
+      # Wait deterministically for the server's accept loop to have
+      # processed `slow` and bumped the counter; otherwise a fast test
+      # can race past this point with `second` getting accepted before
+      # the counter goes to 1.
+      slow_deadline = Time.now + 2
+      until capped_server.active_connection_count >= 1
+        raise "server never accepted the slow connection" if Time.now > slow_deadline
+        sleep 0.01
+      end
+
+      second = TCPSocket.new("127.0.0.1", capped_port)
+      second.write("GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+      response = +""
+      begin
+        while (chunk = second.read(4096))
+          response << chunk
+        end
+      rescue Errno::ECONNRESET
+        # Refusing close can RST in some kernels; we already have the
+        # 503 bytes from before the RST.
+      end
+      second.close
+      assert_equal "503", parse_status(response)
+      assert_match(/Retry-After: 1/, response)
+    ensure
+      slow.close rescue nil
+      capped_server.shutdown
+      thread.join(3)
+    end
+  end
+
   def test_oversized_header_rejected_even_on_final_line
     # Single header that individually exceeds the 16 KiB cap. Prior to the
     # check-after-read fix, an oversized *final* header could bypass the cap.
