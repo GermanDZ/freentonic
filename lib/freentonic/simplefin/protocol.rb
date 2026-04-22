@@ -119,16 +119,20 @@ module Freentonic
           return unauthorized(client, headers)
         end
 
-        state = @feature.state_store.read(profile_key)
-        case state["state"]
-        when "ready"
-          envelope = @feature.cache_store.consume(profile_key)
-          @feature.state_store.force_state(profile_key, "idle",
-            "last_error" => nil)
-          if envelope.nil?
-            return write_empty(client, "cache was unexpectedly empty; sync re-scheduled",
-              enqueue: profile_key, headers: headers)
-          end
+        # SimpleFIN clients (Actual's sync-server, the reference CLI) poll
+        # /accounts repeatedly and expect the most-recent scraped data to
+        # keep being returned until a newer scrape replaces it. Consuming
+        # the cache on first read caused Actual to flag every account as
+        # ACCOUNT_MISSING the second time it polled (transactions fetch,
+        # periodic background refresh, UI reload, etc.).
+        #
+        # New semantics: cache is read-only here. New successful syncs
+        # overwrite the file atomically. `state` now represents the
+        # LAST SYNC'S outcome, independent of cache availability.
+        envelope = @feature.cache_store.read(profile_key)
+        state    = @feature.state_store.read(profile_key)
+
+        if envelope && envelope["accounts"]
           filtered = Reshape.apply_query(envelope, params)
           profile  = @feature.profile_store.read(profile_key)
           hidden   = Array(profile && profile["hidden_accounts"])
@@ -137,32 +141,47 @@ module Freentonic
               "accounts" => filtered["accounts"].reject { |a| hidden.include?(a["id"]) }
             )
           end
-          Http.write_json(client, 200, filtered, headers: headers)
+          # Opportunistically surface any sync-level issues in the errors
+          # array so the client knows if the cached data is becoming stale.
+          extra_errors = []
+          case state["state"]
+          when "error"
+            extra_errors << "Background refresh failed: #{state["last_error"] || "unknown"}. Serving cached data."
+            enqueue_if_possible(profile_key)
+          when "needs_reauth"
+            extra_errors << "Re-authentication required. Serving last-good cached data until the operator runs a headed sync."
+          end
+          if extra_errors.any?
+            filtered = filtered.merge("errors" => Array(filtered["errors"]) + extra_errors)
+          end
+          return Http.write_json(client, 200, filtered, headers: headers)
+        end
+
+        # No cache yet — respond with the right scheduling hint for each
+        # machine state. Don't enqueue from needs_reauth (would just loop
+        # into the same failure).
+        case state["state"]
         when "needs_reauth"
           Http.write_json(client, 200, {
             "accounts" => [],
-            "errors"   => ["Connection Invalid: re-authentication required. " \
-                           "Ask the operator to run 'Re-authenticate via VNC' in the admin UI."]
+            "errors"   => ["Re-authentication required. Ask the operator to run 'Re-authenticate via VNC' in the admin UI."]
           }, headers: headers)
         when "queued", "running"
-          # Idempotent — do not double-enqueue.
           Http.write_json(client, 200, {
             "accounts" => [],
             "errors"   => ["Sync in progress. Data will be ready on the next call."]
           }, headers: headers)
         when "error"
-          # Auto-retry once per poll. Surface the last error message too.
-          last = state["last_error"]
           enqueue_if_possible(profile_key)
           Http.write_json(client, 200, {
             "accounts" => [],
-            "errors"   => ["Last sync failed#{last ? ": #{last}" : ""}. Retry scheduled."]
+            "errors"   => ["Last sync failed#{state["last_error"] ? ": #{state["last_error"]}" : ""}. Retry scheduled."]
           }, headers: headers)
         else
           enqueue_if_possible(profile_key)
           Http.write_json(client, 200, {
             "accounts" => [],
-            "errors"   => ["Sync scheduled. Data will be ready on the next call."]
+            "errors"   => ["No cached data yet. First sync scheduled."]
           }, headers: headers)
         end
       end

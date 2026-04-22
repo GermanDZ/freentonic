@@ -31,9 +31,27 @@ module Freentonic
         AtomicFile.write_json(path_for(key), envelope)
       end
 
-      # Read-and-unlink. Returns nil if missing.
+      # Read-and-unlink. Returns nil if missing. Previously used for the
+      # one-shot-serve model; kept for tests and for admin-triggered
+      # resets. GET /simplefin/accounts now uses #read (non-destructive).
       def consume(key)
         AtomicFile.consume_json(path_for(key))
+      end
+
+      # Non-destructive read. Returns the cached envelope hash or nil.
+      # GET /simplefin/accounts calls this on every request — Actual polls
+      # the endpoint repeatedly (post-link transaction fetches, periodic
+      # background syncs, etc.) and expects the payload to stay available
+      # between scrapes. Fresh sync runs overwrite the file atomically.
+      def read(key)
+        AtomicFile.read_json(path_for(key))
+      end
+
+      # Mtime of the current cache file in seconds since epoch, or nil.
+      def mtime(key)
+        File.mtime(path_for(key)).to_i
+      rescue Errno::ENOENT
+        nil
       end
 
       def delete(key)

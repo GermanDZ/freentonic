@@ -226,13 +226,17 @@ module Freentonic
         assert_equal "401", res.code
       end
 
-      def test_accounts_returns_ready_payload_and_unlinks_cache
+      def test_accounts_serves_cache_without_consuming_it
+        # SimpleFIN clients (Actual sync-server, reference CLI) poll the
+        # endpoint repeatedly and expect the most recent cached envelope
+        # to keep being returned until a fresh scrape replaces it.
         provision_profile_with_access_url("acme")
-        # Simulate a successful sync having written a cache payload.
         envelope = {
           "accounts" => [{
-            "id" => "x", "currency" => "EUR", "balance" => "10.00",
-            "balance-date" => Time.now.to_i, "transactions" => []
+            "id" => "x", "name" => "Acme", "currency" => "EUR",
+            "balance" => "10.00", "balance-date" => Time.now.to_i,
+            "org" => { "name" => "Acme", "domain" => "acme.local", "id" => "acme" },
+            "transactions" => []
           }],
           "errors" => []
         }
@@ -240,11 +244,42 @@ module Freentonic
         @feature.state_store.force_state("acme", "ready")
 
         url, user, password = current_access_url("acme")
+
+        # Three back-to-back polls must all return the same payload.
+        3.times do
+          res = req("GET", url, headers: basic_auth(user, password))
+          body = JSON.parse(res.body)
+          assert_equal 1, body["accounts"].size, "cache must survive repeated reads"
+          assert_equal "x", body["accounts"].first["id"]
+        end
+
+        # State stays `ready` — it represents the last sync outcome, not
+        # cache availability. Cache file is still on disk.
+        assert_equal "ready", @feature.state_store.read("acme")["state"]
+        assert @feature.cache_store.exists?("acme")
+      end
+
+      def test_accounts_error_state_with_cache_serves_stale_data_and_retries
+        provision_profile_with_access_url("acme")
+        envelope = {
+          "accounts" => [{
+            "id" => "y", "name" => "Acme", "currency" => "EUR",
+            "balance" => "99.00", "balance-date" => Time.now.to_i - 3600,
+            "org" => { "name" => "Acme", "domain" => "acme.local", "id" => "acme" },
+            "transactions" => []
+          }],
+          "errors" => []
+        }
+        @feature.cache_store.write("acme", envelope)
+        @feature.state_store.force_state("acme", "error", "last_error" => "exit 1")
+
+        url, user, password = current_access_url("acme")
         res = req("GET", url, headers: basic_auth(user, password))
         body = JSON.parse(res.body)
-        assert_equal 1, body["accounts"].size
-        assert_equal "idle", @feature.state_store.read("acme")["state"]
-        refute @feature.cache_store.exists?("acme")
+        assert_equal 1, body["accounts"].size, "stale cache must be served when last sync failed"
+        assert_match(/Background refresh failed/i, body["errors"].first)
+        # Retry was scheduled.
+        assert_includes @queue.enqueued.map(&:first), "acme"
       end
 
       def test_accounts_rate_limits_auto_enqueue
