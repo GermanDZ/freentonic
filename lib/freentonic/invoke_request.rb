@@ -41,7 +41,7 @@ module Freentonic
 
     DEFAULT_TIMEOUT = 1800
     MAX_TIMEOUT     = 7200
-    ALLOWED_EXPORT_MODES = %w[json jsonl csv http].freeze
+    ALLOWED_EXPORT_MODES = %w[json jsonl csv http simplefin].freeze
     ALLOWED_HTTP_METHODS = %w[POST PUT].freeze
 
     attr_reader :run_id, :profile_key, :timeout_sec, :lookback, :workflow_path,
@@ -247,6 +247,14 @@ module Freentonic
           end
           normalized["headers"] = export["headers"]
         end
+
+      when "simplefin"
+        key = export["profile_key"]
+        unless key.is_a?(String) && key =~ PROFILE_KEY_PATTERN
+          raise InvokeError.new(:bad_request,
+            "export.profile_key is required for mode=simplefin and must match [A-Za-z0-9_.-]{1,128}")
+        end
+        normalized["profile_key"] = key
 
       else # file-based: json|jsonl|csv
         path = export["path"]

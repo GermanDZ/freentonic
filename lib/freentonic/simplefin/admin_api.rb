@@ -1,0 +1,284 @@
+# frozen_string_literal: true
+
+require "base64"
+require "json"
+require "time"
+require "yaml"
+
+require_relative "crypto"
+require_relative "http"
+require_relative "paths"
+
+module Freentonic
+  module Simplefin
+    # Admin REST API (Bearer `FREENTONIC_ADMIN_PASSWORD`). Every handler
+    # returns JSON. Charset-validates every user-supplied id before
+    # touching disk. Never returns plaintext credentials on reads.
+    class AdminApi
+      def initialize(feature:, workflows_dir:)
+        @feature       = feature
+        @workflows_dir = workflows_dir
+      end
+
+      def dispatch(client, method, path, request)
+        pathname, _params = Http.split_query(path)
+        return unauthorized(client) unless bearer_authenticated?(request)
+
+        case
+        when pathname == "/admin/api/status" && method == "GET"
+          handle_status(client)
+        when pathname == "/admin/api/workflows" && method == "GET"
+          handle_workflows(client)
+        when pathname == "/admin/api/profiles" && method == "GET"
+          handle_list(client)
+        when pathname == "/admin/api/profiles" && method == "POST"
+          handle_create(client, request)
+        when (match = pathname.match(%r{\A/admin/api/profiles/([^/]+)\z}))
+          handle_profile(client, match[1], method, request)
+        when (match = pathname.match(%r{\A/admin/api/profiles/([^/]+)/credentials\z}))
+          handle_credentials(client, match[1], method, request)
+        when (match = pathname.match(%r{\A/admin/api/profiles/([^/]+)/sync\z}))
+          handle_sync(client, match[1], method, request)
+        when (match = pathname.match(%r{\A/admin/api/profiles/([^/]+)/setup-token\z}))
+          handle_setup_token(client, match[1], method)
+        when (match = pathname.match(%r{\A/admin/api/profiles/([^/]+)/rotate-access-url\z}))
+          handle_rotate(client, match[1], method)
+        when (match = pathname.match(%r{\A/admin/api/profiles/([^/]+)/runs\z}))
+          return method_not_allowed(client) unless method == "GET"
+          handle_runs(client, match[1])
+        else
+          Http.write_json(client, 404, { "error" => "not found" })
+        end
+      rescue StandardError => e
+        @feature.log("admin api error: #{e.class}: #{e.message}")
+        Http.write_json(client, 500, { "error" => "internal server error" })
+      end
+
+      private
+
+      def bearer_authenticated?(request)
+        token = Http.bearer_token(request.headers["authorization"])
+        return false if token.nil?
+        Crypto.secure_compare(token, @feature.admin_password)
+      end
+
+      # ── handlers ────────────────────────────────────────────
+
+      def handle_status(client)
+        profiles = @feature.profile_store.list
+        entries = profiles.map { |p| profile_summary(p) }
+        Http.write_json(client, 200, {
+          "profiles"  => entries,
+          "active"    => @feature.queue&.active_key,
+          "pending"   => @feature.queue&.pending_keys || [],
+          "server_ts" => Time.now.utc.iso8601
+        })
+      end
+
+      def handle_workflows(client)
+        list = list_workflows.map do |rel|
+          secrets = declared_secrets(rel)
+          { "workflow" => rel, "secrets" => secrets }
+        end
+        Http.write_json(client, 200, { "workflows" => list })
+      end
+
+      def handle_list(client)
+        summaries = @feature.profile_store.list.map { |p| profile_summary(p) }
+        Http.write_json(client, 200, { "profiles" => summaries })
+      end
+
+      def handle_create(client, request)
+        body = parse_json(request) or return bad_request(client, "invalid JSON body")
+        key      = body["profile_key"]
+        workflow = body["workflow"]
+        unless key.is_a?(String) && key =~ Paths::FILENAME_PATTERN
+          return bad_request(client, "profile_key must match [A-Za-z0-9_.-]{1,128}")
+        end
+        unless workflow.is_a?(String) && !workflow.empty?
+          return bad_request(client, "workflow is required")
+        end
+        unless File.file?(File.join(@workflows_dir, workflow))
+          return bad_request(client, "workflow #{workflow.inspect} not found under workflows root")
+        end
+
+        profile = @feature.profile_store.create(
+          key: key,
+          workflow: workflow,
+          display_name: body["display_name"],
+          lookback_days: body["lookback_days"] || 30,
+          max_lookback_days: body["max_lookback_days"] || 365
+        )
+        Http.write_json(client, 200, { "profile" => profile_summary(profile) })
+      rescue ArgumentError => e
+        bad_request(client, e.message)
+      end
+
+      def handle_profile(client, key, method, request)
+        return not_found(client) unless key =~ Paths::FILENAME_PATTERN
+        case method
+        when "GET"
+          profile = @feature.profile_store.read(key) or return not_found(client)
+          Http.write_json(client, 200, { "profile" => profile_summary(profile) })
+        when "PATCH"
+          body = parse_json(request) or return bad_request(client, "invalid JSON body")
+          return not_found(client) unless @feature.profile_store.exists?(key)
+          updated = @feature.profile_store.update(key) do |current|
+            current["display_name"] = body["display_name"] if body.key?("display_name")
+            if body.key?("workflow")
+              wf = body["workflow"]
+              unless wf.is_a?(String) && !wf.empty? && File.file?(File.join(@workflows_dir, wf))
+                raise ArgumentError, "workflow #{wf.inspect} not found"
+              end
+              current["workflow"] = wf
+            end
+            if body.key?("lookback_days")
+              current["lookback_days"] = coerce_positive(body["lookback_days"], "lookback_days")
+            end
+            if body.key?("max_lookback_days")
+              current["max_lookback_days"] = coerce_positive(body["max_lookback_days"], "max_lookback_days")
+            end
+            current
+          end
+          Http.write_json(client, 200, { "profile" => profile_summary(updated) })
+        when "DELETE"
+          return not_found(client) unless @feature.profile_store.exists?(key)
+          @feature.profile_store.delete(key)
+          @feature.cache_store.delete(key)
+          Http.write_json(client, 200, { "deleted" => key })
+        else
+          method_not_allowed(client)
+        end
+      rescue ArgumentError => e
+        bad_request(client, e.message)
+      end
+
+      def handle_credentials(client, key, method, request)
+        return method_not_allowed(client) unless method == "POST"
+        return not_found(client) unless @feature.profile_store.exists?(key)
+        body = parse_json(request) or return bad_request(client, "invalid JSON body")
+        secrets = body["secrets"]
+        unless secrets.is_a?(Hash) && !secrets.empty?
+          return bad_request(client, "secrets must be a non-empty object")
+        end
+        @feature.profile_store.write_credentials(key, secrets, master_key: @feature.master_key)
+        Http.write_json(client, 200, { "ok" => true, "names" => secrets.keys.sort })
+      rescue ArgumentError => e
+        bad_request(client, e.message)
+      end
+
+      def handle_sync(client, key, method, request)
+        return method_not_allowed(client) unless method == "POST"
+        return not_found(client) unless @feature.profile_store.exists?(key)
+        body = parse_json(request) || {}
+        headed = body["headed"] == true
+        result = @feature.queue&.enqueue(key, headed: headed, trigger: "admin") || :disabled
+        Http.write_json(client, 200, { "enqueued" => result.to_s, "profile_key" => key })
+      end
+
+      def handle_setup_token(client, key, method)
+        return method_not_allowed(client) unless method == "POST"
+        return not_found(client) unless @feature.profile_store.exists?(key)
+        claim = @feature.claim_store.mint(key)
+        url = "#{@feature.public_url}/simplefin/claim/#{claim["claim_id"]}"
+        setup_token = Base64.strict_encode64(url)
+        Http.write_json(client, 200, {
+          "setup_token" => setup_token,
+          "claim_url"   => url,
+          "expires_at"  => claim["expires_at"]
+        })
+      end
+
+      def handle_rotate(client, key, method)
+        return method_not_allowed(client) unless method == "POST"
+        return not_found(client) unless @feature.profile_store.exists?(key)
+        @feature.profile_store.clear_access_url(key)
+        Http.write_json(client, 200, {
+          "ok" => true,
+          "next_step" => "mint a new setup token and re-link in Actual"
+        })
+      end
+
+      def handle_runs(client, key)
+        return not_found(client) unless @feature.profile_store.exists?(key)
+        Http.write_json(client, 200, { "runs" => @feature.run_log.recent(key, limit: 20) })
+      end
+
+      # ── helpers ─────────────────────────────────────────────
+
+      def profile_summary(profile)
+        state = @feature.state_store.read(profile["profile_key"])
+        {
+          "profile_key"       => profile["profile_key"],
+          "display_name"      => profile["display_name"],
+          "workflow"          => profile["workflow"],
+          "lookback_days"     => profile["lookback_days"],
+          "max_lookback_days" => profile["max_lookback_days"],
+          "created_at"        => profile["created_at"],
+          "updated_at"        => profile["updated_at"],
+          "credential_names"  => (profile["secrets_envelopes"] || {}).keys.sort,
+          "access_url_configured" => !(profile.dig("access_url", "password_pw").nil?),
+          "state"             => state["state"],
+          "last_error"        => state["last_error"],
+          "last_run_id"       => state["last_run_id"],
+          "last_synced_at"    => state["last_synced_at"]
+        }
+      end
+
+      def list_workflows
+        return [] unless @workflows_dir && Dir.exist?(@workflows_dir)
+        Dir.glob(File.join(@workflows_dir, "**", "*.yml"))
+          .map { |p| p.sub(@workflows_dir.chomp("/") + "/", "") }
+          .sort
+      end
+
+      # Declared secrets for a workflow, derived from its `source.credentials`
+      # YAML block. Used by the admin UI to render form fields. YAML load is
+      # safe_load with no permitted classes — same invariant as the engine.
+      def declared_secrets(workflow_rel)
+        full = File.join(@workflows_dir, workflow_rel)
+        return [] unless File.file?(full)
+        doc = YAML.safe_load(File.read(full), permitted_classes: [], aliases: false) || {}
+        creds = doc.dig("source", "credentials") || doc["credentials"] || []
+        creds = [creds] if creds.is_a?(Hash)
+        Array(creds).flat_map do |entry|
+          case entry
+          when String then [entry]
+          when Hash then entry.keys
+          else []
+          end
+        end.uniq
+      rescue StandardError
+        []
+      end
+
+      def parse_json(request)
+        JSON.parse(request.body)
+      rescue ::JSON::ParserError, TypeError
+        nil
+      end
+
+      def coerce_positive(value, name)
+        int = Integer(value)
+        raise ArgumentError, "#{name} must be positive" unless int.positive?
+        int
+      end
+
+      def unauthorized(client)
+        Http.write_json(client, 401, { "error" => "missing or invalid bearer token" })
+      end
+
+      def not_found(client)
+        Http.write_json(client, 404, { "error" => "not found" })
+      end
+
+      def bad_request(client, msg)
+        Http.write_json(client, 400, { "error" => msg })
+      end
+
+      def method_not_allowed(client)
+        Http.write_json(client, 405, { "error" => "method not allowed" })
+      end
+    end
+  end
+end

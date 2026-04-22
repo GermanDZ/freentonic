@@ -9,6 +9,9 @@ require "freentonic"
 require "freentonic/invoke_request"
 require "freentonic/invoke_runner"
 require "freentonic/invoke_server"
+require "freentonic/simplefin/feature"
+require "freentonic/simplefin/router"
+require "freentonic/simplefin/sync_queue"
 
 options = {
   listen_addr:         ENV["FREENTONIC_LISTEN_ADDR"] || Freentonic::InvokeServer::DEFAULT_ADDR,
@@ -56,16 +59,51 @@ runner = Freentonic::InvokeRunner.new(
   logger:              ->(msg) { $stdout.puts("[invoke-runner] #{msg}") }
 )
 
+simplefin_router = nil
+simplefin_feature = nil
+
+if Freentonic::Simplefin::Feature.enabled?
+  simplefin_feature = Freentonic::Simplefin::Feature.from_env(
+    logger: ->(msg) { $stdout.puts(msg) }
+  )
+  simplefin_feature.recover_on_boot!
+  ui_dir = File.expand_path("../lib/freentonic/simplefin/ui", __dir__)
+  simplefin_router = Freentonic::Simplefin::Router.new(
+    feature:       simplefin_feature,
+    workflows_dir: options[:workflows_dir],
+    asset_dir:     ui_dir
+  )
+end
+
 server = Freentonic::InvokeServer.new(
-  runner:       runner,
-  invoke_token: options[:invoke_token],
-  listen_addr:  options[:listen_addr],
-  listen_port:  options[:listen_port],
-  logger:       $stdout
+  runner:            runner,
+  invoke_token:      options[:invoke_token],
+  listen_addr:       options[:listen_addr],
+  listen_port:       options[:listen_port],
+  logger:            $stdout,
+  simplefin_router:  simplefin_router
 )
 
+if simplefin_feature
+  queue = Freentonic::Simplefin::SyncQueue.new(
+    feature:       simplefin_feature,
+    runner:        runner,
+    invoke_mutex:  server.invoke_mutex,
+    workflows_dir: options[:workflows_dir]
+  ).start
+  simplefin_feature.install_queue(queue)
+end
+
 %w[TERM INT].each do |sig|
-  Signal.trap(sig) { server.shutdown }
+  Signal.trap(sig) do
+    server.shutdown
+    # Thread-unsafe to call from a real signal handler beyond this; the
+    # queue stop uses a Mutex internally. In practice the VM defers the
+    # block via Thread.handle_interrupt semantics for mutex-guarded code,
+    # and even in the worst case we'd just lose a pending sync (which
+    # the in-memory-queue design already tolerates).
+  end
 end
 
 server.start
+queue&.stop

@@ -99,6 +99,25 @@ TMPFS_DIR="${FREENTONIC_TMPFS_DIR:-/dev/shm/freentonic/runs}"
 mkdir -p "${TMPFS_DIR}"
 chmod 0700 "${TMPFS_DIR}"
 
+# SimpleFIN bridge for Actual Budget (optional). When enabled, fail fast
+# on missing config so the operator sees the mistake before /invoke starts
+# answering 404s in production. The server itself does the same check on
+# boot, but doing it here gives a cleaner "container exited" signal.
+if [ "${FREENTONIC_SIMPLEFIN_ENABLED:-0}" = "1" ]; then
+  missing=()
+  [ -z "${FREENTONIC_SECRETS_KEY:-}" ]     && missing+=("FREENTONIC_SECRETS_KEY")
+  [ -z "${FREENTONIC_ADMIN_PASSWORD:-}" ]  && missing+=("FREENTONIC_ADMIN_PASSWORD")
+  [ -z "${FREENTONIC_PUBLIC_URL:-}" ]      && missing+=("FREENTONIC_PUBLIC_URL")
+  if [ "${#missing[@]}" -gt 0 ]; then
+    echo "[entrypoint] FREENTONIC_SIMPLEFIN_ENABLED=1 requires: ${missing[*]}" >&2
+    exit 1
+  fi
+  SIMPLEFIN_ROOT="${FREENTONIC_SIMPLEFIN_ROOT:-/workspace/simplefin}"
+  mkdir -p "${SIMPLEFIN_ROOT}"
+  chmod 0700 "${SIMPLEFIN_ROOT}"
+  echo "[entrypoint] SimpleFIN bridge enabled. State dir: ${SIMPLEFIN_ROOT}"
+fi
+
 # Always use Xvfb virtual display — gives Chrome a real display context so
 # behavioral captchas don't reject it. Lightweight (~8MB RAM).
 Xvfb :99 -screen 0 1920x1080x24 &>/dev/null &

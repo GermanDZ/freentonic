@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Freentonic — SimpleFIN bridge</title>
+  <link rel="stylesheet" href="/admin/assets/styles.css">
+</head>
+<body>
+  <header>
+    <h1>Freentonic <span class="tag">SimpleFIN bridge</span></h1>
+    <form method="post" action="/admin/logout" class="logout-form">
+      <button type="submit">Sign out</button>
+    </form>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Profiles</h2>
+        <button id="new-profile-btn" type="button">+ New profile</button>
+      </div>
+      <div id="profiles"></div>
+    </section>
+
+    <section id="new-profile-panel" class="panel hidden">
+      <h2>New profile</h2>
+      <form id="new-profile-form">
+        <label>Profile key
+          <input name="profile_key" required pattern="[A-Za-z0-9_.\-]{1,128}" placeholder="ing_personal">
+        </label>
+        <label>Display name
+          <input name="display_name" placeholder="ING (personal)">
+        </label>
+        <label>Workflow
+          <select name="workflow" required></select>
+        </label>
+        <label>Lookback (days)
+          <input name="lookback_days" type="number" value="30" min="1" max="3650">
+        </label>
+        <div class="row">
+          <button type="submit">Create</button>
+          <button type="button" id="new-profile-cancel">Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="credentials-panel" class="panel hidden">
+      <h2>Provision credentials — <span id="cred-profile"></span></h2>
+      <form id="credentials-form"></form>
+    </section>
+
+    <section id="setup-token-panel" class="panel hidden">
+      <h2>Setup token</h2>
+      <p>Paste this into Actual Budget's SimpleFIN setup field. It expires in 10 minutes and can only be used once.</p>
+      <textarea id="setup-token-value" readonly rows="3"></textarea>
+      <button type="button" id="copy-setup-token">Copy</button>
+    </section>
+  </main>
+
+  <script src="/admin/assets/app.js"></script>
+</body>
+</html>
