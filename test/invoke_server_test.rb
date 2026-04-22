@@ -118,6 +118,46 @@ class InvokeServerTest < Minitest::Test
     raw_response.lines.first.to_s.split(" ", 3)[1]
   end
 
+  def test_bogus_content_length_rejected
+    raw = raw_request(
+      "POST /invoke HTTP/1.1\r\n" \
+      "Host: x\r\n" \
+      "Authorization: Bearer #{@token}\r\n" \
+      "Content-Type: application/json\r\n" \
+      "Content-Length: abc\r\n" \
+      "\r\n"
+    )
+    assert_equal "400", parse_status(raw)
+    assert_match(/invalid Content-Length/, raw)
+  end
+
+  def test_negative_content_length_rejected
+    raw = raw_request(
+      "POST /invoke HTTP/1.1\r\n" \
+      "Host: x\r\n" \
+      "Authorization: Bearer #{@token}\r\n" \
+      "Content-Length: -5\r\n" \
+      "\r\n"
+    )
+    assert_equal "400", parse_status(raw)
+    assert_match(/invalid Content-Length/, raw)
+  end
+
+  def test_transfer_encoding_chunked_rejected
+    # We don't support chunked. Silently falling back to Content-Length would
+    # be a request-smuggling shape if a fronting proxy disagreed about framing.
+    raw = raw_request(
+      "POST /invoke HTTP/1.1\r\n" \
+      "Host: x\r\n" \
+      "Authorization: Bearer #{@token}\r\n" \
+      "Transfer-Encoding: chunked\r\n" \
+      "\r\n" \
+      "0\r\n\r\n"
+    )
+    assert_equal "400", parse_status(raw)
+    assert_match(/Transfer-Encoding not supported/, raw)
+  end
+
   def test_oversized_header_rejected_even_on_final_line
     # Single header that individually exceeds the 16 KiB cap. Prior to the
     # check-after-read fix, an oversized *final* header could bypass the cap.
