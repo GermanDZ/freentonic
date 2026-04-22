@@ -171,12 +171,16 @@ read it. The server never cleans up this directory — it's host-owned.
 
 ## Step 5 — Environment variables
 
-All optional except `FREENTONIC_INVOKE_TOKEN` (strongly recommended;
-the server logs a warning if missing).
+`FREENTONIC_INVOKE_TOKEN` is required when starting via the
+`./docker-run-freentonic.sh server` wrapper (it exits with an error
+if unset). If you're spawning the container with raw `docker run`
+and explicitly want OPEN mode for local dev, leave it unset — the
+server binary will start and log a loud warning on every boot.
+Everything else below is optional.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FREENTONIC_INVOKE_TOKEN` | *(none — unauthenticated)* | Bearer token required on `/invoke`, `/status`, `/cancel/:id`. Missing → server runs in OPEN mode (for local dev only). |
+| `FREENTONIC_INVOKE_TOKEN` | *(wrapper: required; raw `docker run`: unset → OPEN mode with warning)* | Bearer token required on `/invoke`, `/status`, `/cancel/:id`, `/profiles/prune`, `/runs/:id/log`. In OPEN mode the server accepts every request without auth — never do this in production. |
 | `FREENTONIC_LISTEN_ADDR` | `0.0.0.0` inside the container | Interface to bind. Override to `127.0.0.1` only if you're running freentonic outside a container. |
 | `FREENTONIC_LISTEN_PORT` | `7878` | Port inside the container. |
 | `FREENTONIC_WORKFLOWS_DIR` | `/home/freentonic/workflows` | Workflow root inside the container. The `/invoke` request's `workflow` field is resolved against this path. |
