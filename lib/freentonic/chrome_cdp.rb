@@ -99,16 +99,23 @@ module Freentonic
       false
     end
 
+    # pgrep -f takes a regex, so any regex metacharacters in the profile
+    # path (`.`, `-` in a char class context, etc.) would over-match and
+    # risk killing Chrome of a neighbouring profile. Escape before use.
+    def self.pgrep_pattern_for(profile_dir)
+      "user-data-dir=#{Regexp.escape(profile_dir)}"
+    end
+
     # Check if a previous Chrome on our dedicated profile is still running.
     def self.owned_chrome_running?
-      output = IO.popen(["pgrep", "-f", "user-data-dir=#{@profile_dir}"], err: File::NULL, &:read).to_s
+      output = IO.popen(["pgrep", "-f", pgrep_pattern_for(@profile_dir)], err: File::NULL, &:read).to_s
       !output.strip.empty?
     rescue
       false
     end
 
     def self.kill_owned_chrome!
-      pids = IO.popen(["pgrep", "-f", "user-data-dir=#{@profile_dir}"], err: File::NULL, &:read).to_s.split.map(&:to_i)
+      pids = IO.popen(["pgrep", "-f", pgrep_pattern_for(@profile_dir)], err: File::NULL, &:read).to_s.split.map(&:to_i)
       pids.each { |pid| Process.kill("TERM", pid) rescue nil }
       10.times do
         return true unless owned_chrome_running?
@@ -125,14 +132,15 @@ module Freentonic
     # Safe to call when no Chrome is running for that profile (returns true).
     def self.kill_chrome_for(profile_dir)
       return true if profile_dir.nil? || profile_dir.empty?
+      pattern = pgrep_pattern_for(profile_dir)
       probe = lambda do
-        output = IO.popen(["pgrep", "-f", "user-data-dir=#{profile_dir}"], err: File::NULL, &:read).to_s
+        output = IO.popen(["pgrep", "-f", pattern], err: File::NULL, &:read).to_s
         !output.strip.empty?
       end
 
       return true unless probe.call
 
-      pids = IO.popen(["pgrep", "-f", "user-data-dir=#{profile_dir}"], err: File::NULL, &:read).to_s.split.map(&:to_i)
+      pids = IO.popen(["pgrep", "-f", pattern], err: File::NULL, &:read).to_s.split.map(&:to_i)
       pids.each { |pid| Process.kill("TERM", pid) rescue nil }
       10.times do
         return true unless probe.call
