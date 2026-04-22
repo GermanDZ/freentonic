@@ -60,12 +60,21 @@ module Freentonic
         assert_match(/currency/, env["errors"].first)
       end
 
-      def test_missing_balance_date_emits_error
+      def test_missing_balance_date_falls_back_to_sync_time
         payload = sample
         payload["accounts"].first.delete("balance_at")
+        now_before = Time.now.to_i
         env = Reshape.call(payload)
-        assert_empty env["accounts"]
-        assert_match(/balance-date/, env["errors"].first)
+        now_after = Time.now.to_i
+        assert_equal 1, env["accounts"].size, "missing balance-date must not drop the account"
+        ts = env["accounts"].first["balance-date"]
+        assert ts >= now_before && ts <= now_after,
+          "expected balance-date to fall back to sync time"
+        # Make sure the other strict gates still fail closed:
+        missing_balance = sample.tap { |p| p["accounts"].first.delete("balance_cents") }
+        env2 = Reshape.call(missing_balance)
+        assert_empty env2["accounts"]
+        assert_match(/balance/, env2["errors"].first)
       end
 
       def test_stable_id_ignores_case_and_whitespace_in_description

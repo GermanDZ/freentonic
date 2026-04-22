@@ -140,11 +140,12 @@ module Freentonic
           return
         end
 
-        balance_date = to_unix(account["balance_at"] || account["balance_date"])
-        if balance_date.nil?
-          envelope["errors"] << "simplefin: account #{account_id} missing balance-date"
-          return
-        end
+        # balance-date: prefer whatever the provider captured. If the
+        # provider's API doesn't surface a balance timestamp (ING Spain is
+        # one), fall back to "now" so Actual still ingests the account.
+        # This is a timestamp-of-capture field, not a ledger value, so an
+        # approximate value is strictly safer than dropping the account.
+        balance_date = to_unix(account["balance_at"] || account["balance_date"]) || Time.now.to_i
 
         transactions = Array(account["movements"] || account["transactions"]).map do |mov|
           reshape_movement(account_id, mov)
