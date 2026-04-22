@@ -53,9 +53,15 @@ module Freentonic
         envelope = { "accounts" => [], "errors" => [] }
         return envelope unless normalized.is_a?(Hash)
 
+        # Top-level context feeds org.* fallbacks when the provider's
+        # normalizer doesn't emit per-account bank metadata.
+        context = {
+          source_tag: (normalized["source_tag"] || "freentonic").to_s
+        }
+
         accounts = Array(normalized["accounts"])
         accounts.each do |account|
-          reshape_account(account, envelope)
+          reshape_account(account, envelope, context)
         end
         envelope
       end
@@ -115,7 +121,7 @@ module Freentonic
 
       # ── private helpers ─────────────────────────────────────
 
-      def reshape_account(account, envelope)
+      def reshape_account(account, envelope, context = {})
         unless account.is_a?(Hash)
           envelope["errors"] << "simplefin: non-hash account in payload"
           return
@@ -151,14 +157,33 @@ module Freentonic
           reshape_movement(account_id, mov)
         end.compact
 
+        # SimpleFIN-compliant org block — Actual's CreateAccountModal reads
+        # `org.domain`, `org.id`, `org.url`, not just `org.name`. Emit
+        # sane fallbacks so the frontend doesn't crash on undefined
+        # property access.
+        bank_key  = (account["bank_key"] || context[:source_tag] || "freentonic").to_s
+        org_name  = (account["bank_name"] || context[:source_tag] || bank_key).to_s
+        org_domain = (account["bank_domain"] || "#{bank_key}.local").to_s
+        org_url   = (account["bank_url"] || "about:blank").to_s
+
+        account_name = (account["name"] || account["alias"] || account["product_number"] || account_id).to_s
+
         envelope["accounts"] << {
           "id"            => account_id,
-          "org"           => { "name" => (account["bank_name"] || account["source_tag"] || "Freentonic").to_s },
+          "name"          => account_name,
           "currency"      => currency,
           "balance"       => balance_str,
           "balance-date"  => balance_date,
           "available-balance" => available_balance(account),
-          "transactions"  => transactions
+          "org"           => {
+            "name"     => org_name,
+            "domain"   => org_domain,
+            "sfin-url" => org_url,
+            "url"      => org_url,
+            "id"       => bank_key
+          },
+          "transactions"  => transactions,
+          "extra"         => {}
         }.compact
       end
 
