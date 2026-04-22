@@ -210,9 +210,12 @@ module Freentonic
       headers = {}
       header_bytes = line.bytesize
       loop do
-        raise RequestMalformed, "headers too large" if header_bytes > MAX_HEADER_BYTES
         header_line = reader.readline_crlf or raise RequestMalformed, "unexpected EOF in headers"
         header_bytes += header_line.bytesize
+        # Enforce the size limit AFTER counting the line we just read, so a
+        # final oversized line can't slip through by being the one that
+        # also contains the terminating CRLF.
+        raise RequestMalformed, "headers too large" if header_bytes > MAX_HEADER_BYTES
         break if header_line == "\r\n"
         unless header_line =~ /\A([^:]+):\s*(.*?)\r\n\z/
           raise RequestMalformed, "invalid header line"
