@@ -74,11 +74,47 @@ module Freentonic
       end
 
       with_net_http_new(fake_http) do
-        result = Exporters::Http.new(url: "http://example.test/push", token: "tok-abc").write(sample_payload)
-        assert_equal true, result["ok"]
-        assert_equal "Bearer tok-abc", captured[:auth]
-        assert_equal "application/json", captured[:ct]
-        assert_equal "test", ::JSON.parse(captured[:body])["source_tag"]
+        original = $stdout
+        $stdout = StringIO.new
+        begin
+          result = Exporters::Http.new(url: "http://example.test/push", token: "tok-abc").write(sample_payload)
+          assert_equal true, result["ok"]
+          assert_equal "Bearer tok-abc", captured[:auth]
+          assert_equal "application/json", captured[:ct]
+          assert_equal "test", ::JSON.parse(captured[:body])["source_tag"]
+          assert_match(
+            %r{POST http://example\.test/push → 200 in \d+ms},
+            $stdout.string,
+            "expected a one-line success log so the run doesn't look hung"
+          )
+        ensure
+          $stdout = original
+        end
+      end
+    end
+
+    def test_http_exporter_does_not_log_success_line_on_error
+      fake_http = Object.new
+      fake_http.define_singleton_method(:use_ssl=) { |_| }
+      fake_http.define_singleton_method(:open_timeout=) { |_| }
+      fake_http.define_singleton_method(:read_timeout=) { |_| }
+      fake_http.define_singleton_method(:request) { |_req| FakeResp.new("500", "boom") }
+
+      with_net_http_new(fake_http) do
+        original = $stdout
+        $stdout = StringIO.new
+        begin
+          assert_raises(ExportError) do
+            Exporters::Http.new(url: "http://example.test/push", token: "t").write(sample_payload)
+          end
+          refute_match(
+            /→/,
+            $stdout.string,
+            "success line should not appear when the receiver rejected the push"
+          )
+        ensure
+          $stdout = original
+        end
       end
     end
 
@@ -118,6 +154,100 @@ module Freentonic
         end
         assert_includes err.message, "unauthorized"
       end
+    end
+
+    # meta.freentonic_run_id injection — lets an HTTP receiver correlate its
+    # ingest with the originating /invoke. Only applies when the invoke
+    # server has set FREENTONIC_RUN_ID on the child process.
+
+    def build_capturing_http
+      captured = Object.new
+      captured.instance_variable_set(:@body, nil)
+      def captured.body; @body; end
+      def captured.body=(v); @body = v; end
+
+      fake_http = Object.new
+      fake_http.define_singleton_method(:use_ssl=) { |_| }
+      fake_http.define_singleton_method(:open_timeout=) { |_| }
+      fake_http.define_singleton_method(:read_timeout=) { |_| }
+      fake_http.define_singleton_method(:request) do |req|
+        captured.body = req.body
+        FakeResp.new("200", "{}")
+      end
+      [captured, fake_http]
+    end
+
+    def with_env(name, value)
+      original = ENV[name]
+      ENV[name] = value
+      yield
+    ensure
+      ENV[name] = original
+    end
+
+    def silence_stdout
+      original = $stdout
+      $stdout = StringIO.new
+      yield
+    ensure
+      $stdout = original
+    end
+
+    def test_http_exporter_injects_run_id_meta_when_env_set
+      captured, fake_http = build_capturing_http
+      with_net_http_new(fake_http) do
+        with_env("FREENTONIC_RUN_ID", "run-abc-123") do
+          silence_stdout do
+            Exporters::Http.new(url: "http://example.test/push", token: "tok").write(sample_payload)
+          end
+        end
+      end
+      sent = ::JSON.parse(captured.body)
+      assert_equal "run-abc-123", sent.dig("meta", "freentonic_run_id")
+      assert_equal "test", sent["source_tag"],
+        "original payload keys must survive the merge"
+    end
+
+    def test_http_exporter_merges_into_existing_meta
+      captured, fake_http = build_capturing_http
+      payload = sample_payload.merge("meta" => { "workflow_version" => "1.2.3" })
+      with_net_http_new(fake_http) do
+        with_env("FREENTONIC_RUN_ID", "run-abc-123") do
+          silence_stdout do
+            Exporters::Http.new(url: "http://example.test/push", token: "tok").write(payload)
+          end
+        end
+      end
+      sent = ::JSON.parse(captured.body)
+      assert_equal "run-abc-123", sent["meta"]["freentonic_run_id"]
+      assert_equal "1.2.3", sent["meta"]["workflow_version"]
+    end
+
+    def test_http_exporter_does_not_clobber_workflow_supplied_run_id
+      captured, fake_http = build_capturing_http
+      payload = sample_payload.merge("meta" => { "freentonic_run_id" => "explicit-from-workflow" })
+      with_net_http_new(fake_http) do
+        with_env("FREENTONIC_RUN_ID", "run-abc-123") do
+          silence_stdout do
+            Exporters::Http.new(url: "http://example.test/push", token: "tok").write(payload)
+          end
+        end
+      end
+      sent = ::JSON.parse(captured.body)
+      assert_equal "explicit-from-workflow", sent["meta"]["freentonic_run_id"]
+    end
+
+    def test_http_exporter_does_not_inject_when_env_unset
+      captured, fake_http = build_capturing_http
+      with_net_http_new(fake_http) do
+        with_env("FREENTONIC_RUN_ID", nil) do
+          silence_stdout do
+            Exporters::Http.new(url: "http://example.test/push", token: "tok").write(sample_payload)
+          end
+        end
+      end
+      sent = ::JSON.parse(captured.body)
+      refute sent.key?("meta"), "unexpected meta key when FREENTONIC_RUN_ID is absent"
     end
   end
 end
