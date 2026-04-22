@@ -3,6 +3,35 @@ require "stringio"
 
 module Freentonic
     class BrowserWorkflowRunnerTest < Minitest::Test
+      def test_sanitize_screenshot_label_blocks_traversal
+        # Path separators and any non-[A-Za-z0-9_.-] char become underscores.
+        # `.` on its own is allowed (so "foo.bar" works), but it can't combine
+        # with `/` to escape — the `/` itself always becomes `_`.
+        assert_equal "_..escape",
+          BrowserWorkflowRunner.sanitize_screenshot_label("/..escape")
+        assert_equal "foo_bar",
+          BrowserWorkflowRunner.sanitize_screenshot_label("foo/bar")
+        # URL-encoded traversal is also neutralized — the `%` becomes `_`.
+        assert_equal ".._2F_escape",
+          BrowserWorkflowRunner.sanitize_screenshot_label("..%2F/escape")
+      end
+
+      def test_sanitize_screenshot_label_preserves_safe_chars
+        assert_equal "login-step_3.png",
+          BrowserWorkflowRunner.sanitize_screenshot_label("login-step_3.png")
+      end
+
+      def test_sanitize_screenshot_label_replaces_empty
+        assert_equal "unlabelled", BrowserWorkflowRunner.sanitize_screenshot_label("")
+        assert_equal "unlabelled", BrowserWorkflowRunner.sanitize_screenshot_label(nil)
+      end
+
+      def test_sanitize_screenshot_label_caps_length
+        long = "a" * 200
+        result = BrowserWorkflowRunner.sanitize_screenshot_label(long)
+        assert_operator result.bytesize, :<=, 64
+      end
+
       class FakeSession
         attr_reader :commands
 
