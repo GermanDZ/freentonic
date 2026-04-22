@@ -2,6 +2,7 @@
 
 require "fileutils"
 require "rbconfig"
+require "securerandom"
 
 module Freentonic
   # Per-invoke work unit. Owns the filesystem side of running one freentonic
@@ -52,10 +53,17 @@ module Freentonic
     DEFAULT_CHROME_PROFILE_ROOT  = File.expand_path("~/.cache/freentonic/chrome")
     DEFAULT_FREENTONIC_CMD       = [RbConfig.ruby, "-I/opt/freentonic/lib", "/opt/freentonic/bin/freentonic"].freeze
     DEFAULT_ARTIFACT_ROOT        = "/workspace"
+    DEFAULT_VNC_PASSWORD_FILE    = "/dev/shm/freentonic/vnc-password"
 
     SIGTERM_GRACE_SECONDS = 10
 
-    attr_reader :workflows_dir, :runs_dir, :tmpfs_dir, :chrome_profile_root
+    # 32 bytes of hex = 128 bits. Way past VNC's 8-char-truncation entropy
+    # ceiling, which is the point — we want an unreachable sentinel.
+    def self.random_unreachable_password
+      SecureRandom.hex(32)
+    end
+
+    attr_reader :workflows_dir, :runs_dir, :tmpfs_dir, :chrome_profile_root, :vnc_password_file
 
     def initialize(
       workflows_dir:          DEFAULT_WORKFLOWS_DIR,
@@ -64,6 +72,7 @@ module Freentonic
       chrome_profile_root:    DEFAULT_CHROME_PROFILE_ROOT,
       freentonic_cmd:         DEFAULT_FREENTONIC_CMD,
       artifact_root:          DEFAULT_ARTIFACT_ROOT,
+      vnc_password_file:      DEFAULT_VNC_PASSWORD_FILE,
       logger:                 nil
     )
       @workflows_dir       = workflows_dir
@@ -72,6 +81,7 @@ module Freentonic
       @chrome_profile_root = chrome_profile_root
       @freentonic_cmd      = Array(freentonic_cmd).dup.freeze
       @artifact_root       = artifact_root
+      @vnc_password_file   = vnc_password_file
       @logger              = logger
     end
 
@@ -108,6 +118,12 @@ module Freentonic
       env  = build_env(request, chrome_profile_dir: chrome_profile_dir, run_dir: run_dir)
       argv = build_argv(request, secrets_path: secrets_path, run_dir: run_dir)
 
+      # Set the VNC password for this run before spawning the child. If the
+      # caller didn't supply one, we write an unreachable value so attaching
+      # noVNC is impossible for this invoke. The paired ensure-block write
+      # (see below) relocks VNC as soon as the run finishes.
+      write_vnc_password(request.vnc_password || self.class.random_unreachable_password)
+
       log_path = File.join(run_dir, "log")
       exit_code, timed_out, signaled = spawn_and_wait(env, argv, log_path, request.timeout_sec, &on_start)
       warnings << "timeout reached (#{request.timeout_sec}s); child was terminated" if timed_out
@@ -125,9 +141,33 @@ module Freentonic
     ensure
       cleanup_chrome(chrome_profile_dir) if chrome_profile_dir
       cleanup_tmpfs(tmpfs_run_dir)       if tmpfs_run_dir
+      # Always relock VNC after a run, regardless of exit path (timeout,
+      # crash, validation-late error). x11vnc re-reads its passwdfile on
+      # every new client connection, so the next noVNC attach sees this
+      # unreachable sentinel.
+      write_vnc_password(self.class.random_unreachable_password)
     end
 
     private
+
+    # Overwrite the x11vnc passwdfile. The file is picked up on every new
+    # VNC client connection (x11vnc's `-passwdfile read:` semantics), so
+    # updating it here takes effect without any signal or restart.
+    #
+    # Failures are non-fatal: the most common is "path doesn't exist"
+    # (running outside the container, or the entrypoint hasn't set up the
+    # tmpfs yet). We warn and move on rather than killing a sync because
+    # the VNC debug channel isn't writable.
+    def write_vnc_password(value)
+      return if @vnc_password_file.nil? || @vnc_password_file.empty?
+      parent = File.dirname(@vnc_password_file)
+      return unless Dir.exist?(parent)
+      File.open(@vnc_password_file, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |f|
+        f.write(value)
+      end
+    rescue Errno::EACCES, Errno::ENOENT, Errno::EROFS, Errno::ENOSPC => e
+      log("vnc passwdfile write failed at #{@vnc_password_file}: #{e.class}: #{e.message}")
+    end
 
     def write_secrets_file(path, inline)
       File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |f|

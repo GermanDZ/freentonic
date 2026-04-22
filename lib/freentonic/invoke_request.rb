@@ -34,6 +34,10 @@ module Freentonic
     EXPORT_PATH_PATTERN = /\A[A-Za-z0-9_.\-]{1,128}\z/
     HEADER_NAME_PATTERN = /\A[A-Za-z0-9!#$%&'*+\-.^_`|~]{1,64}\z/
     SECRET_KEY_PATTERN  = /\A[A-Za-z_][A-Za-z0-9_.]{0,127}\z/
+    # Printable ASCII minus space / control chars / DEL. Matches what x11vnc
+    # will tolerate in its passwdfile. VNC's DES-based auth truncates to the
+    # first 8 chars; the API doc notes that as the effective entropy ceiling.
+    VNC_PASSWORD_PATTERN = /\A[\x21-\x7E]{1,64}\z/
 
     DEFAULT_TIMEOUT = 1800
     MAX_TIMEOUT     = 7200
@@ -41,7 +45,8 @@ module Freentonic
     ALLOWED_HTTP_METHODS = %w[POST PUT].freeze
 
     attr_reader :run_id, :profile_key, :timeout_sec, :lookback, :workflow_path,
-                :credentials_inline, :credentials_file, :export, :chrome
+                :credentials_inline, :credentials_file, :export, :chrome,
+                :vnc_password
 
     # @param body [Hash] parsed JSON request
     # @param workflows_dir [String] absolute path to the workflows root
@@ -68,6 +73,7 @@ module Freentonic
       @timeout_sec = parse_timeout
       @lookback = parse_lookback
       @chrome = parse_chrome
+      @vnc_password = parse_vnc_password
 
       @profile_key ||= derive_profile_key
       self
@@ -278,6 +284,16 @@ module Freentonic
       return nil if value.nil?
       unless value.is_a?(Integer) && value > 0 && value <= 3650
         raise InvokeError.new(:bad_request, "lookback must be a positive integer (days)")
+      end
+      value
+    end
+
+    def parse_vnc_password
+      value = @body["vnc_password"]
+      return nil if value.nil?
+      unless value.is_a?(String) && value =~ VNC_PASSWORD_PATTERN
+        raise InvokeError.new(:bad_request,
+          "vnc_password must be 1-64 printable ASCII chars (no spaces / control chars / newlines)")
       end
       value
     end

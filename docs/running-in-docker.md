@@ -119,18 +119,25 @@ docker volume rm freentonic-chrome-profile
 Enable VNC and publish ports 5900 (raw VNC) + 6080 (noVNC browser client):
 
 ```sh
-FREENTONIC_VNC=1 ./docker-run-freentonic.sh cli \
+FREENTONIC_VNC=1 FREENTONIC_VNC_PASSWORD=choose-your-own \
+  ./docker-run-freentonic.sh cli \
   --workflow /home/freentonic/workflows/ing/workflow.yml \
   --secrets cli \
   --export json --export-path /workspace/out.json
 ```
 
+The `FREENTONIC_VNC_PASSWORD` you set is what x11vnc uses for the
+container's lifetime. Leave it unset and the entrypoint generates a
+random 12-char password and prints it once — grep the container logs
+for `[entrypoint]   Password:`.
+
 Two ways to attach:
 
-- Browser (no client install): <http://localhost:6080/vnc.html?host=localhost&port=6080&password=freentonic&autoconnect=true>
-- Native macOS client: `open vnc://localhost:5900`
+- Browser (no client install): `http://localhost:6080/vnc.html?host=localhost&port=6080&password=<yours>&autoconnect=true`
+- Native macOS client: `open vnc://localhost:5900`, then enter the password.
 
-Password: `freentonic`.
+VNC's wire auth truncates to 8 bytes — pick a password with real
+entropy in those first 8 chars.
 
 ## Running without the wrapper
 

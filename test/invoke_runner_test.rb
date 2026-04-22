@@ -13,7 +13,9 @@ class InvokeRunnerTest < Minitest::Test
     @runs_dir            = File.join(@root, "runs")
     @tmpfs_dir           = File.join(@root, "tmpfs")
     @chrome_profile_root = File.join(@root, "chrome")
-    FileUtils.mkdir_p([@workflows_dir, @runs_dir, @tmpfs_dir, @chrome_profile_root])
+    @vnc_dir             = File.join(@root, "vnc")
+    @vnc_password_file   = File.join(@vnc_dir, "password")
+    FileUtils.mkdir_p([@workflows_dir, @runs_dir, @tmpfs_dir, @chrome_profile_root, @vnc_dir])
 
     @workflow_rel = "acme/workflow.yml"
     @workflow_abs = File.join(@workflows_dir, @workflow_rel)
@@ -49,6 +51,17 @@ class InvokeRunnerTest < Minitest::Test
       stat -f "%OLp" "$secrets_path"           > "$R/secrets_mode"
       cp "$secrets_path" "$R/secrets_contents"
     fi
+
+    # Snapshot the vnc passwdfile that the server wrote BEFORE spawning us.
+    # Tests compare this against the request's vnc_password to verify the
+    # pre-spawn write landed. We look at $STUB_VNC_FILE (set by the test);
+    # the child's scoped ENV doesn't include it, so the test passes the path
+    # via a sentinel file in @root that the stub knows where to find.
+    if [ -f "${FREENTONIC_RUN_DIR}/../../vnc/password" ]; then
+      cp "${FREENTONIC_RUN_DIR}/../../vnc/password" "$R/vnc_password_at_spawn"
+      stat -c "%a" "${FREENTONIC_RUN_DIR}/../../vnc/password" 2>/dev/null > "$R/vnc_password_mode" || \
+      stat -f "%OLp" "${FREENTONIC_RUN_DIR}/../../vnc/password"           > "$R/vnc_password_mode"
+    fi
   BASH
 
   def write_stub(behavior)
@@ -65,7 +78,8 @@ class InvokeRunnerTest < Minitest::Test
       tmpfs_dir:           @tmpfs_dir,
       chrome_profile_root: @chrome_profile_root,
       freentonic_cmd:      ["/bin/bash", stub_path],
-      artifact_root:       @root
+      artifact_root:       @root,
+      vnc_password_file:   @vnc_password_file
     )
   end
 
@@ -263,5 +277,51 @@ class InvokeRunnerTest < Minitest::Test
 
     expected = File.join(@chrome_profile_root, "acme__tenant")
     assert Dir.exist?(expected), "expected profile subdir at #{expected}"
+  end
+
+  # ─── vnc password rotation ───
+
+  def test_vnc_password_written_before_spawn_when_provided
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    request = build_request(vnc_password: "operator-pw-2026")
+    runner.run(request)
+
+    run_dir = File.join(@runs_dir, request.run_id)
+    snapshot = read_stub(run_dir, "vnc_password_at_spawn").to_s
+    assert_equal "operator-pw-2026", snapshot,
+      "child process should have seen the operator-supplied vnc password"
+
+    mode = read_stub(run_dir, "vnc_password_mode").to_s.strip
+    assert_equal "600", mode, "vnc passwdfile must be owner-only"
+  end
+
+  def test_vnc_password_random_unreachable_when_absent
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    request = build_request  # no vnc_password in overrides
+    runner.run(request)
+
+    run_dir = File.join(@runs_dir, request.run_id)
+    snapshot = read_stub(run_dir, "vnc_password_at_spawn").to_s
+    assert_match(/\A[0-9a-f]{64}\z/, snapshot,
+      "without vnc_password, the passwdfile should carry an unreachable random value")
+  end
+
+  def test_vnc_password_overwritten_in_ensure_block
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    request = build_request(vnc_password: "during-run-pw")
+    runner.run(request)
+
+    run_dir = File.join(@runs_dir, request.run_id)
+    at_spawn = read_stub(run_dir, "vnc_password_at_spawn").to_s
+    after_run = File.read(@vnc_password_file)
+
+    assert_equal "during-run-pw", at_spawn
+    refute_equal at_spawn, after_run,
+      "ensure block should overwrite the passwdfile; the operator password must not linger"
+    assert_match(/\A[0-9a-f]{64}\z/, after_run,
+      "post-run sentinel should be a 64-hex-char unreachable value")
   end
 end
