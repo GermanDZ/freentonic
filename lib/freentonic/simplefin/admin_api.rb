@@ -246,8 +246,42 @@ module Freentonic
         return not_found(client) unless @feature.profile_store.exists?(key)
         body = parse_json(request) || {}
         headed = body["headed"] == true
-        result = @feature.queue&.enqueue(key, headed: headed, trigger: "admin") || :disabled
-        Http.write_json(client, 200, { "enqueued" => result.to_s, "profile_key" => key })
+
+        # Headed syncs exist so the operator can complete a login through
+        # noVNC. Mint a short, human-typeable VNC password per invocation
+        # and return it to the admin so they can paste it into the noVNC
+        # prompt. Headless syncs keep the random-unreachable default.
+        vnc_password = headed ? random_vnc_password : nil
+        result = @feature.queue&.enqueue(
+          key, headed: headed, trigger: "admin", vnc_password: vnc_password
+        ) || :disabled
+
+        payload = { "enqueued" => result.to_s, "profile_key" => key, "headed" => headed }
+        if headed && vnc_password
+          payload["vnc_password"] = vnc_password
+          payload["vnc_url"] = build_vnc_url(vnc_password)
+        end
+        Http.write_json(client, 200, payload)
+      end
+
+      # 8 alphanumeric chars. VNC's DES-based auth truncates at 8 chars, so
+      # anything longer is wasted entropy; 8 chars of [A-Za-z0-9] is ~48 bits
+      # of entropy, plenty for a throwaway per-invoke password.
+      def random_vnc_password
+        alphabet = (("A".."Z").to_a + ("a".."z").to_a + ("0".."9").to_a)
+        Array.new(8) { alphabet.sample(random: SecureRandom) }.join
+      end
+
+      def build_vnc_url(password)
+        base = URI(@feature.public_url) rescue nil
+        return nil unless base
+        host = base.host
+        scheme = base.scheme == "https" ? "https" : "http"
+        # noVNC is exposed on 6080 separately from the admin UI's port;
+        # we preserve the host and rewrite the port so a reverse-proxy
+        # deployment still gets a useful hint. Operators fronting noVNC
+        # with a different path/port should just ignore this field.
+        "#{scheme}://#{host}:6080/vnc.html?host=#{host}&port=6080&password=#{URI.encode_www_form_component(password)}&autoconnect=true"
       end
 
       def handle_setup_token(client, key, method)

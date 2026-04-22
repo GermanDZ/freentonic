@@ -175,6 +175,23 @@ textarea {
 }
 .run-row-head button { padding: 2px 8px; font-size: 12px; }
 
+.vnc-password {
+  margin: 10px 0;
+  padding: 14px 18px;
+  background: #ffe9a8;
+  color: #5c3e00;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 22px;
+  letter-spacing: 0.14em;
+  text-align: center;
+  user-select: all;
+}
+
+@media (prefers-color-scheme: dark) {
+  .vnc-password { background: #3a2f10; color: #ffe9a8; }
+}
+
 .run-log {
   margin: 8px 0 0;
   padding: 10px 12px;

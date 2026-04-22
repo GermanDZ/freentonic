@@ -25,8 +25,8 @@ module Freentonic
       class RecordingQueue
         attr_reader :enqueued
         def initialize; @enqueued = []; end
-        def enqueue(key, headed: false, trigger: "auto")
-          @enqueued << [key, headed, trigger]; :enqueued
+        def enqueue(key, headed: false, trigger: "auto", vnc_password: nil)
+          @enqueued << [key, headed, trigger, vnc_password]; :enqueued
         end
         def pending_keys; @enqueued.map(&:first); end
         def active_key; nil; end
@@ -161,6 +161,27 @@ module Freentonic
       end
 
       # ── Protocol: claim + access URL + accounts ─────────────
+
+      def test_admin_sync_headed_returns_one_shot_vnc_password
+        req("POST", "/admin/api/profiles",
+            body: { profile_key: "acme", workflow: @workflow_name }, headers: admin)
+        res = req("POST", "/admin/api/profiles/acme/sync",
+                  body: { headed: true }, headers: admin)
+        assert_equal "200", res.code
+        body = JSON.parse(res.body)
+        assert_equal true, body["headed"]
+        assert_match(/\A[A-Za-z0-9]{8}\z/, body["vnc_password"])
+        assert_includes body["vnc_url"], body["vnc_password"]
+      end
+
+      def test_admin_sync_headless_does_not_leak_vnc_password
+        req("POST", "/admin/api/profiles",
+            body: { profile_key: "acme", workflow: @workflow_name }, headers: admin)
+        res = req("POST", "/admin/api/profiles/acme/sync",
+                  body: { headed: false }, headers: admin)
+        body = JSON.parse(res.body)
+        refute body.key?("vnc_password")
+      end
 
       def test_setup_token_can_be_claimed_once
         req("POST", "/admin/api/profiles", body: { profile_key: "acme", workflow: @workflow_name }, headers: admin)

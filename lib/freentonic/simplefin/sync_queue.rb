@@ -21,7 +21,7 @@ module Freentonic
       # translated into state `needs_reauth` by the worker below.
       NEEDS_REAUTH_EXIT_CODE = 3
 
-      Job = Struct.new(:profile_key, :headed, :trigger, keyword_init: true)
+      Job = Struct.new(:profile_key, :headed, :trigger, :vnc_password, keyword_init: true)
 
       def initialize(
         feature:,
@@ -59,12 +59,13 @@ module Freentonic
       # Enqueue a sync for a profile. No-op when the profile is already
       # queued or running — keeps the idempotency contract the GET /accounts
       # handler relies on.
-      def enqueue(profile_key, headed: false, trigger: "auto")
+      def enqueue(profile_key, headed: false, trigger: "auto", vnc_password: nil)
         Paths.validate_component!(profile_key, "profile_key")
         @queue_mutex.synchronize do
           return :already_active if @active_key == profile_key
           return :already_queued if @queue.any? { |j| j.profile_key == profile_key }
-          @queue << Job.new(profile_key: profile_key, headed: headed, trigger: trigger)
+          @queue << Job.new(profile_key: profile_key, headed: headed,
+                            trigger: trigger, vnc_password: vnc_password)
           @queue_cv.signal
         end
         @feature.state_store.update(profile_key) do |state|
@@ -223,6 +224,10 @@ module Freentonic
           "chrome"      => { "headless" => !job.headed }
         }
         body.delete("lookback") if body["lookback"].nil?
+        # Only set vnc_password when the operator asked for a headed sync.
+        # Default behaviour (headless auto-sync) inherits the runner's
+        # random-unreachable sentinel, locking VNC down between invokes.
+        body["vnc_password"] = job.vnc_password if job.headed && job.vnc_password
         Freentonic::InvokeRequest.from_hash(body, workflows_dir: @workflows_dir)
       end
 
