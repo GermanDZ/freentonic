@@ -175,6 +175,23 @@ textarea {
 }
 .run-row-head button { padding: 2px 8px; font-size: 12px; }
 
+.button-link {
+  display: inline-block;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #4573da;
+  background: #4573da;
+  color: #fff;
+  text-decoration: none;
+  font: inherit;
+}
+
+.button-link:hover { filter: brightness(1.05); }
+
+#active-job-banner {
+  border-left: 4px solid #4573da;
+}
+
 .vnc-password {
   margin: 10px 0;
   padding: 14px 18px;

@@ -58,9 +58,20 @@ module Freentonic
 
       # Create a new profile. `attrs` accepts a subset of the stored fields.
       # Raises ArgumentError if the profile already exists.
+      # Names used elsewhere in our URL space — can't double as profile
+      # keys or we'd get routing ambiguity (e.g. a profile called "claim"
+      # would collide with POST /simplefin/claim/<id>, and one called
+      # "accounts" would collide with the legacy GET /simplefin/accounts/<key>
+      # alias). Keep the list short and explicit.
+      RESERVED_PROFILE_KEYS = %w[claim accounts admin api p status healthz invoke runs profiles].freeze
+
       def create(key:, workflow:, display_name: nil, lookback_days: 30, max_lookback_days: 365,
                  sync_interval_seconds: nil, hidden_accounts: [])
         Paths.validate_component!(key, "profile_key")
+        if RESERVED_PROFILE_KEYS.include?(key)
+          raise ArgumentError,
+            "simplefin: profile_key #{key.inspect} is reserved (clashes with a built-in route)"
+        end
         validate_workflow!(workflow)
         if exists?(key)
           raise ArgumentError, "simplefin: profile #{key.inspect} already exists"

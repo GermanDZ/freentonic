@@ -40,6 +40,10 @@ module Freentonic
         @stopping    = false
         @thread      = nil
         @active_key  = nil
+        # @active_job is richer than @active_key — includes run_id, headed,
+        # vnc_password, started_at so the admin UI can surface a VNC link
+        # and a live-log pointer without having to poll run_log.recent.
+        @active_job  = nil
       end
 
       def start
@@ -83,6 +87,13 @@ module Freentonic
         @queue_mutex.synchronize { @active_key.dup }
       end
 
+      # Snapshot of the currently-running job (if any). Admin status
+      # surfaces this so the UI can show a Watch-live (VNC) link and a
+      # live log tail without having to guess at run_ids.
+      def active_job
+        @queue_mutex.synchronize { @active_job ? @active_job.dup : nil }
+      end
+
       # ── worker ───────────────────────────────────────────────
 
       private
@@ -99,7 +110,10 @@ module Freentonic
           break unless job
           process_job(job)
         ensure
-          @queue_mutex.synchronize { @active_key = nil }
+          @queue_mutex.synchronize do
+            @active_key = nil
+            @active_job = nil
+          end
         end
       rescue StandardError => e
         @feature.log("queue worker crashed: #{e.class}: #{e.message}")
@@ -117,6 +131,19 @@ module Freentonic
           "last_error" => nil, "started_at" => Time.now.utc.iso8601)
 
         run_id = "simplefin-#{job.profile_key}-#{SecureRandom.hex(6)}"
+
+        # Publish rich active-job info the moment the run_id is minted, so
+        # an admin-UI poll can show "Watch live" + "Live log" right away.
+        @queue_mutex.synchronize do
+          @active_job = {
+            profile_key: job.profile_key,
+            run_id:      run_id,
+            headed:      !!job.headed,
+            vnc_password: job.headed ? job.vnc_password : nil,
+            trigger:     job.trigger,
+            started_at:  Time.now.utc.iso8601
+          }
+        end
 
         begin
           request = build_request(profile, job, run_id: run_id)

@@ -75,11 +75,26 @@ module Freentonic
       def handle_status(client)
         profiles = @feature.profile_store.list
         entries = profiles.map { |p| profile_summary(p) }
+        active_job = @feature.queue&.active_job
+        active_payload = nil
+        if active_job
+          active_payload = {
+            "profile_key" => active_job[:profile_key],
+            "run_id"      => active_job[:run_id],
+            "headed"      => active_job[:headed],
+            "trigger"     => active_job[:trigger],
+            "started_at"  => active_job[:started_at]
+          }
+          if active_job[:headed] && active_job[:vnc_password]
+            active_payload["vnc_url"] = build_vnc_url(active_job[:vnc_password])
+          end
+        end
         Http.write_json(client, 200, {
-          "profiles"  => entries,
-          "active"    => @feature.queue&.active_key,
-          "pending"   => @feature.queue&.pending_keys || [],
-          "server_ts" => Time.now.utc.iso8601
+          "profiles"   => entries,
+          "active"     => @feature.queue&.active_key,
+          "active_job" => active_payload,
+          "pending"    => @feature.queue&.pending_keys || [],
+          "server_ts"  => Time.now.utc.iso8601
         })
       end
 

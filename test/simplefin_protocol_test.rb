@@ -199,7 +199,7 @@ module Freentonic
 
         first = req("POST", path)
         assert_equal "200", first.code
-        assert_match(%r{http://[^@]+@freentonic.example/simplefin/accounts/acme}, first.body)
+        assert_match(%r{http://[^@]+@freentonic.example/simplefin/acme\z}, first.body)
 
         # Second attempt is rejected.
         second = req("POST", path)
@@ -415,11 +415,15 @@ module Freentonic
         @claim_response = req("POST", URI(claim_url).path)
       end
 
+      # Reproduces what Actual's sync-server (and the real SimpleFIN CLI)
+      # does: take the access URL's base path and append /accounts. Always
+      # returns the final path the account-fetching GET hits.
       def current_access_url(key)
         uri = URI(@claim_response.body.strip)
         user = URI.decode_www_form_component(uri.user)
         password = URI.decode_www_form_component(uri.password)
-        [uri.path, user, password]
+        path = uri.path + "/accounts"
+        [path, user, password]
       end
 
       def basic_auth(user, password)

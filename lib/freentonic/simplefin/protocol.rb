@@ -47,6 +47,18 @@ module Freentonic
           return handle_claim(client, match[1], headers)
         end
 
+        # New shape, matches real SimpleFIN: access URL ends at a base
+        # (/simplefin/<key>), clients append /accounts to make the call.
+        # Actual Budget's sync-server does exactly this in getAccounts().
+        if (match = pathname.match(%r{\A/simplefin/([^/]+)/accounts\z}))
+          return Http.write_json(client, 405, { "error" => "method not allowed" }, headers: headers) unless method == "GET"
+          return handle_accounts(client, match[1], request, params, headers)
+        end
+
+        # Legacy flat shape: direct GET on /simplefin/accounts/<key>.
+        # Kept so existing curl-based tests and copy-pasted access URLs
+        # keep working. New tokens minted by this version use the new
+        # shape above; this branch is strictly a back-compat alias.
         if (match = pathname.match(%r{\A/simplefin/accounts/([^/]+)\z}))
           return Http.write_json(client, 405, { "error" => "method not allowed" }, headers: headers) unless method == "GET"
           return handle_accounts(client, match[1], request, params, headers)
@@ -241,10 +253,13 @@ module Freentonic
 
       def build_access_url(profile_key, username, password)
         base = URI(@feature.public_url)
+        # The returned URL ends at the *base* — no trailing /accounts.
+        # Clients (Actual's sync-server, the real SimpleFIN CLI) append
+        # /accounts themselves. See handle_accounts' route pattern.
         "#{base.scheme}://#{URI.encode_www_form_component(username)}:" \
           "#{URI.encode_www_form_component(password)}@#{base.host}" \
           "#{base.port && base.port != default_port_for(base.scheme) ? ":#{base.port}" : ""}" \
-          "/simplefin/accounts/#{profile_key}"
+          "/simplefin/#{profile_key}"
       end
 
       def default_port_for(scheme)
