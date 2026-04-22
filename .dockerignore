@@ -14,3 +14,4 @@ Rakefile
 .bundle
 coverage
 tmp
+.tmp
