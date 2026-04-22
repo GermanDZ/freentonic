@@ -383,23 +383,20 @@ module Freentonic
           .sort
       end
 
-      # Declared secrets for a workflow, derived from its `source.credentials`
-      # YAML block. Used by the admin UI to render form fields. YAML load is
-      # safe_load with no permitted classes — same invariant as the engine.
+      # Declared secrets for a workflow, used by the admin UI to render
+      # credential-entry form fields. Goes through WorkflowSchema.load so
+      # we get the same canonical list the runtime will ask for — plus
+      # schema validation for free. YAML parsing is still safe_load with
+      # no permitted classes (invariant 1).
       def declared_secrets(workflow_rel)
         full = File.join(@workflows_dir, workflow_rel)
         return [] unless File.file?(full)
-        doc = YAML.safe_load(File.read(full), permitted_classes: [], aliases: false) || {}
-        creds = doc.dig("source", "credentials") || doc["credentials"] || []
-        creds = [creds] if creds.is_a?(Hash)
-        Array(creds).flat_map do |entry|
-          case entry
-          when String then [entry]
-          when Hash then entry.keys
-          else []
-          end
-        end.uniq
-      rescue StandardError
+        schema = Freentonic::WorkflowSchema.load(full)
+        secrets = schema.secrets
+        return [] unless secrets.is_a?(Hash)
+        secrets.keys.map(&:to_s)
+      rescue StandardError => e
+        @feature.log("declared_secrets failed for #{workflow_rel}: #{e.class}: #{e.message}")
         []
       end
 

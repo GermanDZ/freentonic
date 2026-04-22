@@ -40,10 +40,17 @@ module Freentonic
         @workflow_name = "acme/workflow.yml"
         FileUtils.mkdir_p(File.join(@workflows_dir, "acme"))
         File.write(File.join(@workflows_dir, @workflow_name), <<~YAML)
-          source:
-            credentials:
-              - USER_DNI
-              - USER_PIN
+          version: 1
+          config:
+            key: acme
+          secrets:
+            USER_DNI:
+              prompt: "Acme user DNI"
+            USER_PIN:
+              prompt: "Acme user PIN"
+          phases:
+            connect: []
+          pipeline: []
         YAML
 
         @master_key_b64 = Crypto.generate_master_key_b64

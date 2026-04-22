@@ -114,7 +114,12 @@ if [ "${FREENTONIC_SIMPLEFIN_ENABLED:-0}" = "1" ]; then
   fi
   SIMPLEFIN_ROOT="${FREENTONIC_SIMPLEFIN_ROOT:-/workspace/simplefin}"
   mkdir -p "${SIMPLEFIN_ROOT}"
-  chmod 0700 "${SIMPLEFIN_ROOT}"
+  # Best-effort: when the root is a bind mount owned by a different host
+  # uid (common on Docker Desktop + macOS), chmod by a non-root user
+  # fails with EPERM. The files we actually write under this dir are mode
+  # 0600 and 0700 via umask + explicit open flags in AtomicFile, so a
+  # loose parent dir is fine.
+  chmod 0700 "${SIMPLEFIN_ROOT}" 2>/dev/null || true
   echo "[entrypoint] SimpleFIN bridge enabled. State dir: ${SIMPLEFIN_ROOT}"
 fi
 
