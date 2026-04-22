@@ -20,20 +20,22 @@ module Freentonic
     class Feature
       attr_reader :root, :master_key, :admin_password, :public_url,
                   :profile_store, :state_store, :cache_store, :claim_store,
-                  :run_log, :queue, :logger
+                  :run_log, :queue, :logger, :cors_allowed_origins
 
       def initialize(
-        root:           Paths.root,
+        root:                   Paths.root,
         master_key:,
         admin_password:,
         public_url:,
-        logger:         nil
+        cors_allowed_origins:   [],
+        logger:                 nil
       )
-        @root           = root
-        @master_key     = master_key
-        @admin_password = admin_password
-        @public_url     = public_url.sub(/\/+\z/, "")
-        @logger         = logger || ->(_msg) {}
+        @root                 = root
+        @master_key           = master_key
+        @admin_password       = admin_password
+        @public_url           = public_url.sub(/\/+\z/, "")
+        @cors_allowed_origins = Array(cors_allowed_origins).compact.map { |o| o.strip }.reject(&:empty?)
+        @logger               = logger || ->(_msg) {}
 
         Paths.ensure_layout!(@root)
 
@@ -164,6 +166,7 @@ module Freentonic
       ADMIN_PW_ENV   = "FREENTONIC_ADMIN_PASSWORD"
       PUBLIC_URL_ENV = "FREENTONIC_PUBLIC_URL"
       ROOT_ENV       = "FREENTONIC_SIMPLEFIN_ROOT"
+      CORS_ENV       = "FREENTONIC_CORS_ALLOWED_ORIGINS"
 
       def self.enabled?
         %w[1 true yes on].include?(ENV[ENABLED_ENV].to_s.downcase)
@@ -188,11 +191,12 @@ module Freentonic
         end
 
         new(
-          root:           ENV[ROOT_ENV] || Paths.root,
-          master_key:     master_key,
-          admin_password: ENV.fetch(ADMIN_PW_ENV),
-          public_url:     ENV.fetch(PUBLIC_URL_ENV),
-          logger:         logger
+          root:                 ENV[ROOT_ENV] || Paths.root,
+          master_key:           master_key,
+          admin_password:       ENV.fetch(ADMIN_PW_ENV),
+          public_url:           ENV.fetch(PUBLIC_URL_ENV),
+          cors_allowed_origins: (ENV[CORS_ENV] || "").split(",").map(&:strip).reject(&:empty?),
+          logger:               logger
         )
       end
     end
