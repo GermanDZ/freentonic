@@ -223,11 +223,29 @@ module Freentonic
         headers[Regexp.last_match(1).downcase] = Regexp.last_match(2)
       end
 
-      length = (headers["content-length"] || "0").to_i
+      # We don't support chunked transfer encoding; reject it explicitly
+      # rather than silently falling back to Content-Length, which would
+      # be a request-smuggling shape if a proxy in front of us disagreed
+      # about framing.
+      if (te = headers["transfer-encoding"]) && !te.strip.empty?
+        raise RequestMalformed, "Transfer-Encoding not supported"
+      end
+
+      length = parse_content_length(headers["content-length"])
       raise RequestTooLarge if length > MAX_BODY_BYTES
 
       body = length.positive? ? reader.read_exactly(length) : ""
       Request.new(method: method, path: path, headers: headers, body: body)
+    end
+
+    def parse_content_length(raw)
+      return 0 if raw.nil? || raw.strip.empty?
+      # Strict: digits only, no sign, no whitespace. Ruby's String#to_i would
+      # silently accept "abc" → 0 (body skipped) or "-5" → -5 (body skipped).
+      unless raw.strip =~ /\A\d+\z/
+        raise RequestMalformed, "invalid Content-Length: #{raw.inspect}"
+      end
+      raw.strip.to_i
     end
 
     def write_response(client, status, body_hash)
