@@ -74,7 +74,8 @@ response.
   },
   "timeout_sec": 1800,
   "lookback":    14,
-  "chrome":      { "isolated": false, "headless": false }
+  "chrome":      { "isolated": false, "headless": false },
+  "vnc_password": "MyPass-2026"
 }
 ```
 
@@ -100,7 +101,33 @@ response.
 | `timeout_sec` | no | Default `1800`, max `7200`. Watchdog sends SIGTERM to the child's process group then SIGKILL after 10s grace. |
 | `lookback` | no | Days of history to fetch. Overrides the workflow default. |
 | `chrome.isolated` | no | If `true`, use a throwaway Chrome profile (ignores `profile_key`). Useful for debugging. |
+| `vnc_password` | no | VNC / noVNC password for **this run only**. Printable ASCII, `[\x21-\x7E]{1,64}` (no spaces, control chars, or newlines). The server writes this to x11vnc's passwdfile before spawning the child and overwrites it with an unreachable random value as soon as the run ends. Omit the field to keep VNC locked for the run. **VNC protocol caveat:** the wire-level auth uses only the first 8 bytes of the password, so anything beyond is ignored by the VNC client handshake. Pick at least 8 chars of real entropy. |
 | `chrome.headless` | no | Passes `--headless=new` to Chrome. Most banks detect and reject this; avoid unless you know the provider tolerates it. |
+
+#### VNC access per run
+
+When `FREENTONIC_VNC=1` is set on the container, x11vnc runs with
+`-passwdfile read:/dev/shm/freentonic/vnc-password`. The server rotates
+that file on every invoke:
+
+1. Before the child spawns, the server writes `request.vnc_password`
+   to the file (or a 64-hex-char unreachable value if the request
+   omitted the field).
+2. x11vnc re-reads the passwdfile on every new VNC client connection,
+   so opening the noVNC URL at `http://…:6080/vnc.html?password=<yours>`
+   Just Works.
+3. When the invoke finishes (any exit path — success, crash, timeout),
+   the server overwrites the file with a new unreachable value in its
+   `ensure` block. Subsequent attach attempts fail until the next
+   invoke sets a new password.
+
+There is no container-wide default password. An invoke with no
+`vnc_password` field has VNC effectively disabled for that run.
+
+Web-app integration pattern: generate a fresh per-invoke password
+(e.g. `SecureRandom.alphanumeric(12)`), pass it as `vnc_password` on
+`/invoke`, display a "View session" link using that password in the
+noVNC URL, and discard the password when the invoke returns.
 
 #### Auto-injection: `meta.freentonic_run_id`
 

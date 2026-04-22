@@ -187,7 +187,9 @@ Everything else below is optional.
 | `FREENTONIC_RUNS_DIR` | `/workspace/runs` | Per-run artifact root inside the container. |
 | `FREENTONIC_TMPFS_DIR` | `/dev/shm/freentonic/runs` | Where inline credentials are written during a run (auto-cleaned). |
 | `FREENTONIC_CHROME_PROFILE_ROOT` | `/home/freentonic/.cache/freentonic/chrome` | Chrome profile parent. Subdirectories are created per `profile_key`. |
-| `FREENTONIC_VNC` | `1` | Starts x11vnc on `:5900` and noVNC (HTML client) on `:6080`. Password: `freentonic`. The wrapper publishes both ports on `127.0.0.1` whenever this is `1`. Set to `0` to skip both. See [Step 8](#step-8--debugging-with-vnc). |
+| `FREENTONIC_VNC_PASSWORD_FILE` | `/dev/shm/freentonic/vnc-password` | Tmpfs path that x11vnc reads with `-passwdfile read:` and the server rotates per-invoke. Rarely worth overriding. |
+| `FREENTONIC_VNC` | `1` | Starts x11vnc on `:5900` and noVNC on `:6080`. No container-wide default password — in server mode the password comes from each `/invoke`'s `vnc_password`; in `cli` mode it comes from `FREENTONIC_VNC_PASSWORD` (below) or a random value printed on startup. See [Step 8](#step-8--debugging-with-vnc). |
+| `FREENTONIC_VNC_PASSWORD` | *(none — random if unset)* | **cli mode only.** Static VNC password for the `cli` container's lifetime. Ignored in server mode. |
 
 The wrapper script `docker-run-freentonic.sh` also reads:
 
@@ -276,20 +278,55 @@ surfaces pointing at the same Chrome session:
 Both are gated on the single `FREENTONIC_VNC` toggle. There is no
 separate sidecar container.
 
+### Password: server mode
+
+**There is no container-wide default password.** x11vnc's passwdfile
+is rotated per-invoke from the `/invoke` request body:
+
+1. The caller passes `"vnc_password": "<value>"` on `/invoke`.
+2. The server writes that value to the passwdfile before spawning the
+   child workflow.
+3. x11vnc re-reads the passwdfile on every new VNC client connection,
+   so the noVNC URL works immediately.
+4. When the invoke ends, the server overwrites the passwdfile with a
+   64-hex-char unreachable random value. Subsequent attach attempts
+   fail until the next invoke rotates it.
+
+An invoke with no `vnc_password` field has VNC effectively disabled
+for that run — the server still writes a fresh unreachable random
+value. This is intentional: an operator who forgot to set the
+password shouldn't be able to attach.
+
+See [`vnc_password` in the API doc](invoke-server-api.md#vnc-access-per-run)
+for the field's charset and VNC's 8-byte truncation caveat.
+
+### Password: cli mode
+
+The legacy `./docker-run-freentonic.sh cli` path needs a static
+password because there's no `/invoke` body to carry one. Two options:
+
+- Set `FREENTONIC_VNC_PASSWORD=<value>` on the container start — the
+  entrypoint uses that.
+- Leave it unset — the entrypoint generates a random 12-char
+  alphanumeric password and prints it once at startup:
+
+```
+[entrypoint]   Password: a7Qw2KxZ9NpT
+```
+
+Either way, noVNC and raw VNC both use the same per-container-start
+value for the full lifetime of that `cli` container.
+
 ### Using the wrapper
 
 ```sh
 FREENTONIC_VNC=1 ./docker-run-freentonic.sh server
 ```
 
-This publishes 5900 and 6080 on `127.0.0.1` and prints a ready-to-click URL:
-
-```
-noVNC at http://127.0.0.1:6080/vnc.html?host=localhost&port=6080&password=freentonic&autoconnect=true
-```
-
-Open that URL in any browser and you see the live Chrome window
-during each invoke. Password is `freentonic`.
+This publishes 5900 and 6080 on `127.0.0.1`. The noVNC URL the
+operator opens must include the password the web app passed on the
+specific `/invoke` — the wrapper intentionally does not print a URL
+with a password embedded, because there isn't one container-wide.
 
 ### Raw `docker run`
 
@@ -308,7 +345,8 @@ docker run -d \
   freentonic:latest
 ```
 
-Native macOS client: `open vnc://localhost:5900`, password `freentonic`.
+Native macOS client: `open vnc://localhost:5900`, then enter the
+password the `/invoke` caller supplied.
 
 ### Security note
 

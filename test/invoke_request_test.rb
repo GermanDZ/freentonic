@@ -200,6 +200,53 @@ class InvokeRequestTest < Minitest::Test
     assert_equal 400, err.status_code
   end
 
+  # ─── vnc_password ───
+
+  def test_vnc_password_missing_is_nil
+    req = parse(base_body)
+    assert_nil req.vnc_password
+  end
+
+  def test_vnc_password_valid_printable_ascii_accepted
+    req = parse(base_body.merge("vnc_password" => "MyPass-2026!"))
+    assert_equal "MyPass-2026!", req.vnc_password
+  end
+
+  def test_vnc_password_rejects_whitespace
+    err = assert_raises(Freentonic::InvokeError) do
+      parse(base_body.merge("vnc_password" => "has space"))
+    end
+    assert_equal 400, err.status_code
+  end
+
+  def test_vnc_password_rejects_control_char
+    err = assert_raises(Freentonic::InvokeError) do
+      parse(base_body.merge("vnc_password" => "ctrl\x01char"))
+    end
+    assert_equal 400, err.status_code
+  end
+
+  def test_vnc_password_rejects_newline
+    err = assert_raises(Freentonic::InvokeError) do
+      parse(base_body.merge("vnc_password" => "two\nlines"))
+    end
+    assert_equal 400, err.status_code
+  end
+
+  def test_vnc_password_length_cap
+    err = assert_raises(Freentonic::InvokeError) do
+      parse(base_body.merge("vnc_password" => "x" * 65))
+    end
+    assert_equal 400, err.status_code
+  end
+
+  def test_vnc_password_rejects_non_string
+    err = assert_raises(Freentonic::InvokeError) do
+      parse(base_body.merge("vnc_password" => 12345))
+    end
+    assert_equal 400, err.status_code
+  end
+
   # ─── timeout / lookback ───
 
   def test_timeout_default
