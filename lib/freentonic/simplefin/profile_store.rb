@@ -58,7 +58,8 @@ module Freentonic
 
       # Create a new profile. `attrs` accepts a subset of the stored fields.
       # Raises ArgumentError if the profile already exists.
-      def create(key:, workflow:, display_name: nil, lookback_days: 30, max_lookback_days: 365)
+      def create(key:, workflow:, display_name: nil, lookback_days: 30, max_lookback_days: 365,
+                 sync_interval_seconds: nil, hidden_accounts: [])
         Paths.validate_component!(key, "profile_key")
         validate_workflow!(workflow)
         if exists?(key)
@@ -66,16 +67,18 @@ module Freentonic
         end
         now = Time.now.utc.iso8601
         profile = {
-          "profile_key"       => key,
-          "display_name"      => display_name || key,
-          "workflow"          => workflow,
-          "lookback_days"     => coerce_lookback(lookback_days),
-          "max_lookback_days" => coerce_lookback(max_lookback_days),
-          "created_at"        => now,
-          "updated_at"        => now,
-          "secrets_salt"      => nil,
-          "secrets_envelopes" => {},
-          "access_url"        => { "username" => nil, "password_pw" => nil }
+          "profile_key"           => key,
+          "display_name"          => display_name || key,
+          "workflow"              => workflow,
+          "lookback_days"         => coerce_lookback(lookback_days),
+          "max_lookback_days"     => coerce_lookback(max_lookback_days),
+          "sync_interval_seconds" => coerce_interval(sync_interval_seconds),
+          "hidden_accounts"       => coerce_hidden_accounts(hidden_accounts),
+          "created_at"            => now,
+          "updated_at"            => now,
+          "secrets_salt"          => nil,
+          "secrets_envelopes"     => {},
+          "access_url"            => { "username" => nil, "password_pw" => nil }
         }
         AtomicFile.write_json(Paths.profile_path(key, @root), profile)
         profile
@@ -180,6 +183,24 @@ module Freentonic
         raise ArgumentError, "simplefin: lookback_days must be positive" unless int.positive?
         raise ArgumentError, "simplefin: lookback_days exceeds 3650" if int > 3650
         int
+      end
+
+      # nil / 0 / "" → disabled (no auto-sync). Integer, in seconds.
+      # Floor clamped to 5 min so a misconfiguration can't spam Chrome.
+      def coerce_interval(value)
+        return nil if value.nil? || value == "" || value == 0 || value == "0"
+        int = Integer(value)
+        return nil unless int.positive?
+        raise ArgumentError, "simplefin: sync_interval_seconds must be >= 300 (5 min)" if int < 300
+        int
+      end
+
+      def coerce_hidden_accounts(value)
+        return [] if value.nil?
+        unless value.is_a?(Array) && value.all? { |v| v.is_a?(String) && !v.empty? }
+          raise ArgumentError, "simplefin: hidden_accounts must be an array of non-empty strings"
+        end
+        value.uniq
       end
 
       def validate_workflow!(workflow)

@@ -109,6 +109,13 @@ module Freentonic
               enqueue: profile_key)
           end
           filtered = Reshape.apply_query(envelope, params)
+          profile  = @feature.profile_store.read(profile_key)
+          hidden   = Array(profile && profile["hidden_accounts"])
+          if hidden.any?
+            filtered = filtered.merge(
+              "accounts" => filtered["accounts"].reject { |a| hidden.include?(a["id"]) }
+            )
+          end
           Http.write_json(client, 200, filtered)
         when "needs_reauth"
           Http.write_json(client, 200, {

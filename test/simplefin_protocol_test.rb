@@ -285,6 +285,92 @@ module Freentonic
         assert_equal "200", res.code
       end
 
+      # ── Metrics + scheduling + hidden accounts ──────────────
+
+      def test_metrics_endpoint_aggregates
+        provision_profile_with_access_url("acme")
+        @feature.state_store.force_state("acme", "ready",
+          "last_synced_at" => Time.now.utc.iso8601, "last_error" => nil)
+
+        res = req("GET", "/admin/api/metrics", headers: admin)
+        assert_equal "200", res.code
+        body = JSON.parse(res.body)
+        assert_equal 1, body["profiles_total"]
+        assert_equal 1, body["profiles_by_state"]["ready"]
+        assert body["last_sync_age_seconds"]["min"].is_a?(Integer)
+      end
+
+      def test_patch_sets_sync_interval
+        req("POST", "/admin/api/profiles", body: { profile_key: "acme", workflow: @workflow_name }, headers: admin)
+        res = req("PATCH", "/admin/api/profiles/acme",
+          body: { sync_interval_seconds: 3600 }, headers: admin)
+        assert_equal "200", res.code
+        body = JSON.parse(res.body)
+        assert_equal 3600, body["profile"]["sync_interval_seconds"]
+      end
+
+      def test_patch_rejects_too_small_interval
+        req("POST", "/admin/api/profiles", body: { profile_key: "acme", workflow: @workflow_name }, headers: admin)
+        res = req("PATCH", "/admin/api/profiles/acme",
+          body: { sync_interval_seconds: 60 }, headers: admin)
+        assert_equal "400", res.code
+      end
+
+      def test_hidden_accounts_are_filtered_from_served_payload
+        provision_profile_with_access_url("acme")
+        req("PATCH", "/admin/api/profiles/acme",
+          body: { hidden_accounts: ["b2"] }, headers: admin)
+
+        envelope = {
+          "accounts" => [
+            { "id" => "a1", "currency" => "EUR", "balance" => "1.00",
+              "balance-date" => Time.now.to_i, "transactions" => [] },
+            { "id" => "b2", "currency" => "EUR", "balance" => "2.00",
+              "balance-date" => Time.now.to_i, "transactions" => [] }
+          ],
+          "errors" => []
+        }
+        @feature.cache_store.write("acme", envelope)
+        @feature.state_store.force_state("acme", "ready")
+
+        url, user, password = current_access_url("acme")
+        res = req("GET", url, headers: basic_auth(user, password))
+        body = JSON.parse(res.body)
+        assert_equal ["a1"], body["accounts"].map { |a| a["id"] }
+      end
+
+      def test_scheduler_tick_enqueues_due_profiles
+        provision_profile_with_access_url("acme")
+        # 300s minimum interval is too slow to test against a single tick, so
+        # patch the profile on disk directly to a tiny interval. The protocol
+        # layer's own coerce_interval floor protects the admin path.
+        @feature.profile_store.update("acme") do |p|
+          p["sync_interval_seconds"] = 1
+          p
+        end
+        @feature.state_store.force_state("acme", "idle",
+          "last_synced_at" => (Time.now - 60).utc.iso8601)
+
+        @feature.scheduler_tick
+        assert_includes @queue.enqueued.map(&:first), "acme"
+      end
+
+      def test_scheduler_tick_skips_running_and_needs_reauth
+        provision_profile_with_access_url("acme")
+        @feature.profile_store.update("acme") do |p|
+          p["sync_interval_seconds"] = 1
+          p
+        end
+
+        %w[running queued needs_reauth].each do |state|
+          @queue.enqueued.clear
+          @feature.state_store.force_state("acme", state,
+            "last_synced_at" => (Time.now - 3600).utc.iso8601)
+          @feature.scheduler_tick
+          assert_empty @queue.enqueued, "must not enqueue from state=#{state}"
+        end
+      end
+
       def test_admin_login_rejects_wrong_password
         res = req("POST", "/admin/login", body: "password=wrong",
                   headers: { "Content-Type" => "application/x-www-form-urlencoded" })

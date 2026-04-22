@@ -30,6 +30,8 @@ module Freentonic
         case
         when pathname == "/admin/api/status" && method == "GET"
           handle_status(client)
+        when pathname == "/admin/api/metrics" && method == "GET"
+          handle_metrics(client)
         when pathname == "/admin/api/workflows" && method == "GET"
           handle_workflows(client)
         when pathname == "/admin/api/profiles" && method == "GET"
@@ -81,6 +83,59 @@ module Freentonic
         })
       end
 
+      # Aggregate metrics across all profiles. Intended for a scrape by a
+      # lightweight uptime monitor / dashboard. Not Prometheus-formatted —
+      # plain JSON keeps the whole feature single-dependency.
+      def handle_metrics(client)
+        profiles = @feature.profile_store.list
+        states   = Hash.new(0)
+        last_ages = []
+        error_count = 0
+        now = Time.now
+
+        profiles.each do |profile|
+          state = @feature.state_store.read(profile["profile_key"])
+          states[state["state"]] += 1
+          error_count += 1 if state["last_error"]
+          if state["last_synced_at"]
+            last_ages << (now - Time.parse(state["last_synced_at"])).to_i rescue nil
+          end
+        end
+
+        runs_today = 0
+        cutoff = (now - 24 * 3600).utc.iso8601
+        profiles.each do |profile|
+          @feature.run_log.recent(profile["profile_key"], limit: 100).each do |r|
+            runs_today += 1 if r["started_at"] && r["started_at"] >= cutoff
+          end
+        end
+
+        last_ages.compact!
+        Http.write_json(client, 200, {
+          "profiles_total"      => profiles.size,
+          "profiles_by_state"   => states,
+          "profiles_with_error" => error_count,
+          "runs_last_24h"       => runs_today,
+          "queue" => {
+            "active"  => @feature.queue&.active_key,
+            "pending" => (@feature.queue&.pending_keys || []).size
+          },
+          "last_sync_age_seconds" => {
+            "min"    => last_ages.min,
+            "max"    => last_ages.max,
+            "median" => median(last_ages)
+          },
+          "server_ts" => now.utc.iso8601
+        })
+      end
+
+      def median(arr)
+        return nil if arr.nil? || arr.empty?
+        sorted = arr.sort
+        mid = sorted.size / 2
+        sorted.size.odd? ? sorted[mid] : ((sorted[mid - 1] + sorted[mid]) / 2)
+      end
+
       def handle_workflows(client)
         list = list_workflows.map do |rel|
           secrets = declared_secrets(rel)
@@ -113,7 +168,9 @@ module Freentonic
           workflow: workflow,
           display_name: body["display_name"],
           lookback_days: body["lookback_days"] || 30,
-          max_lookback_days: body["max_lookback_days"] || 365
+          max_lookback_days: body["max_lookback_days"] || 365,
+          sync_interval_seconds: body["sync_interval_seconds"],
+          hidden_accounts: body["hidden_accounts"] || []
         )
         Http.write_json(client, 200, { "profile" => profile_summary(profile) })
       rescue ArgumentError => e
@@ -143,6 +200,17 @@ module Freentonic
             end
             if body.key?("max_lookback_days")
               current["max_lookback_days"] = coerce_positive(body["max_lookback_days"], "max_lookback_days")
+            end
+            if body.key?("sync_interval_seconds")
+              raw = body["sync_interval_seconds"]
+              current["sync_interval_seconds"] =
+                (raw.nil? || raw == 0 || raw == "" || raw == "0") ? nil : coerce_interval(raw)
+            end
+            if body.key?("hidden_accounts")
+              unless body["hidden_accounts"].is_a?(Array) && body["hidden_accounts"].all? { |v| v.is_a?(String) }
+                raise ArgumentError, "hidden_accounts must be an array of strings"
+              end
+              current["hidden_accounts"] = body["hidden_accounts"].uniq
             end
             current
           end
@@ -256,19 +324,21 @@ module Freentonic
       def profile_summary(profile)
         state = @feature.state_store.read(profile["profile_key"])
         {
-          "profile_key"       => profile["profile_key"],
-          "display_name"      => profile["display_name"],
-          "workflow"          => profile["workflow"],
-          "lookback_days"     => profile["lookback_days"],
-          "max_lookback_days" => profile["max_lookback_days"],
-          "created_at"        => profile["created_at"],
-          "updated_at"        => profile["updated_at"],
-          "credential_names"  => (profile["secrets_envelopes"] || {}).keys.sort,
+          "profile_key"           => profile["profile_key"],
+          "display_name"          => profile["display_name"],
+          "workflow"              => profile["workflow"],
+          "lookback_days"         => profile["lookback_days"],
+          "max_lookback_days"     => profile["max_lookback_days"],
+          "sync_interval_seconds" => profile["sync_interval_seconds"],
+          "hidden_accounts"       => profile["hidden_accounts"] || [],
+          "created_at"            => profile["created_at"],
+          "updated_at"            => profile["updated_at"],
+          "credential_names"      => (profile["secrets_envelopes"] || {}).keys.sort,
           "access_url_configured" => !(profile.dig("access_url", "password_pw").nil?),
-          "state"             => state["state"],
-          "last_error"        => state["last_error"],
-          "last_run_id"       => state["last_run_id"],
-          "last_synced_at"    => state["last_synced_at"]
+          "state"                 => state["state"],
+          "last_error"            => state["last_error"],
+          "last_run_id"           => state["last_run_id"],
+          "last_synced_at"        => state["last_synced_at"]
         }
       end
 
@@ -308,6 +378,12 @@ module Freentonic
       def coerce_positive(value, name)
         int = Integer(value)
         raise ArgumentError, "#{name} must be positive" unless int.positive?
+        int
+      end
+
+      def coerce_interval(value)
+        int = Integer(value)
+        raise ArgumentError, "sync_interval_seconds must be >= 300 (5 min)" if int < 300
         int
       end
 

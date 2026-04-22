@@ -94,6 +94,7 @@ if simplefin_feature
   ).start
   simplefin_feature.install_queue(queue)
   simplefin_feature.start_housekeeper
+  simplefin_feature.start_scheduler
 end
 
 %w[TERM INT].each do |sig|
@@ -110,3 +111,4 @@ end
 server.start
 queue&.stop
 simplefin_feature&.stop_housekeeper
+simplefin_feature&.stop_scheduler

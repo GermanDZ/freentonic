@@ -85,6 +85,56 @@ module Freentonic
         @housekeeper_thread = nil
       end
 
+      # Scheduled pre-warm syncs. Each profile may set sync_interval_seconds
+      # in its admin config — when set, the scheduler enqueues a sync once
+      # that many seconds have elapsed since the last successful sync.
+      #
+      # Gating:
+      #   - never auto-enqueue while state ∈ { running, queued, needs_reauth }.
+      #   - skip profiles without access_url_configured (nothing to serve yet).
+      #   - always re-read profiles on each tick so admin-UI edits take effect
+      #     without a restart.
+      def start_scheduler(tick_seconds: 60)
+        @scheduler_stopping = false
+        @scheduler_thread = Thread.new do
+          until @scheduler_stopping
+            scheduler_tick
+            tick_seconds.times do
+              break if @scheduler_stopping
+              sleep 1
+            end
+          end
+        end
+        self
+      end
+
+      def stop_scheduler(timeout: 5)
+        @scheduler_stopping = true
+        @scheduler_thread&.join(timeout)
+        @scheduler_thread = nil
+      end
+
+      # Visible to tests — one pass through every profile.
+      def scheduler_tick
+        @profile_store.list.each do |profile|
+          key = profile["profile_key"]
+          interval = profile["sync_interval_seconds"]
+          next if interval.nil? || interval.to_i <= 0
+          next unless profile.dig("access_url", "password_pw")
+
+          state = @state_store.read(key)
+          next if %w[running queued needs_reauth].include?(state["state"])
+
+          last_at = state["last_synced_at"]
+          last_ts = last_at ? (Time.parse(last_at).to_f rescue 0.0) : 0.0
+          next if (Time.now.to_f - last_ts) < interval
+
+          @queue&.enqueue(key, headed: false, trigger: "scheduler")
+        end
+      rescue StandardError => e
+        log("scheduler tick error: #{e.class}: #{e.message}")
+      end
+
       # Reset any `queued` / `running` state to `idle` on boot — the
       # in-memory queue is ephemeral and Actual will re-enqueue on the
       # next /accounts call.
