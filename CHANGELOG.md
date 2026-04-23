@@ -2,6 +2,49 @@
 
 All notable changes to freentonic are documented here.
 
+## 0.4.0 — Per-provider Config loader + CLI symmetry fix
+
+Two small additive changes that round out the provider-authoring story.
+Fully backward compatible; safe drop-in upgrade from 0.3.0.
+
+### Added
+
+- `Freentonic::Providers::Config` — declarative loader for per-provider
+  `config.yml` files. Same YAML safe-load hardening as
+  `LegacyKeysLoader` (`permitted_classes: []`, `aliases: false`,
+  `symbolize_names: true`) — refuses `!ruby/object:` tags, YAML
+  aliases, and anything that would deserialize into a Ruby object.
+  Caches per institution by directory basename. Optional per provider:
+  missing `config.yml` returns `nil`.
+
+  Intent: hold non-legacy provider knobs that today live as Ruby
+  constants (institution slug, scraper version, lookup tables like
+  ING's `kind_by_product_type` or Fintonic's `kind_by_type`). Lets
+  per-provider PRs that touch these become `.yml` diffs instead of
+  Ruby diffs — same audit-surface reduction story as `legacy.yml`.
+
+  Usage:
+
+  ```ruby
+  CONFIG = Freentonic::Providers::Config.load_provider!(__dir__)
+  KIND_BY_PRODUCT_TYPE = CONFIG.fetch(:kind_by_product_type)
+  ```
+
+### Fixed
+
+- `--through connect` and `--through extract` no longer reject runs
+  without `--export NAME`. The `--only-stage connect` / `extract`
+  variants were already exempted from the "no exporters configured"
+  validator (the pipeline stops before Export, so an exporter is
+  meaningless), but `--through` was rejected — forcing devs to use
+  `--only-stage` as a workaround when iterating on a login or
+  extraction step. Both flags now behave symmetrically.
+
+### Test suite
+
+452 runs / 1143 assertions / 0 failures (was 437/1110). 11 new Config
+loader tests + 4 CLI validation tests.
+
 ## 0.3.0 — Provider-authoring library absorbed
 
 Pulls the shared `Freentonic::Providers` namespace into the gem so
