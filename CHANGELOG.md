@@ -2,6 +2,79 @@
 
 All notable changes to freentonic are documented here.
 
+## 0.3.0 — Provider-authoring library absorbed
+
+Pulls the shared `Freentonic::Providers` namespace into the gem so
+provider repos (like `freentonic-providers`) no longer need to
+co-locate it under their own `lib/`. Nothing in this release changes
+the runtime behavior of the existing pipeline; downstream consumers
+on 0.2.0 who don't author providers can upgrade for free.
+
+### Added
+
+- `Freentonic::Providers::CanonicalBuilder` — helper for building
+  `Canonical::Account` / `Canonical::Transaction` / `Canonical::Liability`
+  entities with legacy-compat metadata merged onto caller-supplied
+  metadata (legacy keys win, so providers can't accidentally blank
+  them out).
+- `Freentonic::Providers::Helpers` — `safe_fetch`, `cents` (with
+  `already_minor:` kwarg), `parse_date` (now with `preferred_formats:`
+  kwarg — see Changed), `parse_timestamp_ms`. Include the module in
+  a provider class to pick up the whole set.
+- `Freentonic::Providers::LegacyKeys` — declarative registry for
+  per-provider legacy-compat metadata (legacy_external_id, legacy_uids,
+  legacy_bank_key, legacy_dedup_key). Accepts only String templates,
+  Array-of-Strings, and Hash-with-`default:`/`if_<value>:` branches;
+  rejects Proc / Symbol / unknown hash keys at register time with
+  `InvalidConfigError`. Template substitution uses Ruby's native
+  `String#%` with named placeholders.
+- `Freentonic::Providers::LegacyKeysLoader` — YAML-based loader for
+  per-provider `legacy.yml` files. Parses with
+  `YAML.safe_load(permitted_classes: [], aliases: false)` so
+  `!ruby/object:...` tags and YAML aliases cannot deserialize into
+  Ruby objects. New `load_provider!(dir)` entrypoint for the common
+  single-provider case; `load_all!(root:)` still available for bulk
+  loading in tests or tooling.
+- `Freentonic::Providers::Scaffold` — `rake new[provider]` template
+  generator that emits a starter workflow/extractor/normalizer/test
+  set. Authoring tool; lazy-required from Rakefiles (not auto-loaded
+  by `require "freentonic"`).
+- `Freentonic::Providers::HarAnalyzer` — `rake har[file]` investigation
+  tool for turning a HAR capture into a workflow skeleton. Also an
+  authoring tool; lazy-required.
+
+### Changed
+
+- `Helpers.parse_date` gains an optional `preferred_formats:` keyword
+  argument — a list of strptime patterns to try first (in order) when
+  the input is a non-timestamp String. Useful for locale-ambiguous
+  formats: `parse_date("05/06/2024", preferred_formats: ["%d/%m/%Y"])`
+  reliably yields 5 June (not 6 May as `Date.parse` would). Non-matching
+  patterns are skipped silently; if every pattern misses, falls through
+  to the generic `Date.parse` path. Fully backward compatible — callers
+  that don't pass the kwarg see unchanged behavior.
+
+### Test suite
+
+437 runs / 1110 assertions / 0 failures. Adds `test/canonical_builder_test.rb`,
+`test/helpers_test.rb`, `test/legacy_keys_test.rb`, and
+`test/legacy_keys_loader_test.rb` from the sibling providers repo.
+
+### Migration notes for provider authors
+
+Before 0.3.0, provider repos carried their own `lib/freentonic/providers/`
+directory with these classes. After 0.3.0:
+
+- Drop the local `lib/freentonic/providers/*.rb` and the corresponding
+  `lib/test/*_test.rb`.
+- Replace `require_relative "../lib/freentonic/providers/X"` with
+  `require "freentonic/providers/X"` — or just `require "freentonic"`
+  to pick up the whole runtime set.
+- For per-provider `legacy.yml` loading, switch
+  `LegacyKeysLoader.load_all!` (which used to auto-discover from a
+  co-located root) to `LegacyKeysLoader.load_provider!(__dir__)` at
+  the top of each normalizer.
+
 ## 0.2.0 — Canonical data model
 
 This release introduces the canonical internal data model as the Normalize
