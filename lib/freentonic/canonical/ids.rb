@@ -1,0 +1,91 @@
+# frozen_string_literal: true
+
+require "digest"
+require "bigdecimal"
+require "date"
+
+module Freentonic
+  module Canonical
+    # Raised when a deterministic-ID helper cannot produce a stable ID from
+    # the inputs given (e.g., an account with no IBAN, no source_id, and no
+    # name). The caller must pass a stable_ref: override or accept that the
+    # record is inherently non-stable — we refuse to silently generate
+    # drifting IDs.
+    class UnstableIdError < UserError; end
+
+    # ASCII unit separator — impossible to appear in raw bank text, so no
+    # escaping ambiguity when joining hash components.
+    UNIT_SEPARATOR = "\x1f"
+
+    # txn_<16 hex>
+    def self.transaction_id(account_id:, date:, amount:, raw_description:)
+      components = [
+        account_id.to_s,
+        Ids.date_component(date),
+        Ids.amount_component(amount),
+        raw_description.to_s.strip
+      ]
+      Ids.digest("txn_", components)
+    end
+
+    # acc_<16 hex>. Picks the first non-empty of: stable_ref, iban,
+    # source_id, name. Raises UnstableIdError if none are usable.
+    def self.account_id(institution:, iban: nil, source_id: nil, name: nil, stable_ref: nil)
+      ref = [stable_ref, iban, source_id, name]
+        .map { |v| v.to_s.strip if v }
+        .find { |v| v && !v.empty? }
+
+      if ref.nil?
+        raise UnstableIdError,
+              "Canonical.account_id(institution: #{institution.inspect}) " \
+              "needs at least one of iban:, source_id:, name:, or stable_ref: " \
+              "to produce a stable ID"
+      end
+
+      Ids.digest("acc_", [institution.to_s, ref])
+    end
+
+    # liab_<16 hex>. account_id is the canonical account ID this liability
+    # attaches to (may be nil if unattached). sub_ref disambiguates multiple
+    # liabilities of the same type on the same account.
+    def self.liability_id(account_id:, type:, sub_ref: nil)
+      Ids.digest("liab_", [account_id.to_s, type.to_s, sub_ref.to_s])
+    end
+
+    # inv_<16 hex>.
+    def self.investment_id(account_id:, symbol:)
+      Ids.digest("inv_", [account_id.to_s, symbol.to_s])
+    end
+
+    # Helpers. Scoped under Ids to keep the public Canonical namespace clean
+    # while leaving them reachable for testing.
+    module Ids
+      module_function
+
+      def digest(prefix, components)
+        prefix + Digest::SHA256.hexdigest(components.join(UNIT_SEPARATOR))[0, 16]
+      end
+
+      def date_component(date)
+        case date
+        when nil    then ""
+        when Date   then date.iso8601
+        when String then date
+        else date.to_s
+        end
+      end
+
+      def amount_component(amount)
+        case amount
+        when nil        then ""
+        when BigDecimal then amount.to_s("F")
+        when Numeric    then BigDecimal(amount.to_s).to_s("F")
+        when String
+          s = amount.strip
+          s.empty? ? "" : BigDecimal(s).to_s("F")
+        else amount.to_s
+        end
+      end
+    end
+  end
+end
