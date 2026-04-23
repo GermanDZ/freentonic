@@ -2,32 +2,47 @@
 
 All notable changes to freentonic are documented here.
 
-## 0.4.0 — Per-provider Config loader + CLI symmetry fix
+## 0.4.0 — Provider boilerplate absorbed into the gem
 
-Two small additive changes that round out the provider-authoring story.
-Fully backward compatible; safe drop-in upgrade from 0.3.0.
+Several additive changes whose combined effect is to drop the
+per-provider Ruby boilerplate to almost nothing. Fully backward
+compatible; safe drop-in upgrade from 0.3.0.
 
 ### Added
 
 - `Freentonic::Providers::Config` — declarative loader for per-provider
   `config.yml` files. Same YAML safe-load hardening as
-  `LegacyKeysLoader` (`permitted_classes: []`, `aliases: false`,
-  `symbolize_names: true`) — refuses `!ruby/object:` tags, YAML
-  aliases, and anything that would deserialize into a Ruby object.
+  `LegacyKeysLoader` (`permitted_classes: []`, `aliases: false`) —
+  refuses `!ruby/object:` tags, YAML aliases, and anything that would
+  deserialize into a Ruby object. Top-level keys are symbolized; inner
+  hash key types are preserved (so lookup tables keyed on upstream
+  strings or integers still work without a `transform_keys` round-trip).
   Caches per institution by directory basename. Optional per provider:
   missing `config.yml` returns `nil`.
 
-  Intent: hold non-legacy provider knobs that today live as Ruby
-  constants (institution slug, scraper version, lookup tables like
-  ING's `kind_by_product_type` or Fintonic's `kind_by_type`). Lets
-  per-provider PRs that touch these become `.yml` diffs instead of
-  Ruby diffs — same audit-surface reduction story as `legacy.yml`.
+- `Freentonic::Providers::NormalizerBase` — base class for provider
+  normalizers that absorbs every line of header boilerplate. Inherits
+  `Freentonic::Normalizers::Base`, includes
+  `Freentonic::Providers::Helpers` automatically, and defines class
+  constants `Builder` + `LegacyKeys` aliasing the gem's
+  `CanonicalBuilder` + `LegacyKeys`. A class macro
+  `provider!(dir)` loads `<dir>/legacy.yml` and `<dir>/config.yml`,
+  defines `CONFIG`, and auto-generates an UPCASE class constant for
+  every top-level key in the config. The macro is additive — explicit
+  constant assignments in the subclass take precedence over macro
+  auto-definitions.
 
-  Usage:
+  A provider's normalizer header now collapses from 10–15 lines to ~3:
 
   ```ruby
-  CONFIG = Freentonic::Providers::Config.load_provider!(__dir__)
-  KIND_BY_PRODUCT_TYPE = CONFIG.fetch(:kind_by_product_type)
+  require "freentonic"
+  module Freentonic::Providers::Fintonic
+    class Normalizer < Freentonic::Providers::NormalizerBase
+      provider!(__dir__)
+      # CONFIG, INSTITUTION, SCRAPER_VERSION, KIND_BY_TYPE all defined.
+      # Builder, LegacyKeys, Helpers all inherited.
+    end
+  end
   ```
 
 ### Fixed
@@ -42,8 +57,24 @@ Fully backward compatible; safe drop-in upgrade from 0.3.0.
 
 ### Test suite
 
-452 runs / 1143 assertions / 0 failures (was 437/1110). 11 new Config
-loader tests + 4 CLI validation tests.
+460 runs / 1163 assertions / 0 failures (was 437/1110). 11 new Config
+loader tests + 7 NormalizerBase tests + 4 CLI validation tests.
+
+### Migration notes for provider authors
+
+Existing 0.3.x-style provider normalizers continue to work unchanged.
+To pick up the new boilerplate-collapse:
+
+1. Inherit from `Freentonic::Providers::NormalizerBase` instead of
+   `Freentonic::Normalizers::Base`.
+2. Replace the existing `LegacyKeysLoader.load_provider!(__dir__)`
+   call (and any `Config.load_provider!`) with a single
+   `provider!(__dir__)` macro call inside the class body.
+3. Drop `include Freentonic::Providers::Helpers`,
+   `Builder = ...`, and `LegacyKeys = ...` aliases (inherited now).
+4. Move `INSTITUTION` / `SCRAPER_VERSION` / lookup tables to
+   `<provider>/config.yml`; the macro will auto-define them as
+   class constants with UPCASE names.
 
 ## 0.3.0 — Provider-authoring library absorbed
 
