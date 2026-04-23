@@ -28,16 +28,17 @@ require_relative "freentonic/secret_resolver"
 require_relative "freentonic/canonical"
 require_relative "freentonic/formatters"
 
+require_relative "freentonic/normalizers/base"
+require_relative "freentonic/normalizers/passthrough"
+
 require_relative "freentonic/providers/helpers"
 require_relative "freentonic/providers/canonical_builder"
 require_relative "freentonic/providers/legacy_keys"
 require_relative "freentonic/providers/legacy_keys_loader"
 require_relative "freentonic/providers/config"
+require_relative "freentonic/providers/normalizer_base"
 # scaffold + har_analyzer are authoring tools, not runtime deps — require
 # them explicitly from the Rakefile or CLI that needs them.
-
-require_relative "freentonic/normalizers/base"
-require_relative "freentonic/normalizers/passthrough"
 
 require_relative "freentonic/exporters/base"
 require_relative "freentonic/exporters/json"
