@@ -99,5 +99,31 @@ module Freentonic
       assert_equal 1, status
       assert_includes stderr.string, "--purge cannot be combined with --from-raw"
     end
+
+    # --- Stage isolation: --through connect / --through extract -----------
+    # Both should accept runs without --export, since the pipeline stops
+    # before the Export stage runs (matching --only-stage connect/extract).
+
+    def test_through_connect_accepts_runs_without_exporter
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--through", "connect"])
+      Cli.new(stderr: StringIO.new).send(:validate!, opts)
+    end
+
+    def test_through_extract_accepts_runs_without_exporter
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--through", "extract"])
+      Cli.new(stderr: StringIO.new).send(:validate!, opts)
+    end
+
+    def test_through_normalize_still_requires_exporter
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--through", "normalize"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/no exporters configured/, err.message)
+    end
+
+    def test_run_without_exporter_or_stage_isolation_still_rejected
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/no exporters configured/, err.message)
+    end
   end
 end
