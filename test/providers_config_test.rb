@@ -28,10 +28,28 @@ class ProvidersConfigTest < Minitest::Test
       cfg = Config.load_provider!(dir)
       assert_equal "ing",      cfg[:institution]
       assert_equal "ing/0.2",  cfg[:scraper_version]
+      # Inner hash keeps its original integer keys (no symbol coercion).
       assert_nil               cfg[:kind_by_product_type][1]
       assert_equal "liability", cfg[:kind_by_product_type][3]
       assert_equal "asset",     cfg[:kind_by_product_type][10]
       assert_equal "asset",     cfg[:kind_by_product_type][20]
+    end
+  end
+
+  def test_load_provider_does_not_recursively_symbolize_inner_hash_keys
+    with_provider_dir do |dir, _name|
+      write(dir, "config.yml", <<~YAML)
+        kind_by_type:
+          ACCOUNT: asset
+          CREDIT_CARD: liability
+      YAML
+
+      cfg = Config.load_provider!(dir)
+      # Top-level :kind_by_type is a symbol; inner upstream-string keys stay strings.
+      assert cfg.key?(:kind_by_type), "top-level should be symbolized"
+      assert_equal "asset",     cfg[:kind_by_type]["ACCOUNT"]
+      assert_equal "liability", cfg[:kind_by_type]["CREDIT_CARD"]
+      refute cfg[:kind_by_type].key?(:ACCOUNT), "inner keys must NOT be symbolized"
     end
   end
 

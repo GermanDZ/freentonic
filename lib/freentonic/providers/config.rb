@@ -73,13 +73,22 @@ module Freentonic
 
         private
 
+        # Top-level keys are symbolized (so callers do `cfg[:institution]`,
+        # idiomatic Ruby), but inner hashes keep their original key types.
+        # That matches the most common use case for inner hashes — lookup
+        # tables keyed on either upstream strings (e.g. Fintonic's
+        # "ACCOUNT" / "CREDIT_CARD") or integers (e.g. ING's numeric
+        # product type codes). Recursive symbolization would turn
+        # `"ACCOUNT"` into `:ACCOUNT` and quietly break callers that
+        # look up by raw upstream string. The "you can't grep for the
+        # symbol form" footgun is a real one.
         def parse!(path)
-          YAML.safe_load(
+          raw = YAML.safe_load(
             File.read(path),
             permitted_classes: [],
-            aliases:           false,
-            symbolize_names:   true
+            aliases:           false
           )
+          raw.is_a?(Hash) ? raw.transform_keys(&:to_sym) : raw
         rescue Psych::DisallowedClass, Psych::BadAlias, Psych::SyntaxError => e
           raise InvalidConfigError,
                 "#{path}: unsafe or malformed YAML rejected (#{e.class}: #{e.message})"
