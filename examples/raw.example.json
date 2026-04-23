@@ -1,0 +1,69 @@
+{
+  "accounts": [
+    {
+      "ref": "12345",
+      "alias": "Main Checking",
+      "product": "checking",
+      "iban": "ES9121000418450200051332",
+      "currency": "EUR",
+      "balance": "1500.20",
+      "available": "1450.00",
+      "fetched_at": "2026-04-23T10:00:00Z"
+    },
+    {
+      "ref": "67890",
+      "alias": "USD Travel",
+      "product": "savings",
+      "iban": "US33XXXX1234567890",
+      "currency": "USD",
+      "balance": "830.45",
+      "available": "830.45",
+      "fetched_at": "2026-04-23T10:00:01Z"
+    }
+  ],
+  "movements": {
+    "12345": [
+      {
+        "ref": "TX-001",
+        "booking_date": "2026-04-20",
+        "value_date": "2026-04-21",
+        "amount": "-45.20",
+        "currency": "EUR",
+        "concept": "AMZN Mktp ES*XYZ12345",
+        "status": "BOOKED",
+        "merchant_name": "Amazon"
+      },
+      {
+        "ref": "TX-002",
+        "booking_date": "2026-04-21",
+        "value_date": "2026-04-22",
+        "amount": "1200.00",
+        "currency": "EUR",
+        "concept": "PAYROLL DEPOSIT ACME CORP",
+        "status": "BOOKED"
+      },
+      {
+        "ref": "TX-003",
+        "booking_date": "2026-04-22",
+        "amount": "-12.50",
+        "currency": "EUR",
+        "concept": "STARBUCKS COFFEE",
+        "status": "PENDING",
+        "merchant_name": "Starbucks"
+      }
+    ],
+    "67890": [
+      {
+        "ref": "TX-101",
+        "booking_date": "2026-04-15",
+        "value_date": "2026-04-16",
+        "amount": "-89.99",
+        "currency": "USD",
+        "concept": "DELTA AIR LINES",
+        "status": "BOOKED",
+        "merchant_name": "Delta"
+      }
+    ]
+  },
+  "fetched_at": "2026-04-23T10:00:05Z"
+}
