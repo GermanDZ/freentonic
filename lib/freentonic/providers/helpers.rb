@@ -98,6 +98,44 @@ module Freentonic
         end
       end
 
+      # Pluck and rename fields from a source hash according to a
+      # declarative mapping. Each mapping entry's value is one of:
+      #
+      #   "fieldname"               — copy `source["fieldname"]` as-is.
+      #   "outer.inner"             — dotted-path nested lookup; equivalent
+      #                               to source.dig("outer", "inner").
+      #   ["a", "b", "c"]           — fallback chain, returns the first
+      #                               non-nil dotted-path lookup.
+      #
+      # Output values are whatever the lookup returned (no type coercion).
+      # Missing paths produce nil entries (NOT dropped — the output hash
+      # always has every mapping key, with nil where the source didn't
+      # provide a value). That matches what providers want for raw_payload
+      # / metadata allowlists, where stable column-set is more useful than
+      # compact-but-variable shapes.
+      #
+      # Intended usage from a provider's normalizer:
+      #
+      #   metadata: { "ing" => extract_fields(mv, RAW_FIELDS_MOVEMENT) }
+      #
+      # …with RAW_FIELDS_MOVEMENT auto-defined by NormalizerBase from
+      # `raw_fields_movement` in <provider>/config.yml.
+      #
+      def extract_fields(source, mapping)
+        return {} unless source.is_a?(Hash)
+
+        mapping.each_with_object({}) do |(out_key, spec), acc|
+          acc[out_key.to_s] = case spec
+                              when String
+                                dig_path(source, spec)
+                              when Array
+                                spec.lazy.map { |p| dig_path(source, p) }.find { |v| !v.nil? }
+                              else
+                                nil
+                              end
+        end
+      end
+
       # Parse a value to a Unix millisecond timestamp. Useful for
       # cursor-based pagination where the API expects ms timestamps.
       #
@@ -118,6 +156,17 @@ module Freentonic
         end
       rescue ArgumentError, TypeError
         nil
+      end
+
+      private
+
+      # Walk a dotted path into a nested hash, returning nil at the first
+      # missing segment. "a.b.c" → source["a"]["b"]["c"], with bail-out
+      # if any intermediate is not a Hash.
+      def dig_path(source, path)
+        path.to_s.split(".").inject(source) do |acc, key|
+          acc.is_a?(Hash) ? acc[key] : nil
+        end
       end
     end
   end
