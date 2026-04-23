@@ -158,6 +158,21 @@ module Freentonic
         nil
       end
 
+      # Return the first candidate that is a non-empty stripped string;
+      # nil if none qualify. Common provider pattern for picking a
+      # display name out of (alias, name, description, fallback).
+      #
+      #   first_present(account["alias"], account["name"], "Bank")
+      #   #=> "Cuenta Naranja"  (or "Bank" if both alias and name are blank)
+      #
+      def first_present(*candidates)
+        candidates.each do |c|
+          s = c.to_s.strip
+          return s unless s.empty?
+        end
+        nil
+      end
+
       private
 
       # Walk a dotted path into a nested hash, returning nil at the first
