@@ -34,27 +34,68 @@ module Freentonic
       end
     end
 
-    def test_jsonl_exporter_flattens_nested_select
+    # Post-canonical-migration: csv/jsonl require CanonicalPayload input and
+    # delegate row-shaping to the corresponding *Transactions formatter.
+
+    def canonical_payload
+      Canonical::CanonicalPayload.new(
+        accounts: [
+          Canonical::Account.new(id: "acc_eur", institution: "bbva",
+                                 name: "Alice", currency: "EUR")
+        ],
+        transactions: [
+          Canonical::Transaction.new(id: "txn_1", account_id: "acc_eur",
+                                     amount: "10.00", currency: "EUR",
+                                     description: "Coffee"),
+          Canonical::Transaction.new(id: "txn_2", account_id: "acc_eur",
+                                     amount: "-5.00", currency: "EUR",
+                                     description: "Refund")
+        ],
+        summary: nil
+      )
+    end
+
+    def test_jsonl_exporter_writes_one_canonical_transaction_per_line
       Tempfile.open(["freentonic-jsonl", ".jsonl"]) do |tmp|
-        Exporters::Jsonl.new(path: tmp.path, select: "accounts.movements").write(sample_payload)
+        Exporters::Jsonl.new(path: tmp.path).write(canonical_payload)
         lines = File.readlines(tmp.path).map { |l| ::JSON.parse(l) }
         assert_equal 2, lines.size
-        assert_equal "m1", lines.first["dedup_key"]
-        # parent fields are hoisted with "account_" prefix (accounts → account + "_")
-        assert_equal "a1", lines.first["account_external_id"]
+        assert_equal "txn_1", lines.first["id"]
         assert_equal "Alice", lines.first["account_name"]
+        assert_equal "EUR", lines.first["account_currency"]
       end
     end
 
-    def test_csv_exporter_produces_rows_from_nested_select
+    def test_csv_exporter_writes_canonical_transactions_as_rows
       Tempfile.open(["freentonic-csv", ".csv"]) do |tmp|
-        Exporters::Csv.new(path: tmp.path, select: "accounts.movements").write(sample_payload)
+        Exporters::Csv.new(path: tmp.path).write(canonical_payload)
         rows = ::CSV.read(tmp.path, headers: true)
         assert_equal 2, rows.size
-        assert_includes rows.headers, "account_external_id"
-        assert_includes rows.headers, "dedup_key"
-        assert_equal "m1", rows.first["dedup_key"]
+        assert_includes rows.headers, "account_name"
+        assert_includes rows.headers, "id"
+        assert_equal "txn_1", rows.first["id"]
+        assert_equal "10.0", rows.first["amount"]
       end
+    end
+
+    def test_csv_exporter_rejects_non_canonical_payload
+      err = assert_raises(UserError) do
+        Tempfile.open(["freentonic-csv", ".csv"]) do |tmp|
+          Exporters::Csv.new(path: tmp.path).write(sample_payload)
+        end
+      end
+      assert_match(/CanonicalPayload/, err.message)
+      assert_match(/canonical-data-model/, err.message)
+    end
+
+    def test_jsonl_exporter_rejects_non_canonical_payload
+      err = assert_raises(UserError) do
+        Tempfile.open(["freentonic-jsonl", ".jsonl"]) do |tmp|
+          Exporters::Jsonl.new(path: tmp.path).write(sample_payload)
+        end
+      end
+      assert_match(/CanonicalPayload/, err.message)
+      assert_match(/canonical-data-model/, err.message)
     end
 
     # Minimal fake Net::HTTP response that mimics the bits the exporter reads.

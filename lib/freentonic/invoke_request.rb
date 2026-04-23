@@ -255,13 +255,6 @@ module Freentonic
             "export.path must be a simple filename (letters, digits, _.-) for mode=#{mode}")
         end
         normalized["path"] = path
-
-        if export["select"]
-          unless export["select"].is_a?(String) && !export["select"].empty?
-            raise InvokeError.new(:bad_request, "export.select must be a non-empty string")
-          end
-          normalized["select"] = export["select"]
-        end
       end
 
       normalized
