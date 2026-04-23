@@ -314,10 +314,15 @@ end
 ## Writing a normalizer
 
 Normalizers convert the Extract stage's raw provider payload into a
-universal account/movement shape that exporters can consume. Most of
-the time, normalizers live alongside their workflow YAML in the
+`Freentonic::Canonical::CanonicalPayload` — the universal internal
+shape every exporter and formatter consumes. Most of the time,
+normalizers live alongside their workflow YAML in the
 [freentonic-providers](https://github.com/GermanDZ/freentonic-providers)
 repo — the contract is the same either way.
+
+The canonical model itself (entities, required fields, ID strategy,
+wire-format rules) is specified in
+[canonical-data-model.md](canonical-data-model.md). Read that first.
 
 ### Contract
 
@@ -338,7 +343,12 @@ JSON-serializable). `context` is the shared pipeline context — you
 rarely need it, but it's there if you want the source key, credentials,
 or the resolved `lookback_days`.
 
-Return a Hash or Array — exporters handle both.
+Return a `Freentonic::Canonical::CanonicalPayload`. The csv/jsonl
+exporters reject any other payload type with a clear error pointing at
+this doc; the http/json exporters technically accept legacy Hashes via
+the identity formatter, but post-migration you should always emit a
+canonical payload so consumers see the `schema_version` / `summary` /
+deterministic-IDs benefits.
 
 ### Registration
 
@@ -360,18 +370,63 @@ lookup — the class name must exactly match what you declared.
 Skip the `normalize:` stanza entirely and freentonic falls back to
 `Freentonic::Normalizers::Passthrough`, which returns `raw` unchanged.
 
-### Example: a minimal pass-through with one field rename
+### Example: a minimal canonical normalizer
 
 ```ruby
-# my_plugin/renaming_normalizer.rb
-module Freentonic
-  module Normalizers
-    class Renaming < Base
-      def call(raw, context: {})
-        Array(raw).map do |row|
-          row.transform_keys { |k| k.to_s.gsub("legacy_", "") }
-        end
-      end
+# my_plugin/normalizer.rb
+module MyBank
+  class Normalizer
+    INSTITUTION = "my_bank"
+
+    def call(raw, context: {})
+      accounts = Array(raw["accounts"]).map { |a| build_account(a) }
+      transactions = Array(raw["movements"]).map { |m| build_transaction(m) }
+
+      Freentonic::Canonical::CanonicalPayload.new(
+        accounts: accounts,
+        transactions: transactions,
+        meta: { "scraper_version" => "my_bank/1.0" }
+      )
+    end
+
+    private
+
+    def build_account(raw_account)
+      Freentonic::Canonical::Account.new(
+        id: Freentonic::Canonical.account_id(
+          institution: INSTITUTION,
+          iban: raw_account["iban"],
+          source_id: raw_account["ref"]
+        ),
+        source_id: raw_account["ref"],
+        institution: INSTITUTION,
+        name: raw_account["alias"],
+        currency: raw_account["currency"],
+        iban: raw_account["iban"],
+        balance: { current: raw_account["balance"] }
+      )
+    end
+
+    def build_transaction(raw_movement)
+      account_id = Freentonic::Canonical.account_id(
+        institution: INSTITUTION,
+        iban: raw_movement["account_iban"]
+      )
+      Freentonic::Canonical::Transaction.new(
+        id: Freentonic::Canonical.transaction_id(
+          account_id: account_id,
+          date: raw_movement["date"],
+          amount: raw_movement["amount"],
+          raw_description: raw_movement["concept"]
+        ),
+        source_id: raw_movement["ref"],
+        account_id: account_id,
+        date: raw_movement["date"],
+        amount: raw_movement["amount"],
+        currency: raw_movement["currency"],
+        raw_description: raw_movement["concept"],
+        status: "posted"
+      )
     end
   end
 end
@@ -381,9 +436,34 @@ Reference from a workflow YAML:
 
 ```yaml
 normalize:
-  ruby: ../../my_plugin/renaming_normalizer.rb
-  class: Freentonic::Normalizers::Renaming
+  ruby: ../../my_plugin/normalizer.rb
+  class: MyBank::Normalizer
 ```
+
+For a fuller worked example covering multi-currency, pending vs posted,
+merchant cleanup, and missing-field handling, see
+[examples/normalizer.rb](../examples/normalizer.rb) and the integration
+test in `test/example_workflow_integration_test.rb`.
+
+### Things to remember
+
+- **Always use the deterministic-ID helpers** (`Canonical.account_id`,
+  `Canonical.transaction_id`, `Canonical.liability_id`,
+  `Canonical.investment_id`). Hand-rolled hashes drift between syncs and
+  defeat the point of stable IDs. The helpers refuse to silently produce
+  drifting IDs — if your inputs can't yield a stable ID, the helper
+  raises `Canonical::UnstableIdError` with a clear message.
+- **Money is BigDecimal internally**, JSON strings on the wire. The
+  factory accepts strings or numerics and coerces; pass `"45.20"` or
+  `45.20`, not pre-formatted strings like `"€45,20"`.
+- **Dates are `Date`, timestamps are `Time` UTC.** ISO strings work too;
+  the factory parses them.
+- **`source_id` is first-class** on every entity — keep the bank's own
+  ref there even when you also compute a canonical id. It is unique
+  within a single source only; never use it for cross-source joins.
+- **Permissive schema:** pass `nil` for any optional field you don't
+  have. Required fields per entity are spelled out in
+  [canonical-data-model.md](canonical-data-model.md).
 
 ### Testing a normalizer
 
@@ -392,16 +472,26 @@ that exercises the branch you care about, assert on the output. No
 stubs, no fakes, no network.
 
 ```ruby
-# my_plugin/test/renaming_normalizer_test.rb
+# my_plugin/test/normalizer_test.rb
 require "minitest/autorun"
 require "freentonic"
-require_relative "../renaming_normalizer"
+require_relative "../normalizer"
 
-class RenamingNormalizerTest < Minitest::Test
-  def test_strips_legacy_prefix_from_keys
-    raw = [{ "legacy_id" => 1, "legacy_name" => "Checking", "currency" => "EUR" }]
-    out = Freentonic::Normalizers::Renaming.new.call(raw)
-    assert_equal [{ "id" => 1, "name" => "Checking", "currency" => "EUR" }], out
+class MyBankNormalizerTest < Minitest::Test
+  def test_builds_canonical_payload
+    raw = {
+      "accounts" => [{ "ref" => "1", "alias" => "Main", "iban" => "ES01",
+                       "currency" => "EUR", "balance" => "100.00" }],
+      "movements" => [{ "ref" => "T1", "account_iban" => "ES01",
+                        "date" => "2026-04-20", "amount" => "-10.00",
+                        "currency" => "EUR", "concept" => "Coffee" }]
+    }
+    payload = MyBank::Normalizer.new.call(raw)
+
+    assert_kind_of Freentonic::Canonical::CanonicalPayload, payload
+    assert_equal 1, payload.accounts.length
+    assert_equal 1, payload.transactions.length
+    assert_match(/\Atxn_[0-9a-f]{16}\z/, payload.transactions.first.id)
   end
 end
 ```
