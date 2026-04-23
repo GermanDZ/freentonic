@@ -97,7 +97,6 @@ response.
 | `export.content_type` | no | Default `application/json`. |
 | `export.headers` | no | Extra request headers. Names match HTTP token charset; values cannot contain CRLF. |
 | `export.path` | if `mode ∈ {json,jsonl,csv}` | Simple filename; written under `/workspace/runs/<run_id>/<path>` — the server rewrites it, so the caller can't escape the run dir. |
-| `export.select` | no | Nested path for `csv`/`jsonl` flattening (e.g. `"accounts.movements"`). |
 | `timeout_sec` | no | Default `1800`, max `7200`. Watchdog sends SIGTERM to the child's process group then SIGKILL after 10s grace. |
 | `lookback` | no | Days of history to fetch. Overrides the workflow default. |
 | `chrome.isolated` | no | If `true`, use a throwaway Chrome profile (ignores `profile_key`). Useful for debugging. |

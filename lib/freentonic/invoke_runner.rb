@@ -218,7 +218,6 @@ module Freentonic
           # token off argv avoids /proc/<pid>/cmdline exposure.
         else
           argv.push("--export-path", File.join(run_dir, export["path"]))
-          argv.push("--export-csv-select", export["select"]) if export["select"]
         end
       end
 
