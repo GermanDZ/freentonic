@@ -172,7 +172,15 @@ module Freentonic
         raise UserError, "--only-stage and --through are mutually exclusive"
       end
 
-      if options[:exporters].empty? && options[:only_stage] != :connect && options[:only_stage] != :extract && options[:dump_raw].nil? && options[:dump_normalized].nil?
+      # Stage-isolation flags that legitimately stop the pipeline before
+      # the Export stage runs — no exporter is needed for these because
+      # there's nothing to export. Both --only-stage and --through count.
+      pre_export_stage = ->(s) { s == :connect || s == :extract }
+      stops_before_export = pre_export_stage.call(options[:only_stage]) ||
+                            pre_export_stage.call(options[:through_stage])
+
+      if options[:exporters].empty? && !stops_before_export &&
+         options[:dump_raw].nil? && options[:dump_normalized].nil?
         raise UserError, "no exporters configured — pass --export NAME or --dump-raw / --dump-normalized"
       end
     end
