@@ -11,4 +11,5 @@ group :development, :test do
   gem "rake", "~> 13.0"
   gem "base64"
   gem "csv"
+  gem "bigdecimal"
 end
