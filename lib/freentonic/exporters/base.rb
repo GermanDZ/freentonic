@@ -26,6 +26,22 @@ module Freentonic
         return block.call($stdout) if path.nil? || path == "-"
         File.open(path, "w", &block)
       end
+
+      # Build the formatter selected by --export-format, or this exporter's
+      # default if none was given. Subclasses opt into formatter-driven
+      # output by calling this in #write; csv/jsonl ignore it until PR 4
+      # rewrites them.
+      def resolve_formatter
+        Formatters.build(@options[:format] || default_format)
+      end
+
+      # Per-exporter default format. Subclasses override; Base returns
+      # :canonical because the canonical formatter is the identity on the
+      # legacy Hash payloads existing tests pass, so behavior is preserved
+      # automatically.
+      def default_format
+        :canonical
+      end
     end
 
     @registry = {}

@@ -6,7 +6,7 @@ require "json"
 
 module Freentonic
   module Exporters
-    # POSTs the normalized payload as JSON to an HTTP endpoint.
+    # POSTs the formatted payload to an HTTP endpoint.
     #
     # Options:
     #   url          — required. Full URL.
@@ -15,8 +15,15 @@ module Freentonic
     #                  secret does not need to appear in your shell history
     #                  or process list.
     #   method       — "POST" or "PUT" (default "POST").
-    #   content_type — default "application/json".
+    #   content_type — overrides the formatter's declared Content-Type.
+    #   format       — formatter name (default :canonical).
     #   headers      — hash of extra request headers.
+    #
+    # The selected formatter decides the wire shape and Content-Type. When
+    # the formatter returns a Hash, `meta.freentonic_run_id` is merged in
+    # (only Hash outputs have a place to carry it) and the result is
+    # JSON.generate'd. When the formatter returns a String (CSV, NDJSON,
+    # OFX XML), the bytes are sent verbatim and no meta merge happens.
     #
     # Non-2xx responses raise ExportError. Body is parsed as JSON on success;
     # the parsed result is returned for test/inspection but not written
@@ -40,19 +47,22 @@ module Freentonic
                 "#{url.chomp("/")}/your/endpoint/path"
         end
 
+        formatter = resolve_formatter
+        formatted = formatter.call(payload)
+
         http = Net::HTTP.new(uri.host, uri.port)
         http.use_ssl = (uri.scheme == "https")
         http.open_timeout = OPEN_TIMEOUT
         http.read_timeout = READ_TIMEOUT
 
         req = build_request(uri)
-        req["Content-Type"] = @options[:content_type] || "application/json"
+        req["Content-Type"] = @options[:content_type] || formatter.content_type
         req["Accept"] = "application/json"
         if (token = resolved_token)
           req["Authorization"] = "Bearer #{token}"
         end
         Array(@options[:headers]).each { |name, value| req[name] = value }
-        req.body = ::JSON.generate(with_run_id_meta(payload))
+        req.body = encode_body(formatted)
 
         started_at = Time.now
         resp = begin
@@ -76,6 +86,18 @@ module Freentonic
       end
 
       private
+
+      # String formatter outputs go on the wire verbatim. Hash/Array
+      # outputs get the run-id meta merge (when applicable) and are
+      # JSON.generate'd. Strings have nowhere to carry the run id, so we
+      # skip the merge for them.
+      def encode_body(formatted)
+        case formatted
+        when String then formatted
+        when Hash   then ::JSON.generate(with_run_id_meta(formatted))
+        else             ::JSON.generate(formatted)
+        end
+      end
 
       def build_request(uri)
         case (@options[:method] || "POST").to_s.upcase

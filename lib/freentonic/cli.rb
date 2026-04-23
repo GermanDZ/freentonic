@@ -122,6 +122,13 @@ module Freentonic
           headers[k] = val
         end
         opts.on("--export-csv-select PATH", "Nested path for csv/jsonl flattening (e.g. accounts.movements)") { |v| attach(options, :select, v) }
+        opts.on("--export-format NAME", "Output format (#{Formatters.registered.join("|")}) for the last-declared exporter; honored by http and json today, by csv and jsonl after their PR-4 rewrite") do |v|
+          name = v.to_sym
+          unless Formatters.registered.include?(name)
+            raise UserError, "unknown format #{v.inspect} (available: #{Formatters.registered.join(", ")})"
+          end
+          attach(options, :format, name)
+        end
 
         opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
         opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }
