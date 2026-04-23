@@ -48,7 +48,18 @@ module Freentonic
       #   parse_date("2024-03-15")                   #=> Date (YYYY-MM-DD)
       #   parse_date(nil)                            #=> nil
       #
-      def parse_date(value)
+      # `preferred_formats:` is a list of strptime patterns to try first
+      # (in order) when the input is a String that isn't a Unix timestamp.
+      # Useful when the provider's dominant date format would otherwise
+      # be mis-parsed — e.g. Spanish-locale "05/06/2024" means 5 June,
+      # not the ISO-ish 6 May that Date.parse would infer without a hint.
+      # Non-matching patterns are skipped silently; if every pattern
+      # misses, falls through to the generic Date.parse path.
+      #
+      #   parse_date("05/06/2024", preferred_formats: ["%d/%m/%Y"])
+      #   #=> Date.new(2024, 6, 5)
+      #
+      def parse_date(value, preferred_formats: nil)
         return nil if value.nil?
 
         case value
@@ -67,11 +78,19 @@ module Freentonic
             ts = ts / 1000 if ts > 1_000_000_000_000
             Time.at(ts).to_date
           else
+            Array(preferred_formats).each do |fmt|
+              begin
+                return Date.strptime(value, fmt)
+              rescue Date::Error, ArgumentError
+                next
+              end
+            end
             Date.parse(value)
           end
         end
       rescue ArgumentError, TypeError
-        # Fallback: try DD/MM/YYYY
+        # Back-compat fallback for callers that don't pass preferred_formats
+        # but hit a DD/MM/YYYY input.
         begin
           Date.strptime(value.to_s, "%d/%m/%Y")
         rescue Date::Error, ArgumentError

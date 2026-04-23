@@ -84,6 +84,27 @@ class HelpersTest < Minitest::Test
     assert_equal Date.new(2024, 3, 15), date
   end
 
+  def test_parse_date_prefers_given_format_for_locale_ambiguous_strings
+    # "05/06/2024" is ambiguous; Date.parse's default interpretation is
+    # May 6, but for Spanish banks it's 5 June. preferred_formats: pins
+    # the correct reading.
+    assert_equal Date.new(2024, 6, 5),
+                 parse_date("05/06/2024", preferred_formats: ["%d/%m/%Y"])
+  end
+
+  def test_parse_date_falls_through_when_preferred_format_doesnt_match
+    # ISO input against a DD/MM/YYYY preference → strptime fails, fall
+    # through to generic Date.parse which handles ISO.
+    assert_equal Date.new(2024, 3, 15),
+                 parse_date("2024-03-15", preferred_formats: ["%d/%m/%Y"])
+  end
+
+  def test_parse_date_tries_multiple_preferred_formats_in_order
+    # First format fails, second matches.
+    assert_equal Date.new(2024, 3, 15),
+                 parse_date("15-03-2024", preferred_formats: ["%d/%m/%Y", "%d-%m-%Y"])
+  end
+
   def test_parse_date_nil
     assert_nil parse_date(nil)
   end
