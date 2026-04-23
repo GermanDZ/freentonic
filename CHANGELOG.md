@@ -45,6 +45,37 @@ compatible; safe drop-in upgrade from 0.3.0.
   end
   ```
 
+- `Freentonic::Providers::ExtractorBase` — mirror of `NormalizerBase`
+  for provider extractors. Includes `Helpers`, extends `Configurable`
+  (shares the `provider!(dir)` macro). Intentionally NOT a subclass of
+  any framework abstract class — extractors are duck-typed by the
+  Extract stage. Gives every provider extractor the same shape:
+
+  ```ruby
+  class Extractor < Freentonic::Providers::ExtractorBase
+    provider!(__dir__)
+    def call(client:, credentials:, from_date:, stdout:, stderr:)
+      # provider-specific fetch logic
+    end
+  end
+  ```
+
+- `Freentonic::Providers::Configurable` — mixin that carries the
+  `provider!(dir)` macro. Both `NormalizerBase` and `ExtractorBase`
+  extend it so the macro lives in one place.
+
+- `Freentonic::Providers::Helpers#extract_fields(source, mapping)` —
+  declarative source-to-hash projection for raw-payload allowlists.
+  Mapping value may be a String (simple rename / dotted-path nested
+  lookup like `"status.description"`) or an Array of Strings (fallback
+  chain — first non-nil wins). Output keys always stringified; missing
+  paths yield `nil` entries to keep column sets stable across syncs.
+
+- `Freentonic::Providers::Helpers#first_present(*candidates)` —
+  returns the first candidate that's a non-empty stripped string, or
+  `nil`. Replaces ad-hoc `pick_name`-style private methods that were
+  reimplemented across providers.
+
 ### Fixed
 
 - `--through connect` and `--through extract` no longer reject runs
@@ -57,8 +88,10 @@ compatible; safe drop-in upgrade from 0.3.0.
 
 ### Test suite
 
-460 runs / 1163 assertions / 0 failures (was 437/1110). 11 new Config
-loader tests + 7 NormalizerBase tests + 4 CLI validation tests.
+477 runs / 1185 assertions / 0 failures (was 437/1110). 11 Config
+loader tests + 7 NormalizerBase tests + 4 ExtractorBase tests + 4 CLI
+validation tests + 8 extract_fields tests + 5 first_present tests +
+3 parse_date `preferred_formats:` tests.
 
 ### Migration notes for provider authors
 
@@ -66,15 +99,22 @@ Existing 0.3.x-style provider normalizers continue to work unchanged.
 To pick up the new boilerplate-collapse:
 
 1. Inherit from `Freentonic::Providers::NormalizerBase` instead of
-   `Freentonic::Normalizers::Base`.
+   `Freentonic::Normalizers::Base` (or `Freentonic::Providers::ExtractorBase`
+   for extractors — no prior base class was required).
 2. Replace the existing `LegacyKeysLoader.load_provider!(__dir__)`
    call (and any `Config.load_provider!`) with a single
    `provider!(__dir__)` macro call inside the class body.
 3. Drop `include Freentonic::Providers::Helpers`,
    `Builder = ...`, and `LegacyKeys = ...` aliases (inherited now).
-4. Move `INSTITUTION` / `SCRAPER_VERSION` / lookup tables to
+4. Move `INSTITUTION` / `SCRAPER_VERSION` / lookup tables / date-format
+   hints / magic strings / raw-payload field allowlists to
    `<provider>/config.yml`; the macro will auto-define them as
    class constants with UPCASE names.
+5. Where an inline `rescue StandardError; stderr.puts …; = default`
+   pattern exists, replace with `safe_fetch(stderr, "label") { … } || default`.
+6. Where a bespoke `pick_name(*candidates)` private method exists,
+   replace call sites with `first_present(*candidates)` and delete
+   the private method.
 
 ## 0.3.0 — Provider-authoring library absorbed
 
