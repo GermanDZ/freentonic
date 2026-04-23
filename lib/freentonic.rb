@@ -36,7 +36,9 @@ require_relative "freentonic/providers/canonical_builder"
 require_relative "freentonic/providers/legacy_keys"
 require_relative "freentonic/providers/legacy_keys_loader"
 require_relative "freentonic/providers/config"
+require_relative "freentonic/providers/configurable"
 require_relative "freentonic/providers/normalizer_base"
+require_relative "freentonic/providers/extractor_base"
 # scaffold + har_analyzer are authoring tools, not runtime deps — require
 # them explicitly from the Rakefile or CLI that needs them.
 

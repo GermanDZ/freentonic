@@ -164,6 +164,28 @@ class HelpersTest < Minitest::Test
     assert_equal ["foo"], out.keys
   end
 
+  # --- first_present ---
+
+  def test_first_present_returns_first_non_empty_stripped_string
+    assert_equal "Mercadona", first_present(nil, "", "  ", "Mercadona", "ignored")
+  end
+
+  def test_first_present_strips_whitespace_before_emptiness_check
+    assert_equal "abc", first_present("   ", "abc")
+  end
+
+  def test_first_present_returns_nil_when_all_blank
+    assert_nil first_present(nil, "", "   ", nil)
+  end
+
+  def test_first_present_coerces_non_strings_via_to_s
+    assert_equal "42", first_present(nil, 42)
+  end
+
+  def test_first_present_with_no_args
+    assert_nil first_present
+  end
+
   def test_parse_date_garbage
     assert_nil parse_date("not a date")
   end
