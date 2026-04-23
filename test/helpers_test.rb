@@ -109,6 +109,61 @@ class HelpersTest < Minitest::Test
     assert_nil parse_date(nil)
   end
 
+  # --- extract_fields ---
+
+  def test_extract_fields_simple_rename
+    source = { "uuid" => "abc", "amount" => 100, "noise" => "ignored" }
+    out = extract_fields(source, { "id" => "uuid", "value" => "amount" })
+    assert_equal({ "id" => "abc", "value" => 100 }, out)
+  end
+
+  def test_extract_fields_dotted_path_for_nested_lookup
+    source = { "status" => { "description" => "settled", "code" => 1 } }
+    out = extract_fields(source, { "status" => "status.description" })
+    assert_equal({ "status" => "settled" }, out)
+  end
+
+  def test_extract_fields_dotted_path_returns_nil_when_intermediate_missing
+    source = { "status" => nil }
+    out = extract_fields(source, { "status" => "status.description" })
+    assert_nil out["status"]
+  end
+
+  def test_extract_fields_array_spec_picks_first_non_nil
+    source = { "description" => nil, "store" => "Mercadona", "primary" => "ignored" }
+    out = extract_fields(source, { "name" => ["description", "store", "primary"] })
+    assert_equal "Mercadona", out["name"]
+  end
+
+  def test_extract_fields_array_spec_returns_nil_when_all_paths_missing
+    source = { "other" => "x" }
+    out = extract_fields(source, { "name" => ["description", "store"] })
+    assert_nil out["name"]
+  end
+
+  def test_extract_fields_keeps_keys_with_nil_values_for_stable_columns
+    # Important for raw_payload allowlists where downstream tools rely
+    # on a stable column set across syncs.
+    source = { "uuid" => "abc" }
+    out = extract_fields(source, { "uuid" => "uuid", "missing_field" => "missing_field" })
+    assert out.key?("missing_field")
+    assert_nil out["missing_field"]
+  end
+
+  def test_extract_fields_handles_non_hash_source_gracefully
+    assert_equal({}, extract_fields(nil, { "a" => "b" }))
+    assert_equal({}, extract_fields("string", { "a" => "b" }))
+  end
+
+  def test_extract_fields_stringifies_output_keys
+    # Mapping keys may be symbols (idiomatic Ruby in YAML-loaded configs),
+    # but output keys are always strings — matches what JSON-bound
+    # metadata wants.
+    out = extract_fields({ "x" => 1 }, { foo: "x" })
+    assert_equal({ "foo" => 1 }, out)
+    assert_equal ["foo"], out.keys
+  end
+
   def test_parse_date_garbage
     assert_nil parse_date("not a date")
   end
