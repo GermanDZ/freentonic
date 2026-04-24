@@ -8,36 +8,14 @@ module Freentonic
     # Shared construction logic for canonical-shaped provider normalizers.
     #
     # Every provider emits the same four entity kinds (Account, Transaction,
-    # Liability, and the outer CanonicalPayload), and every provider must
-    # also carry a set of legacy-compatibility strings inside metadata during
-    # the receiver-side transition window (legacy_external_id, legacy_uids,
-    # legacy_bank_key on accounts; legacy_dedup_key on transactions). This
-    # module centralizes that so per-provider normalizers only describe
-    # what's actually provider-specific: field mapping and the legacy
-    # string formulas.
+    # Liability, and the outer CanonicalPayload). This module centralizes
+    # the boilerplate so per-provider normalizers only describe what's
+    # actually provider-specific: field mapping.
     #
     # Module-function style: pure factories, no state. Each factory returns
     # a frozen Freentonic::Canonical entity value object.
     module CanonicalBuilder
       module_function
-
-      # --- Legacy-compat metadata (transition window) ----------------------
-      #
-      # Providers pass the exact strings the old normalizer would have
-      # emitted; this module does not try to infer them, so bit-exact
-      # equivalence is the caller's responsibility (and guaranteed by tests).
-
-      def account_legacy_metadata(legacy_external_id:, legacy_uids:, legacy_bank_key:)
-        {
-          "legacy_external_id" => legacy_external_id,
-          "legacy_uids"        => Array(legacy_uids),
-          "legacy_bank_key"    => legacy_bank_key
-        }
-      end
-
-      def transaction_legacy_metadata(legacy_dedup_key:)
-        { "legacy_dedup_key" => legacy_dedup_key }
-      end
 
       # --- Value coercions -------------------------------------------------
 
@@ -59,25 +37,15 @@ module Freentonic
 
       # --- Entity factories ------------------------------------------------
 
-      # Build a Canonical::Account. Computes id via Canonical.account_id,
-      # merges legacy-compat metadata on top of the caller's metadata
-      # (legacy keys win, so providers can't accidentally blank them out).
+      # Build a Canonical::Account. Computes id via Canonical.account_id.
       def build_account(institution:, source_id:, currency:,
                         name: nil, type: nil, iban: nil, balance: nil,
-                        metadata: {},
-                        legacy_external_id:, legacy_uids:, legacy_bank_key:)
+                        metadata: {})
         id = Freentonic::Canonical.account_id(
           institution: institution,
           iban: iban,
           source_id: source_id,
           name: name
-        )
-        merged_metadata = (metadata || {}).merge(
-          account_legacy_metadata(
-            legacy_external_id: legacy_external_id,
-            legacy_uids: legacy_uids,
-            legacy_bank_key: legacy_bank_key
-          )
         )
         Freentonic::Canonical::Account.new(
           id:          id,
@@ -88,7 +56,7 @@ module Freentonic
           currency:    currency,
           iban:        iban,
           balance:     balance,
-          metadata:    merged_metadata
+          metadata:    metadata || {}
         )
       end
 
@@ -99,15 +67,12 @@ module Freentonic
                             source_id: nil, date: nil, value_date: nil,
                             description: nil, raw_description: nil,
                             status: nil, merchant: nil, category: nil,
-                            metadata: {}, legacy_dedup_key:)
+                            metadata: {})
         id = Freentonic::Canonical.transaction_id(
           account_id:      account_id,
           date:            date,
           amount:          amount,
           raw_description: raw_description || description
-        )
-        merged_metadata = (metadata || {}).merge(
-          transaction_legacy_metadata(legacy_dedup_key: legacy_dedup_key)
         )
         Freentonic::Canonical::Transaction.new(
           id:              id,
@@ -122,7 +87,7 @@ module Freentonic
           status:          status,
           merchant:        merchant,
           category:        category,
-          metadata:        merged_metadata
+          metadata:        metadata || {}
         )
       end
 

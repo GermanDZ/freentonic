@@ -6,12 +6,10 @@ require "fileutils"
 
 class ProvidersExtractorBaseTest < Minitest::Test
   Config         = Freentonic::Providers::Config
-  LegacyKeys     = Freentonic::Providers::LegacyKeys
   ExtractorBase  = Freentonic::Providers::ExtractorBase
 
   def setup
     Config.__reset_for_tests!
-    LegacyKeys.__reset_for_tests!
   end
 
   # ---------- Inheritance / instance behavior ----------
