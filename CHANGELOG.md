@@ -2,6 +2,47 @@
 
 All notable changes to freentonic are documented here.
 
+## 0.5.0 — Formatter layer removed; exporters render canonical directly
+
+The `Freentonic::Formatters` module introduced in 0.2.0 is gone.
+Exporters now render the canonical payload into their wire shape
+themselves. SimpleFIN, OFX, and other third-party interchange formats
+are explicitly out of scope for freentonic — adapt the canonical model
+in downstream consumers instead.
+
+### Removed
+
+- `Freentonic::Formatters` module and all four classes (`Base`,
+  `Canonical`, `CsvTransactions`, `JsonlTransactions`).
+- `--export-format NAME` CLI flag. The `csv`, `jsonl`, `json`, and
+  `http` exporters each have one fixed wire shape; there is nothing to
+  pick.
+- `Exporters::Base#resolve_formatter` and `#default_format`.
+- `docs/formatters.md` and `docs/canonical-migration-plan.md`.
+
+### Changed
+
+- `csv` exporter: row-shaping logic (header sort, account_* hoisting,
+  JSON-stringified nested cells) moved inline. Behavior unchanged.
+- `jsonl` exporter: NDJSON shaping logic moved inline. Behavior
+  unchanged.
+- `json` exporter: writes `payload.to_h` as pretty JSON. Plain Hash
+  inputs still pass through (`Hash#to_h` returns self).
+- `http` exporter: POSTs `payload.to_h` as JSON. `Content-Type` is
+  `application/json` unless `--export-content-type` overrides. The
+  `meta.freentonic_run_id` merge behavior is unchanged.
+- `docs/canonical-data-model.md`, `docs/writing-plugins.md` — updated
+  to drop the Formatter-layer narrative.
+
+### Migration
+
+- Drop `--export-format` from any invocation; the exporter's wire shape
+  is now fixed. `--export-content-type` still exists for the http
+  exporter.
+- If you registered a custom formatter via `Formatters.register`, port
+  the rendering logic into a custom exporter (`Exporters.register`)
+  instead.
+
 ## 0.4.0 — Provider boilerplate absorbed into the gem
 
 Several additive changes whose combined effect is to drop the
