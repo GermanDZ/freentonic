@@ -2,6 +2,43 @@
 
 All notable changes to freentonic are documented here.
 
+## 0.6.0 — LegacyKeys removed; canonical-only payloads
+
+The receiver-side transition window has closed (verified against
+finanzas-web). All legacy-compatibility infrastructure is gone:
+`Freentonic::Providers::LegacyKeys`, the per-provider `legacy.yml`
+loader, and the `legacy_external_id` / `legacy_uids` / `legacy_bank_key` /
+`legacy_dedup_key` kwargs on `CanonicalBuilder.build_account` and
+`build_transaction`. Account and transaction metadata no longer carries
+any `legacy_*` keys.
+
+### Removed
+
+- `Freentonic::Providers::LegacyKeys` and `LegacyKeysLoader` modules
+  (~260 LoC + their two test files).
+- `Freentonic::Providers::CanonicalBuilder.account_legacy_metadata` and
+  `transaction_legacy_metadata` helpers.
+- `legacy_external_id:` / `legacy_uids:` / `legacy_bank_key:` kwargs
+  from `CanonicalBuilder.build_account`.
+- `legacy_dedup_key:` kwarg from `CanonicalBuilder.build_transaction`.
+- `LegacyKeys` constant alias from `Freentonic::Providers::NormalizerBase`.
+- `legacy.yml` loading from `Configurable#provider!` — the macro now
+  loads only `config.yml`.
+
+### Migration for provider authors
+
+1. Drop `**LegacyKeys.account(...)` / `**LegacyKeys.transaction(...)`
+   splats from `Builder.build_account` / `Builder.build_transaction`
+   call sites.
+2. Delete the per-provider `legacy.yml` file.
+3. Drop any test assertions on `metadata["legacy_external_id"]`,
+   `metadata["legacy_uids"]`, `metadata["legacy_bank_key"]`,
+   `metadata["legacy_dedup_key"]`.
+
+The deterministic `acc_…` / `txn_…` IDs from the canonical helpers
+(`Canonical.account_id`, `Canonical.transaction_id`) are unchanged —
+that's the only join key receivers should be using.
+
 ## 0.5.0 — Formatter layer removed; exporters render canonical directly
 
 The `Freentonic::Formatters` module introduced in 0.2.0 is gone.
