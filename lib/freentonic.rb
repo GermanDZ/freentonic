@@ -32,8 +32,6 @@ require_relative "freentonic/normalizers/passthrough"
 
 require_relative "freentonic/providers/helpers"
 require_relative "freentonic/providers/canonical_builder"
-require_relative "freentonic/providers/legacy_keys"
-require_relative "freentonic/providers/legacy_keys_loader"
 require_relative "freentonic/providers/config"
 require_relative "freentonic/providers/configurable"
 require_relative "freentonic/providers/normalizer_base"
