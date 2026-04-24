@@ -6,12 +6,10 @@ require "fileutils"
 
 class ProvidersNormalizerBaseTest < Minitest::Test
   Config           = Freentonic::Providers::Config
-  LegacyKeys       = Freentonic::Providers::LegacyKeys
   NormalizerBase   = Freentonic::Providers::NormalizerBase
 
   def setup
     Config.__reset_for_tests!
-    LegacyKeys.__reset_for_tests!
   end
 
   # ---------- Inherited behavior ----------
@@ -23,10 +21,9 @@ class ProvidersNormalizerBaseTest < Minitest::Test
     assert_equal 1234, instance.cents(12.34)
   end
 
-  def test_subclass_inherits_builder_and_legacy_keys_constants
+  def test_subclass_inherits_builder_constant
     klass = Class.new(NormalizerBase)
     assert_equal Freentonic::Providers::CanonicalBuilder, klass::Builder
-    assert_equal Freentonic::Providers::LegacyKeys,       klass::LegacyKeys
   end
 
   # ---------- provider!(dir) macro ----------
@@ -54,25 +51,7 @@ class ProvidersNormalizerBaseTest < Minitest::Test
     end
   end
 
-  def test_provider_macro_auto_loads_legacy_keys_yaml
-    with_provider_dir("bank") do |dir|
-      File.write(File.join(dir, "legacy.yml"), <<~YAML)
-        account:
-          external_id: "bank:%{source_id}"
-          uids:        ["bank:%{source_id}"]
-          bank_key:    "bank"
-        transaction:
-          dedup_key: "bank:%{tx_id}"
-      YAML
-
-      Class.new(NormalizerBase) { provider!(dir) }
-
-      out = LegacyKeys.account(institution: :bank, source_id: "1")
-      assert_equal "bank:1", out[:legacy_external_id]
-    end
-  end
-
-  def test_provider_macro_is_a_no_op_when_neither_yml_exists
+  def test_provider_macro_is_a_no_op_when_no_config_yml
     with_provider_dir("bare") do |dir|
       klass = Class.new(NormalizerBase) { provider!(dir) }
       refute klass.const_defined?(:CONFIG, false)

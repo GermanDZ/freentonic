@@ -4,35 +4,6 @@ require "bigdecimal"
 class CanonicalBuilderTest < Minitest::Test
   Builder = Freentonic::Providers::CanonicalBuilder
 
-  # --- account_legacy_metadata -------------------------------------------
-
-  def test_account_legacy_metadata_shape
-    meta = Builder.account_legacy_metadata(
-      legacy_external_id: "ing_live:abc",
-      legacy_uids:        ["ing_live:abc"],
-      legacy_bank_key:    "ing"
-    )
-    assert_equal "ing_live:abc",   meta["legacy_external_id"]
-    assert_equal ["ing_live:abc"], meta["legacy_uids"]
-    assert_equal "ing",            meta["legacy_bank_key"]
-  end
-
-  def test_account_legacy_metadata_wraps_scalar_uid_to_array
-    meta = Builder.account_legacy_metadata(
-      legacy_external_id: "x",
-      legacy_uids:        "x",
-      legacy_bank_key:    "k"
-    )
-    assert_equal ["x"], meta["legacy_uids"]
-  end
-
-  # --- transaction_legacy_metadata ---------------------------------------
-
-  def test_transaction_legacy_metadata
-    meta = Builder.transaction_legacy_metadata(legacy_dedup_key: "ing_live:p:mv")
-    assert_equal({ "legacy_dedup_key" => "ing_live:p:mv" }, meta)
-  end
-
   # --- cents_to_amount ---------------------------------------------------
 
   def test_cents_to_amount_positive
@@ -84,38 +55,18 @@ class CanonicalBuilderTest < Minitest::Test
       type:        "checking",
       iban:        "ES0012345678901234567890",
       balance:     { current: BigDecimal("1234.56"), timestamp: nil },
-      metadata:    { "ing_product_type" => 20 },
-      legacy_external_id: "ing_live:prod-1",
-      legacy_uids:        ["ing_live:prod-1"],
-      legacy_bank_key:    "ing"
+      metadata:    { "ing_product_type" => 20 }
     )
     assert_kind_of Freentonic::Canonical::Account, acct
     assert_match(/\Aacc_[0-9a-f]{16}\z/, acct.id)
     assert_equal "ing",                  acct.institution
     assert_equal "ES0012345678901234567890", acct.iban
     assert_equal BigDecimal("1234.56"),  acct.balance.current
-  end
-
-  def test_build_account_merges_legacy_metadata_on_top
-    acct = Builder.build_account(
-      institution: "ing",
-      source_id:   "p",
-      currency:    "EUR",
-      metadata:    { "own" => "value", "legacy_bank_key" => "BOGUS" },
-      legacy_external_id: "ing_live:p",
-      legacy_uids:        ["ing_live:p"],
-      legacy_bank_key:    "ing"
-    )
-    assert_equal "value", acct.metadata["own"]
-    assert_equal "ing",   acct.metadata["legacy_bank_key"]   # legacy wins
-    assert_equal ["ing_live:p"], acct.metadata["legacy_uids"]
+    assert_equal({ "ing_product_type" => 20 }, acct.metadata)
   end
 
   def test_build_account_id_is_deterministic
-    args = {
-      institution: "ing", source_id: "p", currency: "EUR",
-      legacy_external_id: "ing_live:p", legacy_uids: ["ing_live:p"], legacy_bank_key: "ing"
-    }
+    args = { institution: "ing", source_id: "p", currency: "EUR" }
     a = Builder.build_account(**args)
     b = Builder.build_account(**args)
     assert_equal a.id, b.id
@@ -133,22 +84,19 @@ class CanonicalBuilderTest < Minitest::Test
       raw_description: "COFFEE SHOP",
       description:     "Coffee Shop",
       status:          "posted",
-      metadata:        { "ing" => { "uuid" => "mv-1" } },
-      legacy_dedup_key: "ing_live:prod-1:mv-1"
+      metadata:        { "ing" => { "uuid" => "mv-1" } }
     )
     assert_kind_of Freentonic::Canonical::Transaction, tx
     assert_match(/\Atxn_[0-9a-f]{16}\z/, tx.id)
     assert_equal "acc_0123456789abcdef", tx.account_id
     assert_equal BigDecimal("-12.34"),   tx.amount
-    assert_equal "ing_live:prod-1:mv-1", tx.metadata["legacy_dedup_key"]
     assert_equal({ "uuid" => "mv-1" }, tx.metadata["ing"])
   end
 
   def test_build_transaction_id_is_deterministic
     args = {
       account_id: "acc_x", amount: BigDecimal("1"), currency: "EUR",
-      date: Date.new(2024, 1, 1), raw_description: "r",
-      legacy_dedup_key: "x"
+      date: Date.new(2024, 1, 1), raw_description: "r"
     }
     assert_equal Builder.build_transaction(**args).id,
                  Builder.build_transaction(**args).id
@@ -159,7 +107,7 @@ class CanonicalBuilderTest < Minitest::Test
     tx = Builder.build_transaction(
       account_id: "acc_x", amount: BigDecimal("1"), currency: "EUR",
       date: Date.new(2024, 1, 1), description: "cleaned",
-      raw_description: nil, legacy_dedup_key: "x"
+      raw_description: nil
     )
     assert_match(/\Atxn_[0-9a-f]{16}\z/, tx.id)
   end
@@ -186,10 +134,7 @@ class CanonicalBuilderTest < Minitest::Test
   # --- payload -----------------------------------------------------------
 
   def test_payload_wraps_entities_and_injects_scraper_version
-    acct = Builder.build_account(
-      institution: "ing", source_id: "p", currency: "EUR",
-      legacy_external_id: "ing_live:p", legacy_uids: ["ing_live:p"], legacy_bank_key: "ing"
-    )
+    acct = Builder.build_account(institution: "ing", source_id: "p", currency: "EUR")
     env = Builder.payload(accounts: [acct], transactions: [], scraper_version: "ing/0.1")
     assert_kind_of Freentonic::Canonical::CanonicalPayload, env
     assert_equal "0.1", env.schema_version

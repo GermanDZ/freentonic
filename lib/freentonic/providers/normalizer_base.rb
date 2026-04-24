@@ -11,11 +11,10 @@ module Freentonic
     # workflow stage's normalizer contract). Includes
     # Freentonic::Providers::Helpers (so subclasses get cents,
     # parse_date, parse_timestamp_ms, safe_fetch, extract_fields,
-    # first_present as instance methods automatically). Defines class-
-    # level constants `Builder` and `LegacyKeys` aliasing the gem's
-    # CanonicalBuilder and LegacyKeys — Ruby's constant lookup walks
-    # the inheritance chain so subclasses see them as if they'd
-    # declared the alias themselves.
+    # first_present as instance methods automatically). Defines the
+    # class-level constant `Builder` aliasing the gem's CanonicalBuilder
+    # — Ruby's constant lookup walks the inheritance chain so subclasses
+    # see it as if they'd declared the alias themselves.
     #
     # The `provider!(dir)` class macro (extended from Configurable)
     # absorbs the per-provider header. See Configurable for what it
@@ -36,8 +35,7 @@ module Freentonic
       extend Freentonic::Providers::Configurable
       include Freentonic::Providers::Helpers
 
-      Builder    = Freentonic::Providers::CanonicalBuilder
-      LegacyKeys = Freentonic::Providers::LegacyKeys
+      Builder = Freentonic::Providers::CanonicalBuilder
     end
   end
 end
