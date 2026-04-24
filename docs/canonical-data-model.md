@@ -5,18 +5,15 @@
 This document defines the canonical internal data model for a bank
 aggregation system based on scraping and normalization.
 
-After the migration described in
-[canonical-migration-plan.md](canonical-migration-plan.md), the Normalize
-stage's output contract IS this canonical model. It is the single source of
-truth inside the pipeline; all external output shapes (SimpleFIN, OFX,
-CSV, etc.) are produced from it by the Formatter layer documented in
-[formatters.md](formatters.md).
+The Normalize stage's output contract IS this canonical model. It is the
+single source of truth inside the pipeline; all external output shapes
+(CSV, NDJSON, etc.) are produced from it by the exporters.
 
 ### Goals
 
 - Normalize heterogeneous bank data into a consistent structure.
 - Support balances, transactions, accounts, liabilities, and investments.
-- Enable export to multiple formats (canonical, SimpleFIN, OFX, CSV, etc.).
+- Enable export in multiple shapes (canonical JSON, CSV, NDJSON).
 - Handle incomplete and inconsistent scraped data.
 - Provide a stable base for future extensions.
 
@@ -24,8 +21,8 @@ CSV, etc.) are produced from it by the Formatter layer documented in
 
 ### 1. Canonical First
 
-The internal model is the single source of truth. All external formats
-(SimpleFIN, OFX, CSV, etc.) are derived from it by the Formatter layer.
+The internal model is the single source of truth. All external shapes
+(canonical JSON, CSV, NDJSON) are derived from it by the exporters.
 Normalizers never emit external shapes directly.
 
 ### 2. Permissive Schema
@@ -88,7 +85,7 @@ that the record is inherently non-stable.
 
 All monetary values carry an ISO 4217 currency code as a sibling field on
 the entity that owns them. Currency codes are NOT validated against the ISO
-list at ingestion (permissive schema); downstream formatters may do so.
+list at ingestion (permissive schema); downstream consumers may do so.
 
 ### 6. Time Semantics
 
@@ -101,10 +98,10 @@ Transactions support both:
 
 - **Internal Ruby type:** `BigDecimal` for all monetary amounts and
   investment quantities. Float is rejected because summation drift in the
-  `summary` rollup (see below) and in downstream formatters is
+  `summary` rollup (see below) and in downstream consumers is
   unacceptable.
 - **Wire JSON type:** **string** (e.g., `"amount": "-45.20"`). Matches
-  industry convention (Stripe, most PSD2 APIs, SimpleFIN) and preserves
+  industry convention (Stripe, most PSD2 APIs) and preserves
   exact precision across the wire. JS/TS consumers parse with a decimal
   library or `parseFloat` (their choice).
 - The entity factory coerces `String | Numeric → BigDecimal` so authors
@@ -155,7 +152,7 @@ factory that defaults optional fields to `nil`. Authors call
 get a fully-populated value object with every other slot nil-defaulted.
 
 Immutable by construction (`Data.define` semantics). Equality is
-structural. `to_h` is free and is what formatters use for serialization.
+structural. `to_h` is free and is what exporters use for serialization.
 
 ## Core Entities
 
@@ -401,8 +398,8 @@ If a bank gives you IBAN, put it in `account.iban`, not `metadata["iban"]`.
    intermediate payload into a `CanonicalPayload`. After migration, this is
    the universal contract; every normalizer returns one.
 4. **Export stage** — fans out to one or more Exporters. Each Exporter
-   consults a Formatter (see [formatters.md](formatters.md)) to produce
-   the wire shape, then ships it (POST, file write, etc.).
+   renders the canonical payload into its wire shape and ships it (POST,
+   file write, etc.).
 
 ## Future Extensions (out of scope for v0.1 migration)
 
@@ -421,11 +418,8 @@ Core stack:
 
 - `Freentonic::Canonical` module — envelope + entities + helpers.
 - YAML-declared workflows driving extract + normalize.
-- Formatter layer (see [formatters.md](formatters.md)) producing
-  canonical / CSV-transactions / JSONL-transactions wire shapes today;
-  SimpleFIN / OFX planned.
-- Pluggable exporters wrapping formatters (HTTP, JSON-file, CSV-file,
-  JSONL-file).
+- Pluggable exporters (HTTP, JSON-file, CSV-file, JSONL-file) rendering
+  the canonical payload into their wire shapes directly.
 
 This architecture ensures flexibility, extensibility, and long-term
 maintainability while giving consumers one stable internal shape to target.

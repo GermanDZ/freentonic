@@ -26,7 +26,6 @@ require_relative "freentonic/secrets/plain_file"
 require_relative "freentonic/secret_resolver"
 
 require_relative "freentonic/canonical"
-require_relative "freentonic/formatters"
 
 require_relative "freentonic/normalizers/base"
 require_relative "freentonic/normalizers/passthrough"

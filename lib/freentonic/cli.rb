@@ -121,13 +121,6 @@ module Freentonic
           headers = (last_exporter(options)[:options][:headers] ||= {})
           headers[k] = val
         end
-        opts.on("--export-format NAME", "Output format (#{Formatters.registered.join("|")}) for the last-declared exporter") do |v|
-          name = v.to_sym
-          unless Formatters.registered.include?(name)
-            raise UserError, "unknown format #{v.inspect} (available: #{Formatters.registered.join(", ")})"
-          end
-          attach(options, :format, name)
-        end
 
         opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
         opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }

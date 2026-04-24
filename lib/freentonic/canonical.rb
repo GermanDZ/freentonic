@@ -1,12 +1,7 @@
 # frozen_string_literal: true
 
-# Freentonic::Canonical — internal data model for the post-migration
-# Normalize stage output contract. See docs/canonical-data-model.md.
-#
-# Pure addition: nothing in the existing pipeline consumes this yet; it
-# lands as a standalone module exercisable in isolation. Downstream
-# migration steps (formatters, CLI wiring, csv/jsonl rewrite, default
-# flip) are sequenced in docs/canonical-migration-plan.md.
+# Freentonic::Canonical — internal data model and Normalize stage output
+# contract. See docs/canonical-data-model.md.
 
 module Freentonic
   module Canonical

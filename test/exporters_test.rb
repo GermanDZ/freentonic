@@ -34,8 +34,7 @@ module Freentonic
       end
     end
 
-    # Post-canonical-migration: csv/jsonl require CanonicalPayload input and
-    # delegate row-shaping to the corresponding *Transactions formatter.
+    # csv/jsonl require CanonicalPayload input and render rows inline.
 
     def canonical_payload
       Canonical::CanonicalPayload.new(

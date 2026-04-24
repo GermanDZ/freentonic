@@ -315,7 +315,7 @@ end
 
 Normalizers convert the Extract stage's raw provider payload into a
 `Freentonic::Canonical::CanonicalPayload` — the universal internal
-shape every exporter and formatter consumes. Most of the time,
+shape every exporter consumes. Most of the time,
 normalizers live alongside their workflow YAML in the
 [freentonic-providers](https://github.com/GermanDZ/freentonic-providers)
 repo — the contract is the same either way.
@@ -345,10 +345,10 @@ or the resolved `lookback_days`.
 
 Return a `Freentonic::Canonical::CanonicalPayload`. The csv/jsonl
 exporters reject any other payload type with a clear error pointing at
-this doc; the http/json exporters technically accept legacy Hashes via
-the identity formatter, but post-migration you should always emit a
-canonical payload so consumers see the `schema_version` / `summary` /
-deterministic-IDs benefits.
+this doc; the http/json exporters accept plain Hashes too (they're
+serialized as-is), but you should always emit a canonical payload so
+consumers see the `schema_version` / `summary` / deterministic-IDs
+benefits.
 
 ### Registration
 
