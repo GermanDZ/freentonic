@@ -169,16 +169,22 @@ module Freentonic
       end
 
       # --interactive forces the engine to run only Connect. Combining
-      # it with stage-isolation flags or with serialized-input flags
-      # would either contradict that (--only-stage / --through) or
-      # produce an empty pipeline (--from-raw / --from-normalized,
-      # which add :connect to the engine's skip set). Reject up-front
-      # rather than letting the engine quietly run zero stages.
+      # it with stage-isolation, serialized-input, or output-producing
+      # flags would either contradict that (--only-stage / --through),
+      # yield an empty pipeline (--from-raw / --from-normalized, which
+      # add :connect to the engine's skip set), or silently request
+      # artifacts that the bypassed Extract/Normalize/Export stages
+      # would have produced (--dump-raw / --dump-normalized /
+      # --export). Reject up-front rather than letting the engine
+      # quietly run zero stages or quietly drop the output flags.
       if options[:interactive]
-        conflicting = %i[only_stage through_stage from_raw from_normalized].find { |f| options[f] }
+        conflicting = %i[only_stage through_stage from_raw from_normalized dump_raw dump_normalized].find { |f| options[f] }
         if conflicting
           raise UserError,
             "--interactive cannot be combined with --#{conflicting.to_s.tr('_', '-')}"
+        end
+        unless options[:exporters].empty?
+          raise UserError, "--interactive cannot be combined with --export"
         end
       end
 
