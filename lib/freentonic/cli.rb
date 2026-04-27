@@ -81,7 +81,8 @@ module Freentonic
         secrets_file: nil,
         exporters: [], # array of { name:, options: {} }
         purge: false,
-        force: false
+        force: false,
+        interactive: false
       }
 
       parser = OptionParser.new do |opts|
@@ -125,6 +126,8 @@ module Freentonic
         opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
         opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }
 
+        opts.on("--interactive", "Browse mode: run only the workflow's `connect` phase (URL navigation), then idle until SIGTERM. Lets the operator interact with the bank manually via VNC to warm a fresh fingerprint or solve 2FA.") { options[:interactive] = true }
+
         opts.on("-h", "--help") { puts opts; exit 0 }
         opts.on("--version") { puts "freentonic #{Freentonic::VERSION}"; exit 0 }
       end
@@ -165,12 +168,34 @@ module Freentonic
         raise UserError, "--only-stage and --through are mutually exclusive"
       end
 
+      # --interactive forces the engine to run only Connect. Combining
+      # it with stage-isolation, serialized-input, or output-producing
+      # flags would either contradict that (--only-stage / --through),
+      # yield an empty pipeline (--from-raw / --from-normalized, which
+      # add :connect to the engine's skip set), or silently request
+      # artifacts that the bypassed Extract/Normalize/Export stages
+      # would have produced (--dump-raw / --dump-normalized /
+      # --export). Reject up-front rather than letting the engine
+      # quietly run zero stages or quietly drop the output flags.
+      if options[:interactive]
+        conflicting = %i[only_stage through_stage from_raw from_normalized dump_raw dump_normalized].find { |f| options[f] }
+        if conflicting
+          raise UserError,
+            "--interactive cannot be combined with --#{conflicting.to_s.tr('_', '-')}"
+        end
+        unless options[:exporters].empty?
+          raise UserError, "--interactive cannot be combined with --export"
+        end
+      end
+
       # Stage-isolation flags that legitimately stop the pipeline before
       # the Export stage runs — no exporter is needed for these because
       # there's nothing to export. Both --only-stage and --through count.
+      # --interactive also stops at Connect (its whole purpose).
       pre_export_stage = ->(s) { s == :connect || s == :extract }
       stops_before_export = pre_export_stage.call(options[:only_stage]) ||
-                            pre_export_stage.call(options[:through_stage])
+                            pre_export_stage.call(options[:through_stage]) ||
+                            options[:interactive]
 
       if options[:exporters].empty? && !stops_before_export &&
          options[:dump_raw].nil? && options[:dump_normalized].nil?
@@ -208,7 +233,8 @@ module Freentonic
         from_raw: options[:from_raw],
         dump_normalized: options[:dump_normalized],
         from_normalized: options[:from_normalized],
-        exporters: exporters
+        exporters: exporters,
+        interactive: options[:interactive]
       }
 
       Engine.new(context: context).run

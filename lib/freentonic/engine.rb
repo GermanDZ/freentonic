@@ -43,6 +43,10 @@ module Freentonic
     def stages_to_run
       only = @context[:only_stage]
       through = @context[:through_stage]
+      # Interactive (browse) mode short-circuits the pipeline at Connect:
+      # the operator just wants Chrome open at the bank URL so they can
+      # interact via VNC. Extract/Normalize/Export have nothing to do.
+      only = :connect if @context[:interactive]
 
       skip = Set.new
       skip << :connect   if @context[:from_raw] || @context[:from_normalized]

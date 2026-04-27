@@ -247,6 +247,45 @@ class InvokeRequestTest < Minitest::Test
     assert_equal 400, err.status_code
   end
 
+  # ─── interactive (browse mode) ───
+
+  def test_interactive_defaults_to_false
+    req = parse(base_body)
+    assert_equal false, req.interactive
+  end
+
+  def test_interactive_accepts_true
+    req = parse(base_body.merge("interactive" => true))
+    assert_equal true, req.interactive
+  end
+
+  def test_interactive_accepts_explicit_false
+    req = parse(base_body.merge("interactive" => false))
+    assert_equal false, req.interactive
+  end
+
+  def test_interactive_rejects_non_boolean
+    err = assert_raises(Freentonic::InvokeError) { parse(base_body.merge("interactive" => "true")) }
+    assert_equal 400, err.status_code
+  end
+
+  def test_interactive_rejects_truthy_int
+    err = assert_raises(Freentonic::InvokeError) { parse(base_body.merge("interactive" => 1)) }
+    assert_equal 400, err.status_code
+  end
+
+  # Interactive mode short-circuits the engine before Export ever
+  # runs, so a malformed `export` block must not block the request.
+  # (Clients like simplefreen always ship the same export config and
+  # only flip the interactive flag.)
+  def test_interactive_skips_export_validation_entirely
+    req = parse(base_body.merge(
+      "interactive" => true,
+      "export" => { "mode" => "http" } # missing url+token; would normally raise
+    ))
+    assert_nil req.export
+  end
+
   # ─── timeout / lookback ───
 
   def test_timeout_default

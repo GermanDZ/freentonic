@@ -265,6 +265,57 @@ class InvokeRunnerTest < Minitest::Test
     assert_equal "unknown",      Freentonic::InvokeRunner.classify_error(42,  false, false)
   end
 
+  # ─── interactive (browse mode) plumbing ───
+
+  def test_interactive_flag_passed_to_child
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    request = build_request("interactive" => true)
+    runner.run(request)
+    run_dir = File.join(@runs_dir, request.run_id)
+
+    argv = read_stub(run_dir, "argv")
+    assert_includes argv, "--interactive\n",
+      "interactive=true must surface as --interactive on the child argv"
+  end
+
+  def test_interactive_omits_export_argv
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    # `build_request` defaults to an http export block. Interactive
+    # mode skips export validation in InvokeRequest, so request.export
+    # ends up nil, and no --export* args should land on argv. (The
+    # engine short-circuits at Connect, so even if argv carried them
+    # the exporter would never fire — but plumbing them would still
+    # trip the CLI's "no exporters configured" / argv validation.)
+    request = build_request("interactive" => true)
+    runner.run(request)
+    run_dir = File.join(@runs_dir, request.run_id)
+
+    argv = read_stub(run_dir, "argv")
+    refute_includes argv, "--export\n",
+      "interactive mode must not emit --export on argv"
+    refute_includes argv, "--export-url\n",
+      "interactive mode must not emit --export-url on argv"
+    refute_includes argv, "--export-token\n"
+    refute_includes argv, "http://example.com/push\n"
+  end
+
+  def test_non_interactive_still_emits_export_argv
+    # Guard against accidentally regressing the default path while
+    # touching the interactive branch.
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    request = build_request # interactive defaults to false
+    runner.run(request)
+    run_dir = File.join(@runs_dir, request.run_id)
+
+    argv = read_stub(run_dir, "argv")
+    refute_includes argv, "--interactive\n"
+    assert_includes argv, "--export\n"
+    assert_includes argv, "http\n"
+  end
+
   # ─── traversal & missing workflow already covered in InvokeRequestTest ───
 
   # ─── chrome profile ───
