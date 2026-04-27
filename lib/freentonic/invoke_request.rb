@@ -69,12 +69,17 @@ module Freentonic
 
       @profile_key = parse_profile_key
       @credentials_inline, @credentials_file = parse_credentials
-      @export = parse_export
+      @interactive = parse_interactive
+      # Interactive (browse) mode short-circuits the engine at Connect,
+      # so no exporter ever runs. Skip export parsing entirely so a
+      # client that always ships an `export` block (e.g. simplefreen)
+      # can flip `interactive: true` without also having to scrub the
+      # otherwise-required exporter fields.
+      @export = @interactive ? nil : parse_export
       @timeout_sec = parse_timeout
       @lookback = parse_lookback
       @chrome = parse_chrome
       @vnc_password = parse_vnc_password
-      @interactive = parse_interactive
 
       @profile_key ||= derive_profile_key
       self
@@ -296,8 +301,10 @@ module Freentonic
     # `connect` phase and then idles until SIGTERM (cancel) or the
     # parent's overall timeout fires. Lets the operator interact with
     # the bank manually via VNC. No exporters fire in this mode (the
-    # engine skips Extract/Normalize/Export); any export block in the
-    # request is silently ignored.
+    # engine skips Extract/Normalize/Export); any `export` block in
+    # the request is silently ignored — `validate!` skips
+    # `parse_export` entirely when interactive is true, so even a
+    # malformed export block won't trip request validation.
     def parse_interactive
       value = @body["interactive"]
       return false if value.nil?

@@ -168,6 +168,20 @@ module Freentonic
         raise UserError, "--only-stage and --through are mutually exclusive"
       end
 
+      # --interactive forces the engine to run only Connect. Combining
+      # it with stage-isolation flags or with serialized-input flags
+      # would either contradict that (--only-stage / --through) or
+      # produce an empty pipeline (--from-raw / --from-normalized,
+      # which add :connect to the engine's skip set). Reject up-front
+      # rather than letting the engine quietly run zero stages.
+      if options[:interactive]
+        conflicting = %i[only_stage through_stage from_raw from_normalized].find { |f| options[f] }
+        if conflicting
+          raise UserError,
+            "--interactive cannot be combined with --#{conflicting.to_s.tr('_', '-')}"
+        end
+      end
+
       # Stage-isolation flags that legitimately stop the pipeline before
       # the Export stage runs — no exporter is needed for these because
       # there's nothing to export. Both --only-stage and --through count.
