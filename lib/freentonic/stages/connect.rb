@@ -38,7 +38,15 @@ module Freentonic
       ensure
         @session&.close rescue nil
         close_chrome if @chrome_started
-        cleanup_interactive_chrome if @interactive_chrome_pid
+        if @context[:interactive]
+          cleanup_interactive_chrome if @interactive_chrome_pid
+          # Always run isolated-profile cleanup on the interactive
+          # path: configure_chrome may have created the temp dir
+          # before launch_interactive_chrome ever ran, and the CDP
+          # close path that normally handles this is bypassed here.
+          # No-op when --isolated wasn't set.
+          chrome_cdp.cleanup_isolated_profile! if chrome_cdp.respond_to?(:cleanup_isolated_profile!)
+        end
       end
 
       private
@@ -233,6 +241,15 @@ module Freentonic
           out: "/dev/null",
           err: "/dev/null"
         )
+        # Detach so the kernel reaps the child as soon as it exits.
+        # Without this, an operator-closed Chrome lingers as a zombie
+        # and `Process.kill(0, pid)` keeps returning success against
+        # the zombie entry — so the idle loop would never notice the
+        # window was closed and would stall until the parent's invoke
+        # timeout. After detach, kill(0) raises ESRCH once the reaper
+        # thread has waited the child, which the alive? check
+        # already converts into "false".
+        Process.detach(@interactive_chrome_pid)
       end
 
       # Sleep until cancelled, the parent's invoke timeout fires, or
@@ -277,17 +294,16 @@ module Freentonic
         rescue Errno::ESRCH
           return  # already gone
         end
-        # Brief grace; SIGKILL if needed.
+        # Brief grace; SIGKILL if needed. The child is already
+        # `Process.detach`'d, so its reaper thread will waitpid for
+        # us — we can't waitpid here (would raise ECHILD), so we
+        # poll with kill(0) which flips to ESRCH once the reaper
+        # has cleaned up the PID entry.
         20.times do
-          begin
-            return if Process.waitpid(pid, Process::WNOHANG)
-          rescue Errno::ECHILD
-            return
-          end
+          break unless interactive_chrome_alive?
           sleep 0.1
         end
-        Process.kill("KILL", pid) rescue nil
-        Process.waitpid(pid) rescue nil
+        Process.kill("KILL", pid) rescue nil if interactive_chrome_alive?
       end
 
       # Pluck the navigate URL out of the workflow's `connect` phase so
