@@ -263,8 +263,12 @@ module Freentonic
 
         stdout.puts "Interactive mode: Chrome is open and idle."
         stdout.puts "  - Take over via VNC."
-        stdout.puts "  - POST /cancel/<run_id> on the parent (or close the Chrome window) when done; Chrome closes cleanly and the profile state is preserved."
-        stdout.puts "  - Otherwise the parent's invoke timeout (default 30 min) will fire."
+        stdout.puts "  - End the session by closing the Chrome window, or by sending SIGTERM/SIGINT (Ctrl-C from the CLI; POST /cancel/<run_id> when run under the invoke server)."
+        if @context[:isolated]
+          stdout.puts "  - Profile is isolated: state will NOT persist after exit (the temp profile dir is removed in cleanup)."
+        else
+          stdout.puts "  - Profile state will persist for subsequent runs."
+        end
 
         begin
           until stop

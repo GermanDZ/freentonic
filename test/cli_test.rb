@@ -159,5 +159,27 @@ module Freentonic
       err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
       assert_match(/--interactive cannot be combined with --from-normalized/, err.message)
     end
+
+    def test_interactive_rejects_dump_raw
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--dump-raw", "/tmp/raw.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --dump-raw/, err.message)
+    end
+
+    def test_interactive_rejects_dump_normalized
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--dump-normalized", "/tmp/n.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --dump-normalized/, err.message)
+    end
+
+    def test_interactive_rejects_export
+      # Output-producing exporters can never fire on the interactive path
+      # (engine short-circuits at Connect). Reject explicitly so the
+      # operator notices instead of getting a "successful" run with
+      # nothing exported.
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--export", "json", "--export-path", "out.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --export/, err.message)
+    end
   end
 end
