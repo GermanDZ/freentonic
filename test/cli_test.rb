@@ -125,5 +125,61 @@ module Freentonic
       err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
       assert_match(/no exporters configured/, err.message)
     end
+
+    # --- Interactive (browse) mode --------------------------------------
+    # `--interactive` forces the engine to run only Connect, so combining
+    # it with stage-isolation or serialized-input flags either contradicts
+    # that intent or yields an empty pipeline. Reject up-front.
+
+    def test_interactive_accepts_runs_without_exporter
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive"])
+      Cli.new(stderr: StringIO.new).send(:validate!, opts)
+    end
+
+    def test_interactive_rejects_only_stage
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--only-stage", "extract"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --only-stage/, err.message)
+    end
+
+    def test_interactive_rejects_through
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--through", "extract"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --through/, err.message)
+    end
+
+    def test_interactive_rejects_from_raw
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--from-raw", "/tmp/raw.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --from-raw/, err.message)
+    end
+
+    def test_interactive_rejects_from_normalized
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--from-normalized", "/tmp/n.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --from-normalized/, err.message)
+    end
+
+    def test_interactive_rejects_dump_raw
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--dump-raw", "/tmp/raw.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --dump-raw/, err.message)
+    end
+
+    def test_interactive_rejects_dump_normalized
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--dump-normalized", "/tmp/n.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --dump-normalized/, err.message)
+    end
+
+    def test_interactive_rejects_export
+      # Output-producing exporters can never fire on the interactive path
+      # (engine short-circuits at Connect). Reject explicitly so the
+      # operator notices instead of getting a "successful" run with
+      # nothing exported.
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--interactive", "--export", "json", "--export-path", "out.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--interactive cannot be combined with --export/, err.message)
+    end
   end
 end
