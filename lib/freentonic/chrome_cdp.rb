@@ -19,8 +19,17 @@ require "securerandom"
 module Freentonic
   module ChromeCdp
     CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    # Prefer the actual Chromium ELF over /usr/bin/chromium on Debian —
+    # the latter is a wrapper shell script that injects flags like
+    # `--load-extension=` (empty), `--media-router=0`,
+    # `--enable-remote-extensions`, and `--show-component-extension-options`.
+    # Anti-bot fingerprinters check for these because no real user
+    # ever has them. Calling the unwrapped binary gives us a clean
+    # Chrome process whose only flags are the ones we explicitly pass.
     LINUX_CHROME_PATHS = %w[
       /usr/bin/google-chrome
+      /usr/lib/chromium/chromium
+      /usr/lib/chromium-browser/chromium-browser
       /usr/bin/chromium
       /usr/bin/chromium-browser
       /snap/bin/chromium
