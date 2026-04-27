@@ -15,19 +15,30 @@ module Freentonic
 
       def call
         configure_chrome
-        launch_chrome
-        @chrome_started = true
-        open_login_session
-        mask_webdriver
-        apply_headless_stealth if @context[:headless]
-        run_pipeline
-        @context[:credentials] = extract_credentials
+        if @context[:interactive]
+          # Browse mode bypasses the CDP path entirely — banks
+          # fingerprint the open --remote-debugging-port and
+          # `navigator.webdriver` even with stealth flags. The user
+          # drives Chrome by hand via VNC, so we don't need
+          # automation hooks at all. See #launch_interactive_chrome.
+          launch_interactive_chrome
+          run_interactive_browse
+        else
+          launch_chrome
+          @chrome_started = true
+          open_login_session
+          mask_webdriver
+          apply_headless_stealth if @context[:headless]
+          run_pipeline
+          @context[:credentials] = extract_credentials
+        end
         @context
       rescue RuntimeError => e
         raise UserError, "Browser workflow failed: #{e.message}"
       ensure
         @session&.close rescue nil
         close_chrome if @chrome_started
+        cleanup_interactive_chrome if @interactive_chrome_pid
       end
 
       private
@@ -119,6 +130,180 @@ module Freentonic
             stderr: stderr
           ).execute_phase(phase)
         end
+      end
+
+      # Browse-mode user-agent override. Banks fingerprint:
+      #   - the User-Agent header (UA string)
+      #   - the navigator.userAgentData (UA-CH) which leaks platform
+      # We can't fully fix UA-CH from a Chrome flag, but a UA override
+      # at least makes the request line look like a normal macOS Chrome
+      # instead of "X11; Linux aarch64" (the Colima/M-series default,
+      # rare among real banking customers). Picking macOS Chrome 147 to
+      # match the actual binary version installed in the container.
+      INTERACTIVE_USER_AGENT =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " \
+        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+
+      # Sensible defaults for Spanish banks (the current set of
+      # supported providers — ING, Fintonic, Revolut ES, Unicaja).
+      # All overridable via env so users in other locales can match
+      # their bank's expected client locale without forking the code.
+      INTERACTIVE_DEFAULT_LANG = "es-ES,es;q=0.9,en;q=0.5"
+      INTERACTIVE_DEFAULT_TZ   = "Europe/Madrid"
+
+      # Spawn Chrome for interactive (browse) mode WITHOUT
+      # --remote-debugging-port, --disable-blink-features, --test-type,
+      # or any of the other automation hooks the CDP path adds. Banks
+      # fingerprint those even when navigator.webdriver is masked — and
+      # the operator is going to drive Chrome by hand through VNC, so
+      # we don't need automation at all. The result looks like a
+      # vanilla user-launched Chrome to anti-bot heuristics, with the
+      # operator's persistent profile loaded.
+      def launch_interactive_chrome
+        url   = initial_url_from_workflow
+        lang  = ENV.fetch("FREENTONIC_INTERACTIVE_LANG", INTERACTIVE_DEFAULT_LANG)
+        tz    = ENV.fetch("FREENTONIC_INTERACTIVE_TZ",   INTERACTIVE_DEFAULT_TZ)
+
+        args = [
+          chrome_cdp.chrome_binary,
+          "--user-data-dir=#{chrome_cdp.profile_dir}",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--user-agent=#{INTERACTIVE_USER_AGENT}",
+          # `--accept-lang` populates BOTH the HTTP Accept-Language
+          # header and `navigator.languages`. Without it, Chromium
+          # ships an empty-ish default that flags as "fresh container,
+          # no real user" against banks that fingerprint locale.
+          "--accept-lang=#{lang}",
+          # Pretend to be a Retina (2× DPI) display — vanishingly few
+          # real banking customers are on 1× monitors in 2026. The
+          # real Xvfb display stays 1920×1080; this just changes what
+          # CSS / window.devicePixelRatio reports.
+          "--force-device-scale-factor=2",
+          # Mute the User-Agent Client Hints headers (sec-ch-ua,
+          # sec-ch-ua-platform, sec-ch-ua-mobile, …). The `--user-agent`
+          # flag above only spoofs the legacy UA string; UA-CH would
+          # otherwise still report `"Linux"` as the platform, which
+          # contradicts our claimed-macOS UA and reads as bot. Trade-
+          # off: no UA-CH at all is also unusual for Chrome 147, but
+          # it's a less-targeted signal than an explicit Linux leak —
+          # plenty of privacy-minded users disable UA-CH via uBO or
+          # similar. The proper fix is the puppeteer-stealth-style
+          # extension that spoofs the values; that's roadmap.
+          "--disable-features=UserAgentClientHint"
+        ]
+        if @context[:no_sandbox]
+          # --no-sandbox is mandatory for Chrome inside an unprivileged
+          # container; --disable-dev-shm-usage routes /tmp instead of
+          # the small /dev/shm. We deliberately omit --disable-gpu —
+          # even though it's container-safer, it shows up as "no GPU"
+          # in WebGL fingerprints.
+          args << "--no-sandbox"
+          args << "--disable-dev-shm-usage"
+          # Force ANGLE-on-SwiftShader for WebGL. Without an explicit
+          # flag, Chromium-in-Xvfb gives up on WebGL entirely (the
+          # bot.sannysoft.com canvas tests come back "no webgl context"
+          # — which itself is a strong bot signal, since virtually
+          # every real browser supports WebGL). With this, navigator
+          # reports a working "Google Inc." vendor + "ANGLE
+          # (Google, Vulkan/SwiftShader Device)" renderer, which is
+          # the same combo many real users in low-power / VM setups
+          # get. `--enable-unsafe-swiftshader` opts into the software
+          # path that newer Chromium otherwise hides behind a flag.
+          args << "--use-gl=angle"
+          args << "--use-angle=swiftshader"
+          args << "--enable-unsafe-swiftshader"
+        end
+        args << url if url
+
+        stdout.puts "Launching Chrome (interactive — no CDP, no automation hooks)..."
+        stdout.puts "  binary:  #{chrome_cdp.chrome_binary}"
+        stdout.puts "  profile: #{chrome_cdp.profile_dir}"
+        stdout.puts "  url:     #{url || '(none — opens to new tab)'}"
+        stdout.puts "  lang:    #{lang}"
+        stdout.puts "  tz:      #{tz}"
+
+        # `TZ` env makes JS `Intl.DateTimeFormat().resolvedOptions().timeZone`
+        # return the configured zone — without this it would say UTC,
+        # which doesn't match an IP-geolocated Spanish customer and is
+        # a classic anti-bot heuristic. Also affects Date()'s offset.
+        @interactive_chrome_pid = Process.spawn(
+          { "TZ" => tz },
+          *args,
+          out: "/dev/null",
+          err: "/dev/null"
+        )
+      end
+
+      # Sleep until cancelled, the parent's invoke timeout fires, or
+      # the operator closes Chrome from inside the VNC session. The
+      # SIGTERM trap is installed BEFORE we sleep so a cancel issued
+      # before Chrome fully boots still exits cleanly.
+      def run_interactive_browse
+        stop = false
+        prev_term = trap("TERM") { stop = true }
+        prev_int  = trap("INT")  { stop = true }
+
+        stdout.puts "Interactive mode: Chrome is open and idle."
+        stdout.puts "  - Take over via VNC."
+        stdout.puts "  - POST /cancel/<run_id> on the parent (or close the Chrome window) when done; Chrome closes cleanly and the profile state is preserved."
+        stdout.puts "  - Otherwise the parent's invoke timeout (default 30 min) will fire."
+
+        begin
+          until stop
+            break unless interactive_chrome_alive?
+            sleep 1
+          end
+          stdout.puts "Interactive mode: closing Chrome (#{stop ? 'cancel signal received' : 'Chrome window closed by user'})."
+        ensure
+          trap("TERM", prev_term) rescue nil
+          trap("INT",  prev_int)  rescue nil
+        end
+      end
+
+      def interactive_chrome_alive?
+        return false unless @interactive_chrome_pid
+        Process.kill(0, @interactive_chrome_pid)
+        true
+      rescue Errno::ESRCH, Errno::ECHILD
+        false
+      end
+
+      def cleanup_interactive_chrome
+        pid = @interactive_chrome_pid
+        return unless pid
+        begin
+          Process.kill("TERM", pid)
+        rescue Errno::ESRCH
+          return  # already gone
+        end
+        # Brief grace; SIGKILL if needed.
+        20.times do
+          begin
+            return if Process.waitpid(pid, Process::WNOHANG)
+          rescue Errno::ECHILD
+            return
+          end
+          sleep 0.1
+        end
+        Process.kill("KILL", pid) rescue nil
+        Process.waitpid(pid) rescue nil
+      end
+
+      # Pluck the navigate URL out of the workflow's `connect` phase so
+      # we can pass it as Chrome's startup URL. Skips entries whose URL
+      # has secret() interpolation — for those the operator can navigate
+      # manually after Chrome opens. Most provider workflows have a
+      # plain literal URL here (the bank's login page).
+      def initial_url_from_workflow
+        return nil unless source.workflow?
+        steps = source.workflow.phase("connect")
+        steps.each do |step|
+          next unless step["action"] == "navigate"
+          url = step["url"]
+          return url if url.is_a?(String) && !url.empty? && !url.include?("secret(")
+        end
+        nil
       end
 
       def extract_credentials

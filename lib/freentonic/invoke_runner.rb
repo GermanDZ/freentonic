@@ -142,17 +142,19 @@ module Freentonic
       cleanup_chrome(chrome_profile_dir) if chrome_profile_dir
       cleanup_tmpfs(tmpfs_run_dir)       if tmpfs_run_dir
       # Always relock VNC after a run, regardless of exit path (timeout,
-      # crash, validation-late error). x11vnc re-reads its passwdfile on
-      # every new client connection, so the next noVNC attach sees this
-      # unreachable sentinel.
+      # crash, validation-late error). x11vnc re-reads its passwdfile
+      # on every new client connection, so the next noVNC attach sees
+      # this unreachable sentinel.
       write_vnc_password(self.class.random_unreachable_password)
     end
 
     private
 
-    # Overwrite the x11vnc passwdfile. The file is picked up on every new
-    # VNC client connection (x11vnc's `-passwdfile read:` semantics), so
-    # updating it here takes effect without any signal or restart.
+    # Overwrite the x11vnc passwdfile. The file is picked up on every
+    # new VNC client connection (x11vnc's `-passwdfile read:` re-reads
+    # the file per connection — the prefix name is misleading, see
+    # docker-entrypoint.sh). Updating it here takes effect without any
+    # signal or x11vnc restart.
     #
     # Failures are non-fatal: the most common is "path doesn't exist"
     # (running outside the container, or the entrypoint hasn't set up the
@@ -201,8 +203,13 @@ module Freentonic
       argv.push("--lookback", request.lookback.to_s) if request.lookback
       argv << "--isolated" if request.chrome["isolated"]
       argv << "--headless" if request.chrome["headless"]
+      argv << "--interactive" if request.interactive
 
-      if (export = request.export)
+      # Skip exporter argv plumbing in interactive (browse) mode — the
+      # engine short-circuits at Connect, so no exporter ever fires.
+      # Pushing --export with no scrape output would fail CLI
+      # validation downstream.
+      if (export = request.export) && !request.interactive
         argv.push("--export", export["mode"])
         case export["mode"]
         when "http"

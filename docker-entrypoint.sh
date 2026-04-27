@@ -8,8 +8,11 @@ set -euo pipefail
 # group- or world-readable on a bind-mounted host directory.
 umask 0077
 
-# x11vnc passwdfile. x11vnc re-reads this on every new client connection
-# (`-passwdfile read:`), so rotating the password is just a file write.
+# x11vnc passwdfile. The `read:` prefix in x11vnc-speak means "re-read
+# the file on every new client connection" (NOT "read once" — counter-
+# intuitive given the name). That's exactly what per-invoke password
+# rotation requires. Don't use `rdfile:` — it isn't a recognised prefix
+# and x11vnc tries to open a file literally named `rdfile:/...`.
 # Server mode: InvokeRunner rotates it per-invoke from the /invoke body.
 # cli mode: seeded at startup (env or random) and then static for the run.
 VNC_PASSWORD_FILE="${FREENTONIC_VNC_PASSWORD_FILE:-/dev/shm/freentonic/vnc-password}"

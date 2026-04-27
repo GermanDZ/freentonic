@@ -46,7 +46,7 @@ module Freentonic
 
     attr_reader :run_id, :profile_key, :timeout_sec, :lookback, :workflow_path,
                 :credentials_inline, :credentials_file, :export, :chrome,
-                :vnc_password
+                :vnc_password, :interactive
 
     # @param body [Hash] parsed JSON request
     # @param workflows_dir [String] absolute path to the workflows root
@@ -74,6 +74,7 @@ module Freentonic
       @lookback = parse_lookback
       @chrome = parse_chrome
       @vnc_password = parse_vnc_password
+      @interactive = parse_interactive
 
       @profile_key ||= derive_profile_key
       self
@@ -287,6 +288,21 @@ module Freentonic
       unless value.is_a?(String) && value =~ VNC_PASSWORD_PATTERN
         raise InvokeError.new(:bad_request,
           "vnc_password must be 1-64 printable ASCII chars (no spaces / control chars / newlines)")
+      end
+      value
+    end
+
+    # Browse-mode flag. When true, the engine runs only the workflow's
+    # `connect` phase and then idles until SIGTERM (cancel) or the
+    # parent's overall timeout fires. Lets the operator interact with
+    # the bank manually via VNC. No exporters fire in this mode (the
+    # engine skips Extract/Normalize/Export); any export block in the
+    # request is silently ignored.
+    def parse_interactive
+      value = @body["interactive"]
+      return false if value.nil?
+      unless [true, false].include?(value)
+        raise InvokeError.new(:bad_request, "interactive must be boolean")
       end
       value
     end
