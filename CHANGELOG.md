@@ -2,6 +2,31 @@
 
 All notable changes to freentonic are documented here.
 
+## Unreleased — Server-mode interactive prompts (2FA / SMS)
+
+Workflows that previously required a controlling TTY for 2FA — both
+`prompt_stdin_and_fill` (SMS / OTP entry) and `pause` (manual approval
+of a push notification) — now work in server mode. The same workflow
+YAML works in CLI and server with no changes.
+
+When stdin is not a TTY but the runner subprocess has
+`FREENTONIC_RUN_DIR` set (which the invoke server always populates),
+the runner writes a request file under `<run_dir>/prompts/` and
+blocks polling for a response. HTTP clients of the invoke server
+fulfill the prompt out-of-band via two new endpoints:
+
+- `GET  /runs/{run_id}/prompts` — list pending prompts for a run
+- `POST /runs/{run_id}/prompts/{prompt_id}` — submit the value
+  (`{"value":"123456"}` for SMS code entry, `{}` for pause approval)
+
+Single-use, per-prompt expiry, bearer-token auth, atomic file rename
+on response writes, and the existing `realpath` escape guard apply.
+The prompt value never appears in any log; the runner emits a
+`[freentonic][prompt] {…json…}` advisory marker on stderr (no value)
+so humans tailing `/runs/{run_id}/log` see why the run paused.
+
+See `docs/invoke-server-api.md` for full API reference.
+
 ## 0.6.0 — LegacyKeys removed; canonical-only payloads
 
 The receiver-side transition window has closed (verified against
