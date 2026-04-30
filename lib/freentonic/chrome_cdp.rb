@@ -405,7 +405,7 @@ module Freentonic
     # ─── CDP session wrapper ───
 
     class Session
-      attr_reader :pending_events
+      attr_reader :pending_events, :socket
 
       def initialize(socket)
         @socket = socket

@@ -82,7 +82,8 @@ module Freentonic
         exporters: [], # array of { name:, options: {} }
         purge: false,
         force: false,
-        interactive: false
+        interactive: false,
+        recording: false
       }
 
       parser = OptionParser.new do |opts|
@@ -127,6 +128,7 @@ module Freentonic
         opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }
 
         opts.on("--interactive", "Browse mode: run only the workflow's `connect` phase (URL navigation), then idle until SIGTERM. Lets the operator interact with the bank manually via VNC to warm a fresh fingerprint or solve 2FA.") { options[:interactive] = true }
+        opts.on("--recording", "Recording mode: launch CDP Chrome at the workflow's initial URL, idle until SIGTERM, and capture click/change/submit/navigate events to <run_dir>/recording.jsonl. Used to bootstrap or repair a workflow YAML by walking the bank's UI by hand. Mutually exclusive with --interactive.") { options[:recording] = true }
 
         opts.on("-h", "--help") { puts opts; exit 0 }
         opts.on("--version") { puts "freentonic #{Freentonic::VERSION}"; exit 0 }
@@ -188,6 +190,20 @@ module Freentonic
         end
       end
 
+      if options[:recording]
+        if options[:interactive]
+          raise UserError, "--recording cannot be combined with --interactive (pick one)"
+        end
+        conflicting = %i[only_stage through_stage from_raw from_normalized dump_raw dump_normalized].find { |f| options[f] }
+        if conflicting
+          raise UserError,
+            "--recording cannot be combined with --#{conflicting.to_s.tr('_', '-')}"
+        end
+        unless options[:exporters].empty?
+          raise UserError, "--recording cannot be combined with --export"
+        end
+      end
+
       # Stage-isolation flags that legitimately stop the pipeline before
       # the Export stage runs — no exporter is needed for these because
       # there's nothing to export. Both --only-stage and --through count.
@@ -195,7 +211,8 @@ module Freentonic
       pre_export_stage = ->(s) { s == :connect || s == :extract }
       stops_before_export = pre_export_stage.call(options[:only_stage]) ||
                             pre_export_stage.call(options[:through_stage]) ||
-                            options[:interactive]
+                            options[:interactive] ||
+                            options[:recording]
 
       if options[:exporters].empty? && !stops_before_export &&
          options[:dump_raw].nil? && options[:dump_normalized].nil?
@@ -234,7 +251,8 @@ module Freentonic
         dump_normalized: options[:dump_normalized],
         from_normalized: options[:from_normalized],
         exporters: exporters,
-        interactive: options[:interactive]
+        interactive: options[:interactive],
+        recording: options[:recording]
       }
 
       Engine.new(context: context).run

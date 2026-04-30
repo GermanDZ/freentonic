@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "date"
+require "tmpdir"
 
 module Freentonic
   module Stages
@@ -23,6 +24,19 @@ module Freentonic
           # automation hooks at all. See #launch_interactive_chrome.
           launch_interactive_chrome
           run_interactive_browse
+        elsif @context[:recording]
+          # Recording mode: launch CDP Chrome (the recorder needs CDP
+          # to inject the probe and read its console.info events), mask
+          # navigator.webdriver, install the probe, navigate to the
+          # workflow's initial URL, then idle until SIGTERM while
+          # draining events into <run_dir>/recording.jsonl.
+          launch_chrome
+          @chrome_started = true
+          open_login_session
+          mask_webdriver
+          install_recorder
+          navigate_to_initial_url
+          run_recording_idle
         else
           launch_chrome
           @chrome_started = true
@@ -36,6 +50,7 @@ module Freentonic
       rescue RuntimeError => e
         raise UserError, "Browser workflow failed: #{e.message}"
       ensure
+        @recorder&.close rescue nil
         @session&.close rescue nil
         close_chrome if @chrome_started
         if @context[:interactive]
@@ -324,6 +339,54 @@ module Freentonic
           return url if url.is_a?(String) && !url.empty? && !url.include?("secret(")
         end
         nil
+      end
+
+      # Install the recording probe. Writes events to
+      # <run_dir>/recording.jsonl when FREENTONIC_RUN_DIR is set
+      # (always true under the invoke server). Falls back to a path
+      # under the system temp dir for direct CLI use, so a developer
+      # running `freentonic --recording` from the shell still gets a
+      # capture.
+      def install_recorder
+        run_dir = ENV["FREENTONIC_RUN_DIR"]
+        recording_path =
+          if run_dir && !run_dir.empty?
+            File.join(run_dir, "recording.jsonl")
+          else
+            File.join(Dir.tmpdir, "freentonic-recording-#{Process.pid}.jsonl")
+          end
+        @recorder = Freentonic::Recorder.new(path: recording_path, stdout: stdout)
+        @recorder.install(@session)
+      end
+
+      def navigate_to_initial_url
+        url = initial_url_from_workflow
+        return unless url
+        stdout.puts "Recording: navigating to #{url}"
+        @session.send_command("Page.navigate", { url: url })
+      end
+
+      # Recording idle loop. Same shape as run_interactive_browse
+      # except instead of sleep(1) we drain the CDP socket every tick
+      # so probe events flow into recording.jsonl with low latency.
+      def run_recording_idle
+        stop = false
+        prev_term = trap("TERM") { stop = true }
+        prev_int  = trap("INT")  { stop = true }
+
+        stdout.puts "Recording mode: probe is live."
+        stdout.puts "  - Drive Chrome by hand via VNC; clicks/fills/navigations are captured."
+        stdout.puts "  - End the session by sending SIGTERM (POST /cancel/<run_id> when run under the invoke server)."
+
+        begin
+          until stop
+            @recorder.drain(@session, timeout: 0.5)
+          end
+          stdout.puts "Recording mode: cancel signal received, closing."
+        ensure
+          trap("TERM", prev_term) rescue nil
+          trap("INT",  prev_int)  rescue nil
+        end
       end
 
       def extract_credentials
