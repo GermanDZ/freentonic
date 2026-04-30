@@ -501,4 +501,123 @@ class InvokeServerTest < Minitest::Test
     res = get("/profiles/prune", auth)
     assert_equal "405", res.code
   end
+
+  # ── /runs/:run_id/prompts ─────────────────────────────────
+
+  def write_prompt_request(run_id, prompt_id, payload)
+    dir = File.join(@runs_dir, run_id, "prompts")
+    FileUtils.mkdir_p(dir)
+    File.write(File.join(dir, "#{prompt_id}.request.json"), JSON.generate(payload))
+  end
+
+  def write_prompt_response(run_id, prompt_id, payload)
+    dir = File.join(@runs_dir, run_id, "prompts")
+    FileUtils.mkdir_p(dir)
+    File.write(File.join(dir, "#{prompt_id}.response.json"), JSON.generate(payload))
+  end
+
+  def sample_request(prompt_id, kind: "input", message: "Code?", expires_at: (Time.now + 300).utc.iso8601)
+    {
+      "prompt_id" => prompt_id,
+      "kind" => kind,
+      "message" => message,
+      "mask" => false,
+      "created_at" => Time.now.utc.iso8601,
+      "expires_at" => expires_at
+    }
+  end
+
+  def test_list_prompts_requires_auth
+    res = get("/runs/run-1/prompts")
+    assert_equal "401", res.code
+  end
+
+  def test_list_prompts_404_for_invalid_run_id
+    too_long = "a" * 65 # RUN_ID_PATTERN caps at 64 chars
+    res = get("/runs/#{too_long}/prompts", auth)
+    assert_equal "404", res.code
+  end
+
+  def test_list_prompts_returns_empty_when_dir_missing
+    res = get("/runs/no-prompts/prompts", auth)
+    assert_equal "200", res.code
+    body = JSON.parse(res.body)
+    assert_equal "no-prompts", body["run_id"]
+    assert_equal [], body["prompts"]
+  end
+
+  def test_list_prompts_returns_pending_only
+    write_prompt_request("run-1", "p_aaaa1111", sample_request("p_aaaa1111", message: "First"))
+    write_prompt_request("run-1", "p_bbbb2222", sample_request("p_bbbb2222", message: "Second"))
+    write_prompt_response("run-1", "p_bbbb2222", { "value" => "answered" })
+
+    res = get("/runs/run-1/prompts", auth)
+    assert_equal "200", res.code
+    body = JSON.parse(res.body)
+    assert_equal 1, body["prompts"].size
+    assert_equal "p_aaaa1111", body["prompts"].first["prompt_id"]
+    assert_equal "First", body["prompts"].first["message"]
+  end
+
+  def test_submit_prompt_writes_response
+    write_prompt_request("run-1", "p_cccc3333", sample_request("p_cccc3333"))
+
+    res = post("/runs/run-1/prompts/p_cccc3333", { "value" => "111111" }, auth)
+    assert_equal "200", res.code
+    response_path = File.join(@runs_dir, "run-1", "prompts", "p_cccc3333.response.json")
+    assert File.file?(response_path)
+    written = JSON.parse(File.read(response_path))
+    assert_equal "111111", written["value"]
+    assert_equal "p_cccc3333", written["prompt_id"]
+  end
+
+  def test_submit_prompt_404_when_unknown
+    res = post("/runs/run-1/prompts/p_nope0000", { "value" => "x" }, auth)
+    assert_equal "404", res.code
+  end
+
+  def test_submit_prompt_409_on_double_submit
+    write_prompt_request("run-1", "p_dddd4444", sample_request("p_dddd4444"))
+    first = post("/runs/run-1/prompts/p_dddd4444", { "value" => "x" }, auth)
+    assert_equal "200", first.code
+
+    second = post("/runs/run-1/prompts/p_dddd4444", { "value" => "y" }, auth)
+    assert_equal "409", second.code
+  end
+
+  def test_submit_prompt_410_when_expired
+    write_prompt_request("run-1", "p_eeee5555", sample_request("p_eeee5555", expires_at: (Time.now - 60).utc.iso8601))
+    res = post("/runs/run-1/prompts/p_eeee5555", { "value" => "x" }, auth)
+    assert_equal "410", res.code
+  end
+
+  def test_submit_prompt_400_when_value_missing
+    write_prompt_request("run-1", "p_ffff6666", sample_request("p_ffff6666"))
+    res = post("/runs/run-1/prompts/p_ffff6666", {}, auth)
+    assert_equal "400", res.code
+  end
+
+  def test_submit_prompt_confirm_kind_accepts_empty_body
+    write_prompt_request("run-1", "p_aabb7777", sample_request("p_aabb7777", kind: "confirm"))
+    res = post("/runs/run-1/prompts/p_aabb7777", {}, auth)
+    assert_equal "200", res.code
+    written = JSON.parse(File.read(File.join(@runs_dir, "run-1", "prompts", "p_aabb7777.response.json")))
+    assert_equal true, written["confirmed"]
+  end
+
+  def test_prompts_endpoints_reject_invalid_prompt_id
+    res = post("/runs/run-1/prompts/not-a-prompt-id", { "value" => "x" }, auth)
+    assert_equal "404", res.code
+  end
+
+  def test_list_prompts_405_on_post
+    res = post("/runs/run-1/prompts", {}, auth)
+    assert_equal "405", res.code
+  end
+
+  def test_submit_prompt_405_on_get
+    write_prompt_request("run-1", "p_aacc8888", sample_request("p_aacc8888"))
+    res = get("/runs/run-1/prompts/p_aacc8888", auth)
+    assert_equal "405", res.code
+  end
 end
