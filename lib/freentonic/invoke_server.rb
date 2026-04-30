@@ -210,6 +210,15 @@ module Freentonic
         return
       end
 
+      if (match = path.match(%r{\A/runs/([^/]+)/recording\z}))
+        if request.method == "GET"
+          handle_recording(client, request, match[1])
+        else
+          write_response(client, 405, { "error" => "method not allowed" })
+        end
+        return
+      end
+
       status, body = dispatch(request)
       write_response(client, status, body)
     rescue StandardError => e
@@ -497,6 +506,53 @@ module Freentonic
       end
     rescue Errno::EPIPE, Errno::ECONNRESET
       # Client went away mid-stream. Not our problem.
+    end
+
+    # GET /runs/{run_id}/recording
+    #
+    # Serves <run_dir>/recording.jsonl as text/plain. No Range support
+    # — recordings are short (a single browse session, on the order of
+    # tens of KB) and the simplefreen UI parses the whole thing in one
+    # shot. 404 if no recording exists for this run_id (i.e. the run
+    # was not started in recording mode, or never produced any
+    # events).
+    def handle_recording(client, req, run_id)
+      unless authenticated?(req)
+        return write_response(client, 401, { "error" => "missing or invalid bearer token" })
+      end
+      unless run_id =~ RUN_ID_PATTERN
+        return write_response(client, 404, { "error" => "run_id not found" })
+      end
+
+      file_path = File.join(@runner.runs_dir, run_id, "recording.jsonl")
+      unless File.file?(file_path)
+        return write_response(client, 404, { "error" => "recording not found for run_id=#{run_id}" })
+      end
+
+      # Same realpath escape guard as handle_log — defends against any
+      # symlink shenanigans inside the runs dir.
+      begin
+        runs_real = File.realpath(@runner.runs_dir)
+        file_real = File.realpath(file_path)
+      rescue Errno::ENOENT
+        return write_response(client, 404, { "error" => "recording not found" })
+      end
+      unless file_real.start_with?(runs_real + File::SEPARATOR)
+        return write_response(client, 404, { "error" => "recording path escapes runs dir" })
+      end
+
+      body = File.binread(file_path)
+      headers = [
+        "HTTP/1.1 200 OK",
+        "Content-Type: application/x-ndjson; charset=utf-8",
+        "Content-Length: #{body.bytesize}",
+        "Cache-Control: no-store",
+        "Connection: close"
+      ]
+      client.write(headers.join("\r\n") + "\r\n\r\n")
+      client.write(body) unless body.empty?
+    rescue Errno::EPIPE, Errno::ECONNRESET
+      # Client went away. Not our problem.
     end
 
     # Returns:

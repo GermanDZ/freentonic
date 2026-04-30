@@ -204,12 +204,13 @@ module Freentonic
       argv << "--isolated" if request.chrome["isolated"]
       argv << "--headless" if request.chrome["headless"]
       argv << "--interactive" if request.interactive
+      argv << "--recording"   if request.recording
 
-      # Skip exporter argv plumbing in interactive (browse) mode — the
-      # engine short-circuits at Connect, so no exporter ever fires.
-      # Pushing --export with no scrape output would fail CLI
-      # validation downstream.
-      if (export = request.export) && !request.interactive
+      # Skip exporter argv plumbing in interactive (browse) and
+      # recording modes — both short-circuit the engine at Connect, so
+      # no exporter ever fires. Pushing --export with no scrape output
+      # would fail CLI validation downstream.
+      if (export = request.export) && !request.interactive && !request.recording
         argv.push("--export", export["mode"])
         case export["mode"]
         when "http"
