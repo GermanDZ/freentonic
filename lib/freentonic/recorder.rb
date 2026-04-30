@@ -8,17 +8,32 @@ module Freentonic
   #
   # Owns one CDP session shared with Connect, installs a JS probe via
   # Page.addScriptToEvaluateOnNewDocument, and drains
-  # Runtime.consoleAPICalled + Page.frameNavigated events into
+  # Runtime.bindingCalled + Page.frameNavigated events into
   # <run_dir>/recording.jsonl. Single-threaded by design — Connect's
   # idle loop calls #drain in a tight loop instead of us spinning a
   # parallel reader on the same WebSocket.
+  #
+  # Exfiltration uses Runtime.addBinding (the puppeteer-stealth
+  # channel) instead of console.info: page scripts that hook the
+  # console object can't see binding calls, and the probe deletes the
+  # binding off `window` immediately after capturing the reference so
+  # it doesn't show up in `Object.keys(window)` either.
   #
   # File format is JSON-lines: one event per line. Each line is either
   # a probe event (kind: click | fill | submit | probe_ready) or a
   # synthetic recorder event (kind: navigate | recorder_*).
   class Recorder
     PROBE_PATH = File.expand_path("recorder/probe.js", __dir__)
-    PROBE_PREFIX = "__freentonic_rec__:"
+
+    # Name of the CDP binding the probe calls to ship events. Has to
+    # be unique enough that a page script can't accidentally call it
+    # before the probe captures the reference (Chrome exposes the
+    # binding to every world, so a clever page could in principle race
+    # to call window.__freentonic_rec_send__ — but the binding payload
+    # would just be appended to the recording, not affect normal
+    # operation, so the impact is "noise in the recording", not a
+    # security issue).
+    BINDING_NAME = "__freentonic_rec_send__"
 
     # `path` is the absolute path to the recording.jsonl file
     # (typically <run_dir>/recording.jsonl). Created O_APPEND with mode
@@ -32,15 +47,19 @@ module Freentonic
       @probe_source = File.read(PROBE_PATH)
     end
 
-    # Open the JSONL sink, enable the CDP domains we need, and install
-    # the probe so it runs on every new document the operator visits.
-    # Idempotent — calling install twice is a no-op past the first.
+    # Open the JSONL sink, enable the CDP domains we need, register
+    # the exfiltration binding, and install the probe so it runs on
+    # every new document. Order matters: the binding has to exist
+    # before the script runs in the first document, otherwise the
+    # probe's `typeof send !== "function"` check trips and the run
+    # records nothing.
     def install(session)
       return if @installed
       FileUtils.mkdir_p(File.dirname(@path))
       @file = File.open(@path, File::WRONLY | File::CREAT | File::APPEND, 0o600)
       session.send_command("Runtime.enable")
       session.send_command("Page.enable")
+      session.send_command("Runtime.addBinding", { name: BINDING_NAME })
       session.send_command("Page.addScriptToEvaluateOnNewDocument", { source: @probe_source })
       append({ "kind" => "recorder_started", "t" => (Time.now.to_f * 1000).to_i })
       @stdout.puts "Recorder: probe injected, writing to #{@path}"
@@ -102,8 +121,8 @@ module Freentonic
       method = parsed["method"]
       return unless method
       case method
-      when "Runtime.consoleAPICalled"
-        handle_console(parsed["params"] || {})
+      when "Runtime.bindingCalled"
+        handle_binding(parsed["params"] || {})
       when "Page.frameNavigated"
         frame = parsed.dig("params", "frame") || {}
         # Only record top-level navigations (parentId nil/empty); sub-
@@ -119,13 +138,11 @@ module Freentonic
       end
     end
 
-    def handle_console(params)
-      args = params["args"] || []
-      first = args.first || {}
-      return unless first["type"] == "string"
-      raw = first["value"].to_s
-      return unless raw.start_with?(PROBE_PREFIX)
-      payload = JSON.parse(raw[PROBE_PREFIX.length..])
+    def handle_binding(params)
+      return unless params["name"] == BINDING_NAME
+      raw = params["payload"]
+      return unless raw.is_a?(String)
+      payload = JSON.parse(raw)
       append(payload)
     rescue JSON::ParserError
       # malformed probe event — silently drop; operator can re-record

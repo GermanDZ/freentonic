@@ -26,14 +26,17 @@ module Freentonic
           run_interactive_browse
         elsif @context[:recording]
           # Recording mode: launch CDP Chrome (the recorder needs CDP
-          # to inject the probe and read its console.info events), mask
-          # navigator.webdriver, install the probe, navigate to the
-          # workflow's initial URL, then idle until SIGTERM while
-          # draining events into <run_dir>/recording.jsonl.
+          # to inject the probe and read its events via Runtime.addBinding),
+          # mask navigator.webdriver, apply the same anti-fingerprint
+          # overrides browse mode gets at launch time, install the
+          # probe, navigate to the workflow's initial URL, then idle
+          # until SIGTERM while draining events into
+          # <run_dir>/recording.jsonl.
           launch_chrome
           @chrome_started = true
           open_login_session
           mask_webdriver
+          apply_recording_stealth
           install_recorder
           navigate_to_initial_url
           run_recording_idle
@@ -110,6 +113,65 @@ module Freentonic
         @session.send_command("Page.addScriptToEvaluateOnNewDocument", {
           source: "Object.defineProperty(navigator, 'webdriver', { get: () => false })"
         })
+      end
+
+      # Recording mode stealth overrides. The CDP launch path (used by
+      # recording so the probe can be injected) doesn't ship with the
+      # browse-mode launch flags (--user-agent, --accept-lang,
+      # --force-device-scale-factor=2, --disable-features=UserAgentClientHint,
+      # TZ env). Applying them at runtime via CDP covers everything banks
+      # fingerprint at the JS / HTTP-header layer:
+      #
+      #   - Network.setUserAgentOverride spoofs the UA string AND the
+      #     UA-CH headers (sec-ch-ua, sec-ch-ua-platform, …) via
+      #     userAgentMetadata.platform = "macOS". Without this the UA
+      #     string would say macOS but UA-CH would say Linux — a
+      #     classic mismatch flag.
+      #   - Emulation.setLocaleOverride sets navigator.language /
+      #     navigator.languages so they match the IP's expected locale.
+      #   - Emulation.setTimezoneOverride makes Intl/Date report
+      #     Europe/Madrid instead of UTC.
+      #   - Emulation.setDeviceMetricsOverride bumps devicePixelRatio
+      #     to 2 (Retina) — vanishingly few real banking customers are
+      #     on 1× monitors in 2026.
+      #
+      # NOT covered (would require modifying chrome_cdp.launch_chrome):
+      # WebGL vendor/renderer (banks fingerprint these via the canvas
+      # test). Fix is to plumb --use-gl=angle / --use-angle=swiftshader
+      # through chrome_cdp.
+      def apply_recording_stealth
+        lang   = ENV.fetch("FREENTONIC_INTERACTIVE_LANG", INTERACTIVE_DEFAULT_LANG)
+        tz     = ENV.fetch("FREENTONIC_INTERACTIVE_TZ",   INTERACTIVE_DEFAULT_TZ)
+        locale = lang.split(",").first.to_s.split(";").first.to_s.strip
+        locale = "es-ES" if locale.empty?
+
+        @session.send_command("Network.setUserAgentOverride", {
+          userAgent:      INTERACTIVE_USER_AGENT,
+          acceptLanguage: lang,
+          userAgentMetadata: {
+            brands: [
+              { brand: "Not_A Brand",   version: "8" },
+              { brand: "Chromium",      version: "147" },
+              { brand: "Google Chrome", version: "147" }
+            ],
+            fullVersion:     "147.0.0.0",
+            platform:        "macOS",
+            platformVersion: "10.15.7",
+            architecture:    "x86",
+            bitness:         "64",
+            model:           "",
+            mobile:          false
+          }
+        })
+        @session.send_command("Emulation.setLocaleOverride",   { locale: locale })
+        @session.send_command("Emulation.setTimezoneOverride", { timezoneId: tz })
+        @session.send_command("Emulation.setDeviceMetricsOverride", {
+          width:             1920,
+          height:            1080,
+          deviceScaleFactor: 2,
+          mobile:            false
+        })
+        stdout.puts "Recording: stealth overrides applied (UA/UA-CH=macOS, lang=#{locale}, tz=#{tz}, dpr=2)."
       end
 
       # In headless mode, also mask the "HeadlessChrome" User-Agent string
