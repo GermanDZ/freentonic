@@ -35,7 +35,7 @@ module Freentonic
         }
       JS
 
-      def initialize(source:, session:, schema:, context:, secret_resolver:, session_drainer:, stdout:, stderr:, stdin: $stdin, runtime_context: {})
+      def initialize(source:, session:, schema:, context:, secret_resolver:, session_drainer:, stdout:, stderr:, stdin: $stdin, runtime_context: {}, remote_prompt_store: :default)
         @source = source
         @session = session
         @schema = schema
@@ -47,6 +47,7 @@ module Freentonic
         @stdin = stdin
         @runtime_context = runtime_context
         @error_signals = schema.error_signals
+        @remote_prompt_store = remote_prompt_store
       end
 
       def execute_phase(name)
@@ -457,24 +458,13 @@ module Freentonic
           end
         end
 
-        unless @stdin.respond_to?(:tty?) && @stdin.tty?
+        if stdin_is_tty?
+          value = read_from_stdin(prompt, mask: mask, timeout_seconds: timeout_seconds, selector: selector)
+        elsif (store = remote_prompt_store)
+          value = read_from_remote(store, message: prompt, mask: mask, timeout_seconds: timeout_seconds, selector: selector)
+        else
           raise UserError, "prompt_stdin_and_fill: refusing to read from non-tty stdin"
         end
-
-        value =
-          begin
-            Timeout.timeout(timeout_seconds) do
-              if mask
-                IO.console.getpass(prompt)
-              else
-                @stderr.print(prompt)
-                @stderr.flush if @stderr.respond_to?(:flush)
-                @stdin.gets&.chomp
-              end
-            end
-          rescue Timeout::Error
-            raise UserError, "prompt_stdin_and_fill: timed out waiting for user input on #{selector}"
-          end
 
         if value.nil? || value.empty?
           raise UserError, "prompt_stdin_and_fill: empty input for #{selector}"
@@ -483,6 +473,59 @@ module Freentonic
         fill_selector(selector, value, optional: false, resolve: false)
         click_selector(submit_selector, optional: false) if submit_selector
         @stdout.puts "    [yml] prompt_stdin_and_fill: filled #{selector}"
+      end
+
+      def stdin_is_tty?
+        @stdin.respond_to?(:tty?) && @stdin.tty?
+      end
+
+      def read_from_stdin(prompt, mask:, timeout_seconds:, selector:)
+        Timeout.timeout(timeout_seconds) do
+          if mask
+            IO.console.getpass(prompt)
+          else
+            @stderr.print(prompt)
+            @stderr.flush if @stderr.respond_to?(:flush)
+            @stdin.gets&.chomp
+          end
+        end
+      rescue Timeout::Error
+        raise UserError, "prompt_stdin_and_fill: timed out waiting for user input on #{selector}"
+      end
+
+      def read_from_remote(store, message:, mask:, timeout_seconds:, selector:)
+        store.prompt(kind: :input, message: message, mask: mask, timeout_seconds: timeout_seconds) do |prompt_id, request|
+          announce_remote_prompt(prompt_id, request)
+        end
+      rescue RemotePromptStore::Timeout
+        raise UserError, "prompt_stdin_and_fill: timed out waiting for user input on #{selector}"
+      end
+
+      def announce_remote_prompt(prompt_id, request)
+        announcement = {
+          "prompt_id"  => prompt_id,
+          "kind"       => request["kind"],
+          "message"    => request["message"],
+          "mask"       => request["mask"],
+          "expires_at" => request["expires_at"]
+        }
+        @stderr.puts "[freentonic][prompt] #{JSON.generate(announcement)}"
+        @stderr.flush if @stderr.respond_to?(:flush)
+      end
+
+      # Resolve the prompt store lazily on first use:
+      #   - :default (the constructor sentinel) → build one from
+      #     ENV["FREENTONIC_RUN_DIR"] if set, else nil.
+      #   - any other value (including nil) → use as-is. Tests can pass nil
+      #     to force the legacy "non-tty → UserError" branch even when the
+      #     env var happens to be set in the runner's environment.
+      def remote_prompt_store
+        return @remote_prompt_store unless @remote_prompt_store == :default
+        run_dir = ENV["FREENTONIC_RUN_DIR"]
+        @remote_prompt_store =
+          if run_dir && !run_dir.empty?
+            RemotePromptStore.new(prompts_dir: File.join(run_dir, "prompts"))
+          end
       end
 
       def wait_for_selector(selector, timeout:)
@@ -1070,19 +1113,27 @@ module Freentonic
         message = step.fetch("message")
         timeout_seconds = Integer(step.fetch("timeout"))
 
-        unless @stdin.respond_to?(:tty?) && @stdin.tty?
-          raise UserError, "pause: refusing to block on non-tty stdin"
-        end
-
-        @stderr.print(message)
-        @stderr.print(" [press Enter to continue] ")
-        @stderr.flush if @stderr.respond_to?(:flush)
-
         started = Time.now
-        begin
-          Timeout.timeout(timeout_seconds) { @stdin.gets }
-        rescue Timeout::Error
-          raise UserError, "pause: timed out after #{timeout_seconds}s"
+        if stdin_is_tty?
+          @stderr.print(message)
+          @stderr.print(" [press Enter to continue] ")
+          @stderr.flush if @stderr.respond_to?(:flush)
+
+          begin
+            Timeout.timeout(timeout_seconds) { @stdin.gets }
+          rescue Timeout::Error
+            raise UserError, "pause: timed out after #{timeout_seconds}s"
+          end
+        elsif (store = remote_prompt_store)
+          begin
+            store.prompt(kind: :confirm, message: message, mask: false, timeout_seconds: timeout_seconds) do |prompt_id, request|
+              announce_remote_prompt(prompt_id, request)
+            end
+          rescue RemotePromptStore::Timeout
+            raise UserError, "pause: timed out after #{timeout_seconds}s"
+          end
+        else
+          raise UserError, "pause: refusing to block on non-tty stdin"
         end
 
         elapsed = (Time.now - started).round(1)

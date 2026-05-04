@@ -27,7 +27,12 @@ automatically.
 
 - Prints `message` to stderr followed by `[press Enter to continue]`.
 - Blocks on `stdin.gets` with the given timeout.
-- Requires an interactive TTY — raises `UserError` if stdin is not a TTY.
+- In **server mode** (no TTY but `FREENTONIC_RUN_DIR` is set): falls
+  back to the [remote prompt protocol](invoke-server-api.md#get-runsrun_idprompts-and-post-runsrun_idpromptsprompt_id)
+  with `kind: confirm`. An HTTP client confirms the pause by
+  `POST /runs/{run_id}/prompts/{prompt_id}` with an empty body.
+- Raises `UserError` if neither a TTY nor `FREENTONIC_RUN_DIR` is
+  available.
 - The user's input is discarded (they just press Enter).
 - Logs `[yml] pause: resumed after Ns` to stdout. Does **not** log the
   message content.

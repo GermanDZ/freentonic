@@ -296,7 +296,7 @@ module Freentonic
         }.merge(extras)
       end
 
-      def build_runner(session:, schema:, stdin:, stdout: StringIO.new, stderr: StringIO.new)
+      def build_runner(session:, schema:, stdin:, stdout: StringIO.new, stderr: StringIO.new, remote_prompt_store: nil)
         BrowserWorkflowRunner.new(
           source: SourceDouble.new,
           session: session,
@@ -306,7 +306,8 @@ module Freentonic
           session_drainer: ->(_session, iterations:, sleep_seconds:) {},
           stdout: stdout,
           stderr: stderr,
-          stdin: stdin
+          stdin: stdin,
+          remote_prompt_store: remote_prompt_store
         )
       end
 
@@ -717,6 +718,87 @@ module Freentonic
         assert(runtime_exprs.any? { |e| e.include?("button.go") }, "expected a Runtime.evaluate against submit selector")
       end
 
+      class FakeRemotePromptStore
+        attr_reader :calls, :announce_payloads
+
+        def initialize(value: nil, raise_timeout: false)
+          @value = value
+          @raise_timeout = raise_timeout
+          @calls = []
+          @announce_payloads = []
+        end
+
+        def prompt(kind:, message:, mask: false, timeout_seconds:)
+          @calls << { kind: kind, message: message, mask: mask, timeout_seconds: timeout_seconds }
+          if block_given?
+            request = {
+              "prompt_id"  => "p_fakeid01",
+              "kind"       => kind.to_s,
+              "message"    => message,
+              "mask"       => mask,
+              "expires_at" => "2030-01-01T00:00:00Z"
+            }
+            yield "p_fakeid01", request
+          end
+          raise RemotePromptStore::Timeout, "fake" if @raise_timeout
+          case kind
+          when :input then @value || ""
+          when :confirm then true
+          end
+        end
+      end
+
+      def test_prompt_stdin_and_fill_falls_back_to_remote_when_non_tty
+        session = FakeSession.new
+        schema = PromptSchemaDouble.new([prompt_step])
+        stdin = StringIO.new("") # tty? -> false
+        store = FakeRemotePromptStore.new(value: "987654")
+        stderr = StringIO.new
+
+        build_runner(session: session, schema: schema, stdin: stdin, stderr: stderr, remote_prompt_store: store).execute_phase("login")
+
+        assert_equal 1, store.calls.size
+        call = store.calls.first
+        assert_equal :input, call[:kind]
+        assert_equal "Enter code: ", call[:message]
+        assert_equal 5, call[:timeout_seconds]
+
+        typed = session.commands.select { |c| c[:method] == "Input.dispatchKeyEvent" && c[:params][:type] == "char" }.map { |c| c[:params][:text] }
+        assert_equal %w[9 8 7 6 5 4], typed
+
+        # Log marker is on stderr, structured, no value
+        assert_includes stderr.string, "[freentonic][prompt]"
+        assert_includes stderr.string, "p_fakeid01"
+        refute_includes stderr.string, "987654"
+      end
+
+      def test_prompt_stdin_and_fill_remote_timeout_raises_user_error
+        session = FakeSession.new
+        schema = PromptSchemaDouble.new([prompt_step])
+        stdin = StringIO.new("")
+        store = FakeRemotePromptStore.new(raise_timeout: true)
+
+        err = assert_raises(UserError) do
+          build_runner(session: session, schema: schema, stdin: stdin, remote_prompt_store: store).execute_phase("login")
+        end
+        assert_includes err.message, "timed out"
+        assert_includes err.message, "input[name='otp']"
+      end
+
+      def test_prompt_stdin_and_fill_remote_does_not_log_value
+        session = FakeSession.new
+        schema = PromptSchemaDouble.new([prompt_step])
+        stdin = StringIO.new("")
+        store = FakeRemotePromptStore.new(value: "TOPSECRET")
+        stdout = StringIO.new
+        stderr = StringIO.new
+
+        build_runner(session: session, schema: schema, stdin: stdin, stdout: stdout, stderr: stderr, remote_prompt_store: store).execute_phase("login")
+
+        refute_includes stdout.string, "TOPSECRET"
+        refute_includes stderr.string, "TOPSECRET"
+      end
+
       def test_prompt_stdin_and_fill_skipped_when_if_present_and_absent
         session = FakeSession.new
         session.define_singleton_method(:send_command) do |method, params = {}, timeout: 30|
@@ -1040,6 +1122,42 @@ module Freentonic
           build_runner(session: session, schema: schema, stdin: stdin).execute_phase("login")
         end
         assert_includes err.message, "non-tty"
+      end
+
+      def test_pause_falls_back_to_remote_when_non_tty
+        session = FakeSession.new
+        schema = PromptSchemaDouble.new([{
+          "action" => "pause",
+          "message" => "Approve on your phone.",
+          "timeout" => 5
+        }])
+        stdin = StringIO.new("") # tty? -> false
+        store = FakeRemotePromptStore.new
+        stdout = StringIO.new
+        stderr = StringIO.new
+
+        build_runner(session: session, schema: schema, stdin: stdin, stdout: stdout, stderr: stderr, remote_prompt_store: store).execute_phase("login")
+
+        assert_equal 1, store.calls.size
+        assert_equal :confirm, store.calls.first[:kind]
+        assert_includes stdout.string, "pause: resumed after"
+        assert_includes stderr.string, "[freentonic][prompt]"
+      end
+
+      def test_pause_remote_timeout_raises_user_error
+        session = FakeSession.new
+        schema = PromptSchemaDouble.new([{
+          "action" => "pause",
+          "message" => "Approve.",
+          "timeout" => 1
+        }])
+        stdin = StringIO.new("")
+        store = FakeRemotePromptStore.new(raise_timeout: true)
+
+        err = assert_raises(UserError) do
+          build_runner(session: session, schema: schema, stdin: stdin, remote_prompt_store: store).execute_phase("login")
+        end
+        assert_includes err.message, "timed out"
       end
 
       def test_pause_does_not_log_message
