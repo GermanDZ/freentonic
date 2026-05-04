@@ -189,12 +189,17 @@ module Freentonic
         "--no-default-browser-check",
         "--disable-features=IsolateOrigins,site-per-process",
         "--disable-infobars",
-        "--lang=es-ES"
+        "--lang=es-ES",
+        # Match the Xvfb display (1920x1080 in docker-entrypoint.sh) so the
+        # Chrome window fills the X display end-to-end. Without this,
+        # Chromium picks a smaller default and the noVNC viewer shows
+        # Chrome anchored in a corner with empty desktop margin around it.
+        # Headed (recording) and headless both want the same dimensions —
+        # headless only needs an explicit size at all because there's no
+        # display to inherit from, but matching Xvfb is correct in both.
+        "--window-size=1920,1080"
       ]
-      if @headless
-        args << "--headless=new"
-        args << "--window-size=1920,1080"
-      end
+      args << "--headless=new" if @headless
       # Prevent Chrome from exposing automation signals (navigator.webdriver,
       # window.chrome.csi, etc.) that captcha systems fingerprint.
       args << "--disable-blink-features=AutomationControlled"

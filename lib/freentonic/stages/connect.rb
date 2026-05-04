@@ -275,7 +275,14 @@ module Freentonic
           # plenty of privacy-minded users disable UA-CH via uBO or
           # similar. The proper fix is the puppeteer-stealth-style
           # extension that spoofs the values; that's roadmap.
-          "--disable-features=UserAgentClientHint"
+          "--disable-features=UserAgentClientHint",
+          # Match the Xvfb display (1920x1080 in docker-entrypoint.sh).
+          # Without this, Chromium picks a smaller default size and
+          # anchors lower-left, leaving the noVNC viewer with empty
+          # desktop margin around the bank UI. --start-maximized would
+          # be more idiomatic but Xvfb has no window manager to honor
+          # the maximize hint; an explicit size is the reliable form.
+          "--window-size=1920,1080"
         ]
         if @context[:no_sandbox]
           # --no-sandbox is mandatory for Chrome inside an unprivileged
