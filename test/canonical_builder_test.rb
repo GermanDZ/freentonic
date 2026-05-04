@@ -65,6 +65,35 @@ class CanonicalBuilderTest < Minitest::Test
     assert_equal({ "ing_product_type" => 20 }, acct.metadata)
   end
 
+  def test_build_account_portable_ref_collides_cross_provider
+    # The simulated end-to-end check: two normalizers (a direct provider
+    # and an aggregator) produce identical Account.id for the same physical
+    # account when both pass the same portable_ref derived from their
+    # respective payloads.
+    direct = Builder.build_account(
+      institution: "ing", source_id: "ing-uuid-aaa", currency: "EUR",
+      name: "Cuenta Naranja", iban: "ES0000000000000000000000",
+      portable_ref: "9999:0001"
+    )
+    aggregator = Builder.build_account(
+      institution: "fintonic", source_id: "fintonic-id-zzz", currency: "EUR",
+      name: "ING Cuenta Naranja",
+      portable_ref: "9999:0001"
+    )
+    assert_equal direct.id, aggregator.id
+    # Other fields stay provider-specific — the collision is on id only.
+    assert_equal "ing-uuid-aaa",      direct.source_id
+    assert_equal "fintonic-id-zzz",   aggregator.source_id
+  end
+
+  def test_build_account_without_portable_ref_keeps_legacy_id
+    # Back-compat for accounts that can't surface a portable key.
+    a = Builder.build_account(institution: "ing", source_id: "p", currency: "EUR")
+    b = Builder.build_account(institution: "ing", source_id: "p", currency: "EUR",
+                              portable_ref: nil)
+    assert_equal a.id, b.id
+  end
+
   def test_build_account_id_is_deterministic
     args = { institution: "ing", source_id: "p", currency: "EUR" }
     a = Builder.build_account(**args)

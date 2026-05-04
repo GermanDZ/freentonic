@@ -38,14 +38,21 @@ module Freentonic
       # --- Entity factories ------------------------------------------------
 
       # Build a Canonical::Account. Computes id via Canonical.account_id.
+      #
+      # portable_ref, when supplied, makes the account id provider-agnostic
+      # — see Canonical.account_id for the cross-provider matching contract.
+      # Normalizers should set it whenever they can derive a stable per-
+      # account key (e.g. "BANKID:PRODUCTID" for Spanish banks lifted from
+      # the IBAN or split out by an aggregator).
       def build_account(institution:, source_id:, currency:,
                         name: nil, type: nil, iban: nil, balance: nil,
-                        metadata: {})
+                        metadata: {}, portable_ref: nil)
         id = Freentonic::Canonical.account_id(
-          institution: institution,
-          iban: iban,
-          source_id: source_id,
-          name: name
+          institution:  institution,
+          portable_ref: portable_ref,
+          iban:         iban,
+          source_id:    source_id,
+          name:         name
         )
         Freentonic::Canonical::Account.new(
           id:          id,
