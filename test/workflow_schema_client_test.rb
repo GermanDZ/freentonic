@@ -389,5 +389,52 @@ module Freentonic
         })
         assert_nil schema.build_api_client({})
       end
+
+      # ── capture_response_header ───────────────────────────────────────
+
+      def valid_capture_response_header(extra = {})
+        {
+          "action" => "capture_response_header",
+          "host"   => "api.example.com",
+          "path"   => "/auth/token",
+          "header" => "Authorization",
+          "as"     => "bearer_token"
+        }.merge(extra)
+      end
+
+      def test_capture_response_header_accepts_full_step
+        # Sanity: a valid step should not raise.
+        schema_with_phase([valid_capture_response_header])
+      end
+
+      def test_capture_response_header_accepts_required_false
+        schema_with_phase([valid_capture_response_header("required" => false)])
+      end
+
+      %w[host path header as].each do |required_key|
+        define_method("test_capture_response_header_rejects_missing_#{required_key}") do
+          step = valid_capture_response_header
+          step.delete(required_key)
+          err = assert_raises(UserError) { schema_with_phase([step]) }
+          assert_includes err.message, required_key
+        end
+
+        define_method("test_capture_response_header_rejects_empty_#{required_key}") do
+          err = assert_raises(UserError) { schema_with_phase([valid_capture_response_header(required_key => "")]) }
+          assert_includes err.message, required_key
+        end
+
+        define_method("test_capture_response_header_rejects_non_string_#{required_key}") do
+          err = assert_raises(UserError) { schema_with_phase([valid_capture_response_header(required_key => 123)]) }
+          assert_includes err.message, required_key
+        end
+      end
+
+      def test_capture_response_header_rejects_non_boolean_required
+        err = assert_raises(UserError) do
+          schema_with_phase([valid_capture_response_header("required" => "yes")])
+        end
+        assert_includes err.message, "required"
+      end
     end
   end

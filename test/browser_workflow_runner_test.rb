@@ -208,6 +208,129 @@ module Freentonic
         assert_equal 1, context["cookie_cookie_count"]
       end
 
+      class CaptureResponseHeaderSchemaDouble
+        def initialize(steps); @steps = steps; end
+        def error_signals = []
+        def phase(name); name == "capture_credentials" ? @steps : []; end
+        def secret_config(_name); {}; end
+      end
+
+      def test_capture_response_header_lifts_value_from_matching_response
+        session = FakeSession.new
+        session.pending_events << {
+          "method" => "Network.responseReceived",
+          "params" => {
+            "requestId" => "req-9",
+            "response" => {
+              "url" => "https://api.ing.ingdirect.es/saf/tpa/accesstoken/synchronize",
+              "headers" => { "Authorization" => "Bearer post-elevation-token" }
+            }
+          }
+        }
+        steps = [{
+          "action" => "capture_response_header",
+          "host"   => "api.ing.ingdirect.es",
+          "path"   => "/saf/tpa/accesstoken/synchronize",
+          "header" => "Authorization",
+          "as"     => "bearer_token"
+        }]
+        context = {}
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: CaptureResponseHeaderSchemaDouble.new(steps),
+          context: context,
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        ).execute_phase("capture_credentials")
+
+        assert_equal "Bearer post-elevation-token", context["bearer_token"]
+      end
+
+      def test_capture_response_header_required_false_does_not_raise_on_miss
+        session = FakeSession.new
+        # No matching response event in pending_events.
+        steps = [{
+          "action" => "capture_response_header",
+          "host"   => "api.ing.ingdirect.es",
+          "path"   => "/saf/tpa/accesstoken/synchronize",
+          "header" => "Authorization",
+          "as"     => "bearer_token",
+          "required" => false
+        }]
+        context = {}
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: CaptureResponseHeaderSchemaDouble.new(steps),
+          context: context,
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        ).execute_phase("capture_credentials")
+
+        refute context.key?("bearer_token")
+      end
+
+      def test_capture_response_header_required_true_raises_on_miss
+        session = FakeSession.new
+        steps = [{
+          "action" => "capture_response_header",
+          "host"   => "api.ing.ingdirect.es",
+          "path"   => "/saf/tpa/accesstoken/synchronize",
+          "header" => "Authorization",
+          "as"     => "bearer_token"
+        }]
+        runner = BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: CaptureResponseHeaderSchemaDouble.new(steps),
+          context: {},
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        )
+        assert_raises(UserError) { runner.execute_phase("capture_credentials") }
+      end
+
+      def test_capture_response_header_does_not_log_value_to_stdout
+        session = FakeSession.new
+        session.pending_events << {
+          "method" => "Network.responseReceived",
+          "params" => {
+            "requestId" => "req-1",
+            "response" => {
+              "url" => "https://api.ing.ingdirect.es/x",
+              "headers" => { "Authorization" => "Bearer ABSOLUTELYSECRET" }
+            }
+          }
+        }
+        steps = [{
+          "action" => "capture_response_header",
+          "host" => "api.ing.ingdirect.es", "path" => "/x",
+          "header" => "Authorization", "as" => "bearer_token"
+        }]
+        stdout = StringIO.new
+        stderr = StringIO.new
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: CaptureResponseHeaderSchemaDouble.new(steps),
+          context: {},
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: stdout,
+          stderr: stderr
+        ).execute_phase("capture_credentials")
+
+        refute_includes stdout.string, "ABSOLUTELYSECRET"
+        refute_includes stderr.string, "ABSOLUTELYSECRET"
+      end
+
       class ResponseJsonSchemaDouble
         def error_signals = []
 
