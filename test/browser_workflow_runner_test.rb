@@ -718,33 +718,46 @@ module Freentonic
         assert(runtime_exprs.any? { |e| e.include?("button.go") }, "expected a Runtime.evaluate against submit selector")
       end
 
+      # Mimics the real RemotePromptStore enough to exercise the runner's
+      # interactive paths. The real store auto-announces to stderr when
+      # constructed with announce_to:; this fake takes an `announce_to:`
+      # kwarg on every prompt() call to keep the test surface explicit
+      # without coupling to an instance-level IO. (The runner doesn't pass
+      # announce_to: per-call, but the fake replays the same JSON-line
+      # shape the real store would have written.)
       class FakeRemotePromptStore
-        attr_reader :calls, :announce_payloads
+        attr_reader :calls
 
-        def initialize(value: nil, raise_timeout: false)
+        def initialize(value: nil, raise_timeout: false, announce_to: nil)
           @value = value
           @raise_timeout = raise_timeout
+          @announce_to = announce_to
           @calls = []
-          @announce_payloads = []
         end
 
         def prompt(kind:, message:, mask: false, timeout_seconds:)
           @calls << { kind: kind, message: message, mask: mask, timeout_seconds: timeout_seconds }
-          if block_given?
-            request = {
-              "prompt_id"  => "p_fakeid01",
-              "kind"       => kind.to_s,
-              "message"    => message,
-              "mask"       => mask,
-              "expires_at" => "2030-01-01T00:00:00Z"
-            }
-            yield "p_fakeid01", request
-          end
+          request = {
+            "prompt_id"  => "p_fakeid01",
+            "kind"       => kind.to_s,
+            "message"    => message,
+            "mask"       => mask,
+            "expires_at" => "2030-01-01T00:00:00Z"
+          }
+          announce(request) if @announce_to
+          yield "p_fakeid01", request if block_given?
           raise RemotePromptStore::Timeout, "fake" if @raise_timeout
           case kind
           when :input then @value || ""
           when :confirm then true
           end
+        end
+
+        private
+
+        def announce(request)
+          @announce_to.puts "[freentonic][prompt] #{JSON.generate(request)}"
+          @announce_to.flush if @announce_to.respond_to?(:flush)
         end
       end
 
@@ -752,8 +765,8 @@ module Freentonic
         session = FakeSession.new
         schema = PromptSchemaDouble.new([prompt_step])
         stdin = StringIO.new("") # tty? -> false
-        store = FakeRemotePromptStore.new(value: "987654")
         stderr = StringIO.new
+        store = FakeRemotePromptStore.new(value: "987654", announce_to: stderr)
 
         build_runner(session: session, schema: schema, stdin: stdin, stderr: stderr, remote_prompt_store: store).execute_phase("login")
 
@@ -1132,9 +1145,9 @@ module Freentonic
           "timeout" => 5
         }])
         stdin = StringIO.new("") # tty? -> false
-        store = FakeRemotePromptStore.new
         stdout = StringIO.new
         stderr = StringIO.new
+        store = FakeRemotePromptStore.new(announce_to: stderr)
 
         build_runner(session: session, schema: schema, stdin: stdin, stdout: stdout, stderr: stderr, remote_prompt_store: store).execute_phase("login")
 

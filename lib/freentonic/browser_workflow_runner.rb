@@ -494,23 +494,9 @@ module Freentonic
       end
 
       def read_from_remote(store, message:, mask:, timeout_seconds:, selector:)
-        store.prompt(kind: :input, message: message, mask: mask, timeout_seconds: timeout_seconds) do |prompt_id, request|
-          announce_remote_prompt(prompt_id, request)
-        end
+        store.prompt(kind: :input, message: message, mask: mask, timeout_seconds: timeout_seconds)
       rescue RemotePromptStore::Timeout
         raise UserError, "prompt_stdin_and_fill: timed out waiting for user input on #{selector}"
-      end
-
-      def announce_remote_prompt(prompt_id, request)
-        announcement = {
-          "prompt_id"  => prompt_id,
-          "kind"       => request["kind"],
-          "message"    => request["message"],
-          "mask"       => request["mask"],
-          "expires_at" => request["expires_at"]
-        }
-        @stderr.puts "[freentonic][prompt] #{JSON.generate(announcement)}"
-        @stderr.flush if @stderr.respond_to?(:flush)
       end
 
       # Resolve the prompt store lazily on first use:
@@ -524,7 +510,7 @@ module Freentonic
         run_dir = ENV["FREENTONIC_RUN_DIR"]
         @remote_prompt_store =
           if run_dir && !run_dir.empty?
-            RemotePromptStore.new(prompts_dir: File.join(run_dir, "prompts"))
+            RemotePromptStore.new(prompts_dir: File.join(run_dir, "prompts"), announce_to: @stderr)
           end
       end
 
@@ -1126,9 +1112,7 @@ module Freentonic
           end
         elsif (store = remote_prompt_store)
           begin
-            store.prompt(kind: :confirm, message: message, mask: false, timeout_seconds: timeout_seconds) do |prompt_id, request|
-              announce_remote_prompt(prompt_id, request)
-            end
+            store.prompt(kind: :confirm, message: message, mask: false, timeout_seconds: timeout_seconds)
           rescue RemotePromptStore::Timeout
             raise UserError, "pause: timed out after #{timeout_seconds}s"
           end
