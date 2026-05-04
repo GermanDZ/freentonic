@@ -143,6 +143,26 @@ module Freentonic
         when "elevate_session"
           @stdout.puts "    [yml] elevate_session"
           elevate_session(step)
+        when "capture_local_storage"
+          origin = step.fetch("origin")
+          as     = step.fetch("as")
+          keys   = step["keys"]
+          @stdout.puts "    [yml] capture_local_storage: #{origin} → ctx.#{as}"
+          capture_dom_storage(
+            origin: origin, as: as, keys: keys,
+            is_local: true,
+            required: step.fetch("required", true)
+          )
+        when "capture_session_storage"
+          origin = step.fetch("origin")
+          as     = step.fetch("as")
+          keys   = step["keys"]
+          @stdout.puts "    [yml] capture_session_storage: #{origin} → ctx.#{as}"
+          capture_dom_storage(
+            origin: origin, as: as, keys: keys,
+            is_local: false,
+            required: step.fetch("required", true)
+          )
         when "capture_response_json"
           url_includes = step.fetch("url_includes")
           field = step.fetch("field")
@@ -503,6 +523,59 @@ module Freentonic
         @stdout.print "      waiting for elevation completion (timeout: #{completion_to}s)"
         matched = wait_for_branches(completion.fetch("branches"), timeout: completion_to)
         @stdout.puts " → #{describe_branch(matched)}"
+      end
+
+      # Snapshot localStorage / sessionStorage for the given security
+      # origin via CDP DOMStorage.getDOMStorageItems. The bank's frontend
+      # parks elevation-relevant state here (ExtendedSessionContext,
+      # cached access tokens, feature flags) that the headless extractor
+      # can't reconstruct. Capture once after elevation, hand the hash
+      # off to the API client as a credential.
+      #
+      # keys: when present, restricts the result to that allowlist (in
+      # the order given, with missing keys absent — never nil-filled, so
+      # the consumer can distinguish "absent" from "set to empty"). When
+      # absent, captures every key for the origin.
+      #
+      # Never logs values — these are frequently JWTs, refresh tokens,
+      # or device-bound IDs.
+      def capture_dom_storage(origin:, as:, keys:, is_local:, required:)
+        result = @session.send_command("DOMStorage.getDOMStorageItems", {
+          storageId: { securityOrigin: origin, isLocalStorage: is_local }
+        })
+        entries = result.is_a?(Hash) ? result["entries"] : nil
+        kind = is_local ? "localStorage" : "sessionStorage"
+
+        unless entries.is_a?(Array)
+          if required
+            raise UserError, "workflow capture_#{is_local ? 'local' : 'session'}_storage: " \
+                             "no #{kind} entries returned for origin #{origin.inspect}"
+          end
+          return nil
+        end
+
+        captured = {}
+        entries.each do |pair|
+          key, value = pair
+          next unless key.is_a?(String)
+          captured[key] = value
+        end
+
+        if keys.is_a?(Array) && !keys.empty?
+          allow = keys.map(&:to_s)
+          captured = captured.slice(*allow)
+        end
+
+        if captured.empty?
+          if required
+            raise UserError, "workflow capture_#{is_local ? 'local' : 'session'}_storage: " \
+                             "no matching keys in #{kind} for origin #{origin.inspect}"
+          end
+          return nil
+        end
+
+        @context[as.to_s] = captured
+        @stdout.puts "      ✓ #{captured.size} #{kind} keys captured"
       end
 
       def capture_response_header(host:, path:, header:, as:, required:)

@@ -254,6 +254,8 @@ module Freentonic
         validate_capture_response_header!(phase_name, step, index)
       when "elevate_session"
         validate_elevate_session!(phase_name, step, index)
+      when "capture_local_storage", "capture_session_storage"
+        validate_capture_dom_storage!(phase_name, step, index)
       when "prompt_stdin_and_fill"
         loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: prompt_stdin_and_fill"
         unless step["selector"].is_a?(String) && !step["selector"].empty?
@@ -418,6 +420,27 @@ module Freentonic
       end
       if branch.key?("on_match") && !branch["on_match"].is_a?(String)
         raise UserError, "#{loc} #{path}.on_match must be a string when set"
+      end
+    end
+
+    def validate_capture_dom_storage!(phase_name, step, index)
+      action = step["action"]
+      loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: #{action}"
+
+      %w[origin as].each do |key|
+        unless step[key].is_a?(String) && !step[key].empty?
+          raise UserError, "#{loc} requires a non-empty #{key}:"
+        end
+      end
+
+      if step.key?("keys")
+        unless step["keys"].is_a?(Array) && !step["keys"].empty? && step["keys"].all? { |k| k.is_a?(String) && !k.empty? }
+          raise UserError, "#{loc} keys: must be a non-empty array of non-empty strings when set"
+        end
+      end
+
+      if step.key?("required") && ![true, false].include?(step["required"])
+        raise UserError, "#{loc} required: must be true or false"
       end
     end
 

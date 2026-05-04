@@ -436,5 +436,70 @@ module Freentonic
         end
         assert_includes err.message, "required"
       end
+
+      # ── capture_local_storage / capture_session_storage ───────────────
+
+      def valid_capture_local_storage(extra = {})
+        {
+          "action" => "capture_local_storage",
+          "origin" => "https://ing.example",
+          "as"     => "ls"
+        }.merge(extra)
+      end
+
+      def test_capture_local_storage_accepts_minimal_step
+        schema_with_phase([valid_capture_local_storage])
+      end
+
+      def test_capture_local_storage_accepts_keys_allowlist
+        schema_with_phase([valid_capture_local_storage("keys" => ["a", "b"])])
+      end
+
+      def test_capture_local_storage_rejects_missing_origin
+        err = assert_raises(UserError) do
+          step = valid_capture_local_storage; step.delete("origin")
+          schema_with_phase([step])
+        end
+        assert_includes err.message, "origin"
+      end
+
+      def test_capture_local_storage_rejects_missing_as
+        err = assert_raises(UserError) do
+          step = valid_capture_local_storage; step.delete("as")
+          schema_with_phase([step])
+        end
+        assert_includes err.message, "as"
+      end
+
+      def test_capture_local_storage_rejects_non_array_keys
+        err = assert_raises(UserError) do
+          schema_with_phase([valid_capture_local_storage("keys" => "ExtendedSessionContext")])
+        end
+        assert_includes err.message, "keys"
+      end
+
+      def test_capture_local_storage_rejects_empty_keys_array
+        err = assert_raises(UserError) do
+          schema_with_phase([valid_capture_local_storage("keys" => [])])
+        end
+        assert_includes err.message, "keys"
+      end
+
+      def test_capture_local_storage_rejects_non_string_keys_entry
+        err = assert_raises(UserError) do
+          schema_with_phase([valid_capture_local_storage("keys" => ["ok", 123])])
+        end
+        assert_includes err.message, "keys"
+      end
+
+      def test_capture_session_storage_uses_same_validator
+        # capture_session_storage must follow the same validator path —
+        # otherwise providers could ship invalid YAML for one variant but
+        # not the other.
+        err = assert_raises(UserError) do
+          schema_with_phase([{ "action" => "capture_session_storage", "as" => "ss" }])
+        end
+        assert_includes err.message, "origin"
+      end
     end
   end
