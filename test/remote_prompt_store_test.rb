@@ -83,6 +83,66 @@ module Freentonic
       assert Dir.exist?(@prompts_dir)
     end
 
+    def test_announce_to_emits_json_line_before_polling
+      announce_io = StringIO.new
+      yielded_id = nil
+
+      thread = Thread.new do
+        store_with_announce = RemotePromptStore.new(prompts_dir: @prompts_dir, announce_to: announce_io)
+        store_with_announce.prompt(kind: :confirm, message: "Approve in app", timeout_seconds: 5) do |id, _r|
+          yielded_id = id
+        end
+      end
+
+      wait_for_request(yielded_id_proc: -> { yielded_id }, timeout: 2)
+
+      # Announcement must be on the IO BEFORE we satisfy the prompt — that
+      # is what makes the simplefreen-invoke UI render the prompt while the
+      # runner is still blocked on it. If we observed the line only after
+      # writing the response, the UX guarantee would not hold.
+      assert_includes announce_io.string, "[freentonic][prompt]"
+      announcement_line = announce_io.string.lines.find { |l| l.start_with?("[freentonic][prompt]") }
+      payload = JSON.parse(announcement_line.sub("[freentonic][prompt] ", ""))
+      assert_equal yielded_id, payload["prompt_id"]
+      assert_equal "confirm", payload["kind"]
+      assert_equal "Approve in app", payload["message"]
+
+      File.write(File.join(@prompts_dir, "#{yielded_id}.response.json"), JSON.generate({ "confirmed" => true }))
+      assert_equal true, thread.value
+    end
+
+    def test_announce_to_does_not_leak_response_value
+      announce_io = StringIO.new
+      yielded_id = nil
+      thread = Thread.new do
+        store_with_announce = RemotePromptStore.new(prompts_dir: @prompts_dir, announce_to: announce_io)
+        store_with_announce.prompt(kind: :input, message: "Code", mask: true, timeout_seconds: 5) { |id, _r| yielded_id = id }
+      end
+      wait_for_request(yielded_id_proc: -> { yielded_id }, timeout: 2)
+      File.write(File.join(@prompts_dir, "#{yielded_id}.response.json"), JSON.generate({ "value" => "TOPSECRET" }))
+      thread.value
+
+      refute_includes announce_io.string, "TOPSECRET",
+                      "the announcement is opened before any response, so it must never carry the value"
+    end
+
+    def test_announce_to_swallows_io_errors
+      # A broken stderr (closed pipe, etc.) must not fail the prompt itself
+      # — the announcement is best-effort.
+      broken = Object.new
+      def broken.puts(*); raise IOError, "broken"; end
+      def broken.flush; end
+
+      yielded_id = nil
+      thread = Thread.new do
+        store_with_announce = RemotePromptStore.new(prompts_dir: @prompts_dir, announce_to: broken)
+        store_with_announce.prompt(kind: :confirm, message: "x", timeout_seconds: 5) { |id, _r| yielded_id = id }
+      end
+      wait_for_request(yielded_id_proc: -> { yielded_id }, timeout: 2)
+      File.write(File.join(@prompts_dir, "#{yielded_id}.response.json"), JSON.generate({}))
+      assert_equal true, thread.value
+    end
+
     def test_request_write_is_atomic
       # The write should never leave a partial .request.json visible — it
       # writes to .tmp first, then renames. Hard to observe directly here,
