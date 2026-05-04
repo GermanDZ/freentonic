@@ -44,9 +44,14 @@ module Freentonic
       # Normalizers should set it whenever they can derive a stable per-
       # account key (e.g. "BANKID:PRODUCTID" for Spanish banks lifted from
       # the IBAN or split out by an aggregator).
+      #
+      # portable_id is the human-readable companion to portable_ref. The
+      # framework does not derive one from the other — providers pass both
+      # explicitly so they can choose conventions like "bank:9999:0001"
+      # without coupling the digest input to the display string.
       def build_account(institution:, source_id:, currency:,
                         name: nil, type: nil, iban: nil, balance: nil,
-                        metadata: {}, portable_ref: nil)
+                        metadata: {}, portable_ref: nil, portable_id: nil)
         id = Freentonic::Canonical.account_id(
           institution:  institution,
           portable_ref: portable_ref,
@@ -63,7 +68,8 @@ module Freentonic
           currency:    currency,
           iban:        iban,
           balance:     balance,
-          metadata:    metadata || {}
+          metadata:    metadata || {},
+          portable_id: portable_id
         )
       end
 

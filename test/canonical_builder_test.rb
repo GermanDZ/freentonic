@@ -86,6 +86,28 @@ class CanonicalBuilderTest < Minitest::Test
     assert_equal "fintonic-id-zzz",   aggregator.source_id
   end
 
+  def test_build_account_portable_id_is_independent_of_portable_ref
+    # Providers pass both: portable_ref drives the digest, portable_id is
+    # the human-readable companion. Hash collides on portable_ref alone,
+    # even when the two providers chose different display strings.
+    a = Builder.build_account(
+      institution: "ing", source_id: "ing-uuid", currency: "EUR",
+      portable_ref: "9999:0001", portable_id: "bank:9999:0001"
+    )
+    b = Builder.build_account(
+      institution: "fintonic", source_id: "ftc-id", currency: "EUR",
+      portable_ref: "9999:0001", portable_id: "ES_9999_0001"
+    )
+    assert_equal a.id, b.id
+    assert_equal "bank:9999:0001", a.portable_id
+    assert_equal "ES_9999_0001",   b.portable_id
+  end
+
+  def test_build_account_portable_id_defaults_to_nil
+    acct = Builder.build_account(institution: "ing", source_id: "p", currency: "EUR")
+    assert_nil acct.portable_id
+  end
+
   def test_build_account_without_portable_ref_keeps_legacy_id
     # Back-compat for accounts that can't surface a portable key.
     a = Builder.build_account(institution: "ing", source_id: "p", currency: "EUR")
