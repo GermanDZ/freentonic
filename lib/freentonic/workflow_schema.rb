@@ -250,6 +250,8 @@ module Freentonic
         validate_pause!(phase_name, step, index)
       when "capture_url"
         validate_capture_url!(phase_name, step, index)
+      when "capture_response_header"
+        validate_capture_response_header!(phase_name, step, index)
       when "prompt_stdin_and_fill"
         loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: prompt_stdin_and_fill"
         unless step["selector"].is_a?(String) && !step["selector"].empty?
@@ -336,6 +338,20 @@ module Freentonic
 
       unless step["as"].is_a?(String) && !step["as"].empty?
         raise UserError, "#{loc} requires a non-empty as:"
+      end
+    end
+
+    def validate_capture_response_header!(phase_name, step, index)
+      loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: capture_response_header"
+
+      %w[host path header as].each do |key|
+        unless step[key].is_a?(String) && !step[key].empty?
+          raise UserError, "#{loc} requires a non-empty #{key}:"
+        end
+      end
+
+      if step.key?("required") && ![true, false].include?(step["required"])
+        raise UserError, "#{loc} required: must be true or false"
       end
     end
 
