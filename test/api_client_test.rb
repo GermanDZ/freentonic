@@ -262,6 +262,44 @@ module Freentonic
       assert_respond_to client, :fetch_things
       assert_respond_to client, :fetch_other
     end
+
+    # ── update_auth_headers! ─────────────────────────────────────────────
+
+    def test_update_auth_headers_overrides_dynamic_value
+      c = client(dynamic: "dyn-val")
+      assert_equal "dyn-val", c.auth_headers["X-Dynamic"]
+      c.update_auth_headers!("X-Dynamic" => "rotated")
+      assert_equal "rotated", c.auth_headers["X-Dynamic"]
+    end
+
+    def test_update_auth_headers_overrides_static_value
+      c = client(dynamic: "x")
+      c.update_auth_headers!("X-Static" => "rotated-static")
+      assert_equal "rotated-static", c.auth_headers["X-Static"]
+    end
+
+    def test_update_auth_headers_can_add_a_brand_new_header
+      # The PSD2 SCA case: an Authorization header that wasn't declared
+      # in the original auth_header chain (e.g. session is cookie-based
+      # until elevation, then bearer-based after) lands on every
+      # subsequent request.
+      c = client(dynamic: "x")
+      refute c.auth_headers.key?("Authorization")
+      c.update_auth_headers!("Authorization" => "Bearer abc")
+      assert_equal "Bearer abc", c.auth_headers["Authorization"]
+    end
+
+    def test_update_auth_headers_nil_reverts_to_declared
+      c = client(dynamic: "dyn-val")
+      c.update_auth_headers!("X-Dynamic" => "rotated")
+      c.update_auth_headers!("X-Dynamic" => nil)
+      assert_equal "dyn-val", c.auth_headers["X-Dynamic"]
+    end
+
+    def test_update_auth_headers_returns_self_for_chaining
+      c = client(dynamic: "x")
+      assert_same c, c.update_auth_headers!("X" => "y")
+    end
   end
 
   # ── Parameterized endpoints & derived_credentials ────────────────────
@@ -464,6 +502,188 @@ module Freentonic
       c    = GuardedCodeClient.new
       resp = FakeResponse.new("200", '{"ok":true}', {})
       assert_equal({ "ok" => true }, c.handle_response(resp))
+    end
+  end
+
+  # ── raw_request ──────────────────────────────────────────────────────
+
+  class RawRequestClient < Freentonic::ApiClient
+    base_url "https://api.example.com"
+    api_root "/v1"  # raw_request must NOT prepend this
+    auth_header "X-Static",  "static-val"
+    auth_header "X-Dynamic", from: :dyn
+
+    def initialize(dyn:)
+      @dyn = dyn
+    end
+
+    private
+
+    def dyn = @dyn
+  end
+
+  RawFakeResp = Struct.new(:code, :body, :headers) do
+    def [](key) = headers&.fetch(key.downcase, headers&.fetch(key, nil))
+  end
+
+  class RawRequestTest < Minitest::Test
+    def fake_http(captured)
+      h = Object.new
+      h.define_singleton_method(:use_ssl=)      { |_| }
+      h.define_singleton_method(:open_timeout=) { |_| }
+      h.define_singleton_method(:read_timeout=) { |_| }
+      h.define_singleton_method(:request) do |req|
+        captured[:method]  = req.method
+        captured[:path]    = req.path
+        captured[:body]    = req.body
+        captured[:headers] = req.each_header.to_h
+        captured[:resp] || RawFakeResp.new("200", '{"ok":true}', { "content-type" => "application/json" })
+      end
+      h
+    end
+
+    def test_raw_request_get_returns_parsed_json
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        result = c.raw_request(method: :get, path: "/genoma_api/rest/sca/documentation")
+        assert_equal({ "ok" => true }, result)
+      end
+      assert_equal "GET", captured[:method]
+      assert_equal "/genoma_api/rest/sca/documentation", captured[:path]
+      # api_root MUST NOT be prepended on raw_request
+      refute_match %r{/v1/genoma_api}, captured[:path]
+    end
+
+    def test_raw_request_carries_existing_auth_headers
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "rotating-token")
+        c.raw_request(method: :get, path: "/x")
+      end
+      assert_equal "static-val",      captured[:headers]["x-static"]
+      assert_equal "rotating-token",  captured[:headers]["x-dynamic"]
+    end
+
+    def test_raw_request_caller_headers_override_auth_headers_on_collision
+      # capture_response_header requirement: caller can supply
+      # x-ing-reset-validations: 1 alongside the normal auth headers.
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        c.raw_request(method: :get, path: "/x",
+                      headers: { "X-Static" => "overridden", "x-ing-reset-validations" => "1" })
+      end
+      assert_equal "overridden", captured[:headers]["x-static"]
+      assert_equal "1",          captured[:headers]["x-ing-reset-validations"]
+    end
+
+    def test_raw_request_put_with_hash_body_sends_json
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        c.raw_request(method: :put, path: "/sca/documentation",
+                      body: { "processId" => "abc-123" },
+                      headers: { "x-ing-securityprocessid" => "abc-123" })
+      end
+      assert_equal "PUT", captured[:method]
+      assert_equal({ "processId" => "abc-123" }, ::JSON.parse(captured[:body]))
+      assert_equal "application/json", captured[:headers]["content-type"]
+      assert_equal "abc-123", captured[:headers]["x-ing-securityprocessid"]
+    end
+
+    def test_raw_request_string_body_sent_verbatim_without_content_type_injection
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        c.raw_request(method: :post, path: "/x", body: "raw=bytes",
+                      headers: { "Content-Type" => "application/x-www-form-urlencoded" })
+      end
+      assert_equal "raw=bytes", captured[:body]
+      assert_equal "application/x-www-form-urlencoded", captured[:headers]["content-type"]
+    end
+
+    def test_raw_request_base_override_lets_caller_target_a_different_host
+      # The third hop of ING's SCA flow lives on
+      # https://api.ing.ingdirect.es/, which is not the genoma_api base.
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        c.raw_request(method: :get,
+                      path: "/saf/tpa/accesstoken/synchronize",
+                      base: "https://api.ing.ingdirect.es")
+      end
+      # Net::HTTP::Get's req.path is the full URI's path; the host comes
+      # from the URI we built. The fake_http above doesn't capture host
+      # (it's read off the http instance, not the request), so we just
+      # assert the path was preserved verbatim.
+      assert_equal "/saf/tpa/accesstoken/synchronize", captured[:path]
+    end
+
+    def test_raw_request_query_params_serialized_into_url
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        c.raw_request(method: :get, path: "/getScaStatus",
+                      params: { secProcessId: "p-1" })
+      end
+      assert_equal "/getScaStatus?secProcessId=p-1", captured[:path]
+    end
+
+    def test_raw_request_non_json_2xx_returns_raw_body
+      captured = { resp: RawFakeResp.new("200", "<html>ok</html>", { "content-type" => "text/html" }) }
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        body = c.raw_request(method: :get, path: "/page")
+        assert_equal "<html>ok</html>", body
+      end
+    end
+
+    def test_raw_request_401_raises_session_expired
+      captured = { resp: RawFakeResp.new("401", "Unauthorized", { "content-type" => "text/plain" }) }
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        assert_raises(Freentonic::ApiClient::SessionExpired) do
+          c.raw_request(method: :get, path: "/x")
+        end
+      end
+    end
+
+    def test_raw_request_5xx_raises_api_error
+      captured = { resp: RawFakeResp.new("503", "down", { "content-type" => "text/plain" }) }
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        err = assert_raises(Freentonic::ApiClient::ApiError) do
+          c.raw_request(method: :get, path: "/x")
+        end
+        assert_equal 503, err.status
+      end
+    end
+
+    def test_raw_request_unsupported_method_raises_argument_error
+      c = RawRequestClient.new(dyn: "d")
+      assert_raises(ArgumentError) do
+        c.raw_request(method: :options, path: "/x")
+      end
+    end
+
+    def test_raw_request_no_base_url_raises_argument_error
+      anonymous = Class.new(Freentonic::ApiClient).new
+      assert_raises(ArgumentError) do
+        anonymous.raw_request(method: :get, path: "/x")
+      end
+    end
+
+    def test_update_auth_headers_takes_effect_for_raw_request
+      # PSD2 SCA round-trip: rotating the bearer must show up on the very
+      # next raw_request as well as on declared endpoints.
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = RawRequestClient.new(dyn: "d")
+        c.update_auth_headers!("Authorization" => "Bearer post-elevation")
+        c.raw_request(method: :get, path: "/x")
+      end
+      assert_equal "Bearer post-elevation", captured[:headers]["authorization"]
     end
   end
 

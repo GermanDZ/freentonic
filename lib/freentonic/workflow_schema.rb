@@ -250,6 +250,14 @@ module Freentonic
         validate_pause!(phase_name, step, index)
       when "capture_url"
         validate_capture_url!(phase_name, step, index)
+      when "capture_response_header"
+        validate_capture_response_header!(phase_name, step, index)
+      when "elevate_session"
+        validate_elevate_session!(phase_name, step, index)
+      when "capture_local_storage", "capture_session_storage"
+        validate_capture_dom_storage!(phase_name, step, index)
+      when "capture_outbound_request_headers"
+        validate_capture_outbound_request_headers!(phase_name, step, index)
       when "prompt_stdin_and_fill"
         loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: prompt_stdin_and_fill"
         unless step["selector"].is_a?(String) && !step["selector"].empty?
@@ -336,6 +344,142 @@ module Freentonic
 
       unless step["as"].is_a?(String) && !step["as"].empty?
         raise UserError, "#{loc} requires a non-empty as:"
+      end
+    end
+
+    def validate_elevate_session!(phase_name, step, index)
+      loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: elevate_session"
+
+      signals = step["wait_for_first_of"]
+      unless signals.is_a?(Hash)
+        raise UserError, "#{loc} requires a wait_for_first_of: hash with branches: and timeout:"
+      end
+
+      branches = signals["branches"]
+      unless branches.is_a?(Array) && !branches.empty?
+        raise UserError, "#{loc} wait_for_first_of.branches: must be a non-empty array"
+      end
+
+      branches.each_with_index do |branch, b_idx|
+        validate_elevation_branch!(loc, branch, "wait_for_first_of.branches[#{b_idx}]")
+      end
+
+      if signals.key?("timeout") && !(signals["timeout"].is_a?(Integer) && signals["timeout"] >= 1)
+        raise UserError, "#{loc} wait_for_first_of.timeout: must be a positive integer"
+      end
+
+      sca_branches = branches.select { |b| b["on_match"].to_s == "sca" }
+
+      if sca_branches.any? && !step.key?("on_sca")
+        raise UserError, "#{loc} a branch is tagged on_match: sca but the step has no on_sca: block"
+      end
+
+      if step.key?("on_sca")
+        on_sca = step["on_sca"]
+        unless on_sca.is_a?(Hash)
+          raise UserError, "#{loc} on_sca: must be a hash"
+        end
+        unless on_sca["prompt"].is_a?(String) && !on_sca["prompt"].empty?
+          raise UserError, "#{loc} on_sca.prompt: must be a non-empty string"
+        end
+        completion = on_sca["wait_for_first_of"]
+        unless completion.is_a?(Hash) && completion["branches"].is_a?(Array) && !completion["branches"].empty?
+          raise UserError, "#{loc} on_sca.wait_for_first_of.branches: must be a non-empty array"
+        end
+        completion["branches"].each_with_index do |branch, b_idx|
+          validate_elevation_branch!(loc, branch, "on_sca.wait_for_first_of.branches[#{b_idx}]")
+        end
+        if completion.key?("timeout") && !(completion["timeout"].is_a?(Integer) && completion["timeout"] >= 1)
+          raise UserError, "#{loc} on_sca.wait_for_first_of.timeout: must be a positive integer"
+        end
+        if on_sca.key?("prompt_timeout") && !(on_sca["prompt_timeout"].is_a?(Integer) && on_sca["prompt_timeout"] >= 1)
+          raise UserError, "#{loc} on_sca.prompt_timeout: must be a positive integer"
+        end
+      end
+
+      %w[navigate_to trigger_selector].each do |opt|
+        next unless step.key?(opt)
+        unless step[opt].is_a?(String) && !step[opt].empty?
+          raise UserError, "#{loc} #{opt}: must be a non-empty string when set"
+        end
+      end
+    end
+
+    def validate_elevation_branch!(loc, branch, path)
+      unless branch.is_a?(Hash)
+        raise UserError, "#{loc} #{path} must be a hash"
+      end
+      sel = branch["selector"]
+      url = branch["url_includes"]
+      if (sel.nil? || sel.to_s.empty?) && (url.nil? || url.to_s.empty?)
+        raise UserError, "#{loc} #{path} must have a non-empty selector: or url_includes:"
+      end
+      if sel && !(sel.is_a?(String) && !sel.empty?)
+        raise UserError, "#{loc} #{path}.selector must be a non-empty string"
+      end
+      if url && !(url.is_a?(String) && !url.empty?)
+        raise UserError, "#{loc} #{path}.url_includes must be a non-empty string"
+      end
+      if branch.key?("on_match") && !branch["on_match"].is_a?(String)
+        raise UserError, "#{loc} #{path}.on_match must be a string when set"
+      end
+    end
+
+    def validate_capture_outbound_request_headers!(phase_name, step, index)
+      loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: capture_outbound_request_headers"
+
+      %w[host path as].each do |key|
+        unless step[key].is_a?(String) && !step[key].empty?
+          raise UserError, "#{loc} requires a non-empty #{key}:"
+        end
+      end
+
+      headers = step["headers"]
+      unless headers.is_a?(Array) && !headers.empty? && headers.all? { |h| h.is_a?(String) && !h.empty? }
+        raise UserError, "#{loc} headers: must be a non-empty array of non-empty strings"
+      end
+
+      if step.key?("most_recent") && ![true, false].include?(step["most_recent"])
+        raise UserError, "#{loc} most_recent: must be true or false"
+      end
+
+      if step.key?("required") && ![true, false].include?(step["required"])
+        raise UserError, "#{loc} required: must be true or false"
+      end
+    end
+
+    def validate_capture_dom_storage!(phase_name, step, index)
+      action = step["action"]
+      loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: #{action}"
+
+      %w[origin as].each do |key|
+        unless step[key].is_a?(String) && !step[key].empty?
+          raise UserError, "#{loc} requires a non-empty #{key}:"
+        end
+      end
+
+      if step.key?("keys")
+        unless step["keys"].is_a?(Array) && !step["keys"].empty? && step["keys"].all? { |k| k.is_a?(String) && !k.empty? }
+          raise UserError, "#{loc} keys: must be a non-empty array of non-empty strings when set"
+        end
+      end
+
+      if step.key?("required") && ![true, false].include?(step["required"])
+        raise UserError, "#{loc} required: must be true or false"
+      end
+    end
+
+    def validate_capture_response_header!(phase_name, step, index)
+      loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: capture_response_header"
+
+      %w[host path header as].each do |key|
+        unless step[key].is_a?(String) && !step[key].empty?
+          raise UserError, "#{loc} requires a non-empty #{key}:"
+        end
+      end
+
+      if step.key?("required") && ![true, false].include?(step["required"])
+        raise UserError, "#{loc} required: must be true or false"
       end
     end
 

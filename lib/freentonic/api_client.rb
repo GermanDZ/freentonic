@@ -242,7 +242,101 @@ module Freentonic
     def initialize(credentials = {})
     end
 
-    # ─── Instance API ─────────────────────────────────────────────────────
+    # ─── Instance API (public) ────────────────────────────────────────────
+
+    # Issue an ad-hoc HTTP request outside the workflow's declared endpoints
+    # block. Honors the client's existing auth_headers (including any
+    # in-flight overrides from update_auth_headers!), base_url, and
+    # timeouts.
+    #
+    # Use this for endpoints the workflow YAML can't declare statically —
+    # the canonical case is PSD2 SCA elevation, where the bank's
+    # documentation endpoint, the status poll, and the access-token
+    # refresh all live outside the normal pagination loop and only fire
+    # mid-extraction. Keeping them out of the YAML keeps the YAML readable
+    # and lets the extractor decide when to dispatch them based on
+    # provider-specific signals (e.g. an acceptanceMethods[].code value).
+    #
+    # @param method [Symbol] :get / :post / :put / :delete / :patch
+    # @param path [String] absolute path under the resolved base (api_root
+    #   is NOT prepended — raw_request is the explicit form)
+    # @param headers [Hash] caller-supplied headers; override auth_headers
+    #   on a name collision
+    # @param body [Hash, String, nil] Hash → JSON-encoded with
+    #   Content-Type: application/json (unless caller set one); String →
+    #   sent as-is, caller owns Content-Type; nil → no body
+    # @param base [String, nil] override the class-level base_url for this
+    #   single call (e.g. ING's accesstoken host vs the genoma_api host)
+    # @param params [Hash, nil] query-string parameters
+    # @return [Object] parsed JSON for application/json 2xx responses;
+    #   raw body string otherwise
+    # @raise [SessionExpired] on 401/403
+    # @raise [ApiError] on any other non-2xx
+    def raw_request(method:, path:, headers: {}, body: nil, base: nil, params: nil)
+      base_url = base || self.class.get_base_url
+      raise ArgumentError, "raw_request: no base URL configured (pass base: or set base_url at the class level)" unless base_url
+
+      uri = URI("#{base_url}#{path}")
+      uri.query = URI.encode_www_form(params) if params && !params.empty?
+
+      req_class = case method.to_sym
+                  when :get    then Net::HTTP::Get
+                  when :post   then Net::HTTP::Post
+                  when :put    then Net::HTTP::Put
+                  when :delete then Net::HTTP::Delete
+                  when :patch  then Net::HTTP::Patch
+                  else raise ArgumentError, "raw_request: unsupported method #{method.inspect}"
+                  end
+      req = req_class.new(uri)
+
+      req["User-Agent"]      = DEFAULT_UA
+      req["Accept"]          = "application/json"
+      req["Accept-Language"] = "es-ES"
+      auth_headers.each { |name, value| req[name] = value.to_s if value }
+      headers.each       { |name, value| req[name] = value.to_s if value }
+
+      if body
+        if body.is_a?(String)
+          req.body = body
+        else
+          req["Content-Type"] = "application/json" unless req["Content-Type"]
+          req.body = JSON.generate(body)
+        end
+      end
+
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl      = true
+      http.open_timeout = OPEN_TIMEOUT
+      http.read_timeout = READ_TIMEOUT
+      handle_raw_response(http.request(req))
+    end
+
+    # Replace one or more auth headers post-construction. Subsequent
+    # requests — declared endpoints AND raw_request — see the new values.
+    #
+    # The original auth_header declarations (static or `from:` dynamic)
+    # remain in place; overrides take precedence on a name collision.
+    # Pass a value of nil to delete the override and revert to the
+    # declared value (or, if there isn't a declared one, drop the header
+    # entirely). Returns self for chaining.
+    #
+    # Use case: after a PSD2 SCA elevation handshake, the bank mints a new
+    # bearer token. update_auth_headers!("Authorization" => "Bearer #{new}")
+    # rotates it onto the client without rebuilding the client (which
+    # would lose pagination state, retry counters, etc.).
+    def update_auth_headers!(headers_hash)
+      @auth_header_overrides ||= {}
+      headers_hash.each do |k, v|
+        if v.nil?
+          @auth_header_overrides.delete(k.to_s)
+        else
+          @auth_header_overrides[k.to_s] = v.to_s
+        end
+      end
+      self
+    end
+
+    # ─── Instance API (protected) ─────────────────────────────────────────
 
     protected
 
@@ -353,6 +447,24 @@ module Freentonic
       end
     end
 
+    # Variant of handle_response used by raw_request: returns parsed JSON
+    # only when the response advertises application/json, else hands back
+    # the raw body string. Declared endpoints all parse JSON, but
+    # raw_request is a general-purpose escape hatch and may be pointed at
+    # text/html, application/xml, or anything else.
+    def handle_raw_response(resp)
+      case resp.code.to_i
+      when 200..299
+        if resp["content-type"].to_s.include?("application/json")
+          parse_json(resp.body)
+        else
+          resp.body.to_s
+        end
+      when 401, 403 then raise SessionExpired, "session expired (HTTP #{resp.code})"
+      else               raise ApiError.new(resp.code.to_i, resp.body)
+      end
+    end
+
     def parse_json(body)
       return {} if body.to_s.empty?
       JSON.parse(body)
@@ -360,14 +472,24 @@ module Freentonic
       { "_raw" => body.to_s }
     end
 
-    # Build auth headers from class-level auth_header declarations.
-    # For dynamic entries (from:), calls send(method_name) on self.
-    # Subclasses can still override this method entirely if needed.
+    # Build auth headers from class-level auth_header declarations, then
+    # apply any in-flight overrides from update_auth_headers!.
+    #
+    # For dynamic entries (from:), calls send(method_name) on self. Nil
+    # results — declared or override — produce no header at all (so an
+    # update_auth_headers!("X" => nil) reverts to the declared value, and
+    # if there isn't one, the header is absent).
+    #
+    # Subclasses can override this method entirely if a custom shape is
+    # needed; the override mechanism honors the class-level declarations
+    # plus this base implementation.
     def auth_headers
-      self.class.auth_header_decls.each_with_object({}) do |decl, h|
+      base = self.class.auth_header_decls.each_with_object({}) do |decl, h|
         value = decl[:from] ? send(decl[:from]) : decl[:value]
         h[decl[:name]] = value.to_s if value
       end
+      return base if @auth_header_overrides.nil? || @auth_header_overrides.empty?
+      base.merge(@auth_header_overrides)
     end
 
     # ─── Endpoint template helpers ────────────────────────────────────
