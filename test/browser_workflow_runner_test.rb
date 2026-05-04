@@ -1608,6 +1608,151 @@ module Freentonic
         assert_match(/elevate_session timed out/, err.message)
       end
 
+      # ── capture_local_storage / capture_session_storage ──────────────
+
+      class StorageSchemaDouble
+        def initialize(steps); @steps = steps; end
+        def error_signals = []
+        def phase(name); name == "capture_credentials" ? @steps : []; end
+        def secret_config(_name); {}; end
+      end
+
+      class FakeStorageSession < FakeSession
+        def initialize(local: [], session: [])
+          super()
+          @local = local
+          @session = session
+        end
+
+        def send_command(method, params = {}, timeout: 30)
+          @commands << { method: method, params: params, timeout: timeout }
+          if method == "DOMStorage.getDOMStorageItems"
+            id = params[:storageId] || params["storageId"] || {}
+            is_local = id[:isLocalStorage] || id["isLocalStorage"]
+            { "entries" => is_local ? @local : @session }
+          else
+            super
+          end
+        end
+      end
+
+      def run_storage_step(step, *, local: [], session: [])
+        sess = FakeStorageSession.new(local: local, session: session)
+        ctx = {}
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: sess,
+          schema: StorageSchemaDouble.new([step]),
+          context: ctx,
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        ).execute_phase("capture_credentials")
+        [ctx, sess]
+      end
+
+      def test_capture_local_storage_returns_hash_of_all_entries
+        local = [
+          ["ExtendedSessionContext", "ESC-VALUE"],
+          ["accessToken",            "TOKEN-VALUE"],
+          ["affluent",               "NO_AFLNT"]
+        ]
+        ctx, _sess = run_storage_step(
+          { "action" => "capture_local_storage", "origin" => "https://ing.test", "as" => "ls" },
+          local: local
+        )
+        assert_equal({
+          "ExtendedSessionContext" => "ESC-VALUE",
+          "accessToken"            => "TOKEN-VALUE",
+          "affluent"               => "NO_AFLNT"
+        }, ctx["ls"])
+      end
+
+      def test_capture_local_storage_allowlist_filters
+        local = [
+          ["ExtendedSessionContext", "ESC-VALUE"],
+          ["accessToken",            "TOKEN-VALUE"],
+          ["unrelated",              "junk"]
+        ]
+        ctx, _sess = run_storage_step(
+          { "action" => "capture_local_storage", "origin" => "https://ing.test",
+            "as" => "ls", "keys" => ["ExtendedSessionContext", "accessToken"] },
+          local: local
+        )
+        assert_equal({
+          "ExtendedSessionContext" => "ESC-VALUE",
+          "accessToken"            => "TOKEN-VALUE"
+        }, ctx["ls"])
+        refute ctx["ls"].key?("unrelated")
+      end
+
+      def test_capture_local_storage_passes_correct_storage_id_to_cdp
+        _, sess = run_storage_step(
+          { "action" => "capture_local_storage", "origin" => "https://ing.test", "as" => "ls" },
+          local: [["k", "v"]]
+        )
+        cmd = sess.commands.find { |c| c[:method] == "DOMStorage.getDOMStorageItems" }
+        assert_equal({ securityOrigin: "https://ing.test", isLocalStorage: true }, cmd[:params][:storageId])
+      end
+
+      def test_capture_session_storage_passes_is_local_false
+        _, sess = run_storage_step(
+          { "action" => "capture_session_storage", "origin" => "https://ing.test", "as" => "ss" },
+          session: [["k", "v"]]
+        )
+        cmd = sess.commands.find { |c| c[:method] == "DOMStorage.getDOMStorageItems" }
+        assert_equal({ securityOrigin: "https://ing.test", isLocalStorage: false }, cmd[:params][:storageId])
+      end
+
+      def test_capture_local_storage_required_false_does_not_raise_on_no_match
+        ctx, _sess = run_storage_step(
+          { "action" => "capture_local_storage", "origin" => "https://ing.test",
+            "as" => "ls", "keys" => ["missing"], "required" => false },
+          local: [["other", "v"]]
+        )
+        refute ctx.key?("ls")
+      end
+
+      def test_capture_local_storage_required_true_raises_on_no_match
+        bad = { "action" => "capture_local_storage", "origin" => "https://ing.test",
+                "as" => "ls", "keys" => ["missing"] }
+        sess = FakeStorageSession.new(local: [["other", "v"]])
+        runner = BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: sess,
+          schema: StorageSchemaDouble.new([bad]),
+          context: {},
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        )
+        assert_raises(UserError) { runner.execute_phase("capture_credentials") }
+      end
+
+      def test_capture_local_storage_does_not_log_values
+        # JWTs / bearer tokens are exactly what this captures; stdout +
+        # stderr must not contain a verbatim value, only a count.
+        stdout = StringIO.new
+        stderr = StringIO.new
+        sess = FakeStorageSession.new(local: [["accessToken", "REAL-LIVE-JWT-VALUE-NEVER-LEAK"]])
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: sess,
+          schema: StorageSchemaDouble.new([
+            { "action" => "capture_local_storage", "origin" => "https://ing.test", "as" => "ls" }
+          ]),
+          context: {},
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: stdout, stderr: stderr
+        ).execute_phase("capture_credentials")
+
+        refute_includes stdout.string, "REAL-LIVE-JWT-VALUE-NEVER-LEAK"
+        refute_includes stderr.string, "REAL-LIVE-JWT-VALUE-NEVER-LEAK"
+      end
+
       def test_elevate_session_sca_branch_without_on_sca_block_raises
         # Validator catches this at schema build time.
         bad = elevate_step
