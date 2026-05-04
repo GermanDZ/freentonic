@@ -1388,5 +1388,239 @@ module Freentonic
 
         assert_nil context["access_token"]
       end
+
+      # ── elevate_session ──────────────────────────────────────────────
+
+      # Programmable fake session for elevate_session tests. The runner
+      # asks it three things via Runtime.evaluate:
+      #   1. (selector) => deepQuery(document, selector) !== null  → bool
+      #   2. window.location.href                                   → string
+      #   3. click bookkeeping (Input.dispatchKeyEvent etc.) — no-op here
+      # The fake returns whatever values were configured at construction
+      # time, optionally swapping after N evaluations to simulate state
+      # transitions (e.g. "elevated selector appears after 3 ticks").
+      class ProgrammableSession
+        attr_reader :commands, :pending_events
+
+        def initialize(present_selectors: [], current_url: "https://example.test/")
+          @commands = []
+          @pending_events = []
+          @present_selectors = present_selectors  # array of selectors that match
+          @current_url = current_url
+          @runtime_calls = 0
+          @on_runtime_evaluate = nil
+        end
+
+        # Optional: swap state after N runtime evaluations.
+        # block is called with the sequence number; return [present, url].
+        def runtime_evaluate_hook(&block); @on_runtime_evaluate = block; end
+
+        def send_command(method, params = {}, timeout: 30)
+          @commands << { method: method, params: params, timeout: timeout }
+
+          if method == "Runtime.evaluate"
+            @runtime_calls += 1
+            if @on_runtime_evaluate
+              p, u = @on_runtime_evaluate.call(@runtime_calls)
+              @present_selectors = p if p
+              @current_url = u if u
+            end
+
+            expr = params[:expression] || params["expression"] || ""
+            if expr.include?("window.location.href")
+              { "result" => { "value" => @current_url } }
+            elsif expr.include?("deepQuery")
+              # runtime_deep_call wraps the function in an IIFE with the
+              # DEEP_QUERY_FN definition prepended, so the selector arg is
+              # buried inside. Match by JSON-encoded selector presence:
+              # any of @present_selectors whose JSON form appears in the
+              # expression is "the one being asked about" — selectors are
+              # narrow strings and the rest of the IIFE is fixed text, so
+              # collisions don't occur in practice.
+              found = @present_selectors.any? { |sel| expr.include?(::JSON.generate(sel)) }
+              { "result" => { "value" => found } }
+            else
+              { "result" => { "value" => true } }
+            end
+          else
+            {}
+          end
+        end
+      end
+
+      class ElevateSchemaDouble
+        def initialize(steps); @steps = steps; end
+        def error_signals = []
+        def phase(name); name == "elevate" ? @steps : []; end
+        def secret_config(_name); {}; end
+      end
+
+      def elevate_step(extras = {})
+        {
+          "action" => "elevate_session",
+          "wait_for_first_of" => {
+            "timeout" => 5,
+            "branches" => [
+              { "selector" => "[data-element='sca-dialog']", "on_match" => "sca" },
+              { "selector" => ".transactions-list-loaded" },
+              { "url_includes" => "?elevated=true" }
+            ]
+          },
+          "on_sca" => {
+            "prompt" => "Approve in app",
+            "wait_for_first_of" => {
+              "timeout" => 5,
+              "branches" => [
+                { "selector" => ".transactions-list-loaded" },
+                { "url_includes" => "?elevated=true" }
+              ]
+            }
+          }
+        }.merge(extras)
+      end
+
+      def build_elevate_runner(session:, schema:, runtime_context: {}, store: nil, stderr: StringIO.new, stdout: StringIO.new, stdin: StringIO.new(""))
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: schema,
+          context: {},
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: stdout,
+          stderr: stderr,
+          stdin: stdin,
+          runtime_context: runtime_context,
+          remote_prompt_store: store
+        )
+      end
+
+      def test_elevate_session_skips_when_when_context_gate_is_false
+        # Existing skip-via-when_context plumbing already gates each step.
+        # elevate_session piggybacks on it — the action handler is never
+        # invoked, so no navigate, no prompt, no DOM polling.
+        session = ProgrammableSession.new
+        steps = [elevate_step("when_context" => { "lookback_days" => { "gt" => 60 } })]
+        stdout = StringIO.new
+        build_elevate_runner(
+          session: session, schema: ElevateSchemaDouble.new(steps),
+          runtime_context: { lookback_days: 30 }, stdout: stdout
+        ).execute_phase("elevate")
+
+        assert_includes stdout.string, "skipped (when_context)"
+        # No Runtime.evaluate calls, no Page.navigate.
+        refute(session.commands.any? { |c| c[:method] == "Page.navigate" })
+        refute(session.commands.any? { |c| c[:method] == "Runtime.evaluate" })
+      end
+
+      def test_elevate_session_already_elevated_branch_skips_prompt
+        # Untagged branch matches first → no SCA prompt fires.
+        session = ProgrammableSession.new(present_selectors: [".transactions-list-loaded"])
+        store = FakeRemotePromptStore.new
+        stdout = StringIO.new
+        build_elevate_runner(
+          session: session, schema: ElevateSchemaDouble.new([elevate_step]),
+          store: store, stdout: stdout
+        ).execute_phase("elevate")
+
+        assert_equal 0, store.calls.size, "no operator prompt should fire when already elevated"
+        assert_includes stdout.string, ".transactions-list-loaded"
+        refute_includes stdout.string, "SCA dialog detected"
+      end
+
+      def test_elevate_session_already_elevated_via_url
+        # url_includes branch wins.
+        session = ProgrammableSession.new(current_url: "https://bank/x?elevated=true")
+        store = FakeRemotePromptStore.new
+        build_elevate_runner(
+          session: session, schema: ElevateSchemaDouble.new([elevate_step]), store: store
+        ).execute_phase("elevate")
+        assert_equal 0, store.calls.size
+      end
+
+      def test_elevate_session_sca_path_prompts_and_resolves_on_completion
+        # SCA branch matches initially. After the operator approves, the
+        # completion-signal selector (transactions-list-loaded) becomes
+        # present — simulated by swapping presented selectors after the
+        # prompt resolves.
+        session = ProgrammableSession.new(present_selectors: ["[data-element='sca-dialog']"])
+        stderr = StringIO.new
+        store = FakeRemotePromptStore.new(announce_to: stderr)
+        # When the prompt resolves, flip the world: the SCA dialog is gone
+        # and the elevated marker is up.
+        original_prompt = store.method(:prompt)
+        store.define_singleton_method(:prompt) do |**kwargs|
+          session.instance_variable_set(:@present_selectors, [".transactions-list-loaded"])
+          original_prompt.call(**kwargs)
+        end
+
+        stdout = StringIO.new
+        build_elevate_runner(
+          session: session, schema: ElevateSchemaDouble.new([elevate_step]),
+          store: store, stdout: stdout, stderr: stderr
+        ).execute_phase("elevate")
+
+        assert_equal 1, store.calls.size
+        assert_equal :confirm, store.calls.first[:kind]
+        assert_equal "Approve in app", store.calls.first[:message]
+        assert_includes stdout.string, "SCA dialog detected"
+        assert_includes stderr.string, "[freentonic][prompt]"
+      end
+
+      def test_elevate_session_navigate_to_and_trigger_selector_fire_in_order
+        session = ProgrammableSession.new(present_selectors: [".transactions-list-loaded"])
+        steps = [elevate_step(
+          "navigate_to" => "https://bank.test/elevate",
+          "trigger_selector" => "#load-more"
+        )]
+        build_elevate_runner(
+          session: session, schema: ElevateSchemaDouble.new(steps), store: FakeRemotePromptStore.new
+        ).execute_phase("elevate")
+
+        navigates = session.commands.select { |c| c[:method] == "Page.navigate" }
+        assert_equal 1, navigates.size
+        assert_equal({ url: "https://bank.test/elevate" }, navigates.first[:params])
+
+        # The trigger click goes through runtime_deep_call → Runtime.evaluate
+        # with a click expression including the selector. Easier to assert
+        # on stdout breadcrumb:
+        # (no separate field to check — trigger is logged as "trigger: ...")
+        # For belt-and-suspenders, ensure SOME Runtime.evaluate carried "#load-more".
+        evals = session.commands.select { |c| c[:method] == "Runtime.evaluate" }
+        assert(evals.any? { |c| c[:params][:expression].include?("#load-more") },
+               "expected a runtime evaluation referencing the trigger selector")
+      end
+
+      def test_elevate_session_timeout_raises_user_error
+        # No selector ever matches; default timeout: 5 from elevate_step.
+        # Runner times out and raises UserError.
+        session = ProgrammableSession.new(present_selectors: [], current_url: "https://x/")
+        runner = build_elevate_runner(
+          session: session, schema: ElevateSchemaDouble.new([elevate_step]),
+          store: FakeRemotePromptStore.new
+        )
+        # Sleep is the rate-limit between polls inside wait_for_branches.
+        # Override Kernel#sleep to no-op so the test doesn't actually wait
+        # 5 seconds. We accept that the deadline check still uses real
+        # wall time, so the loop will iterate many times before timeout.
+        # 5s is short enough to keep the test reasonable.
+        err = assert_raises(UserError) { runner.execute_phase("elevate") }
+        assert_match(/elevate_session timed out/, err.message)
+      end
+
+      def test_elevate_session_sca_branch_without_on_sca_block_raises
+        # Validator catches this at schema build time.
+        bad = elevate_step
+        bad.delete("on_sca")
+        err = assert_raises(UserError) do
+          WorkflowSchema.new(path: "/fake/test.yml", raw: {
+            "version" => 1,
+            "config" => { "key" => "test", "default_lookback_days" => 30 },
+            "pipeline" => ["elevate"],
+            "phases" => { "elevate" => [bad] }
+          })
+        end
+        assert_match(/on_match: sca but the step has no on_sca:/, err.message)
+      end
     end
   end

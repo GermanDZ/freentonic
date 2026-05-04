@@ -140,6 +140,9 @@ module Freentonic
             as: as,
             required: step.fetch("required", true)
           )
+        when "elevate_session"
+          @stdout.puts "    [yml] elevate_session"
+          elevate_session(step)
         when "capture_response_json"
           url_includes = step.fetch("url_includes")
           field = step.fetch("field")
@@ -372,6 +375,134 @@ module Freentonic
         @context[as.to_s] = header
         @context["#{as}_cookie_count"] = filtered.size
         @stdout.puts "      ✓ #{filtered.size} cookies captured"
+      end
+
+      # Composite action that drives PSD2 SCA elevation inside the live
+      # Chrome session. The bank's frontend is the only context that can
+      # mint the post-elevation session state — we trigger the elevation
+      # by interacting with the page, then capture whatever artifacts it
+      # produced (cookies, localStorage, outbound API headers) for the
+      # API extract phase to replay.
+      #
+      # Flow:
+      #   1. Optionally navigate to a URL that surfaces the trigger.
+      #   2. Optionally click trigger_selector — typically a "load more"
+      #      or extended-history button that triggers the SCA challenge.
+      #   3. Wait for one of the configured signals. Each branch is
+      #      either { selector: "..." } or { url_includes: "..." }, with
+      #      an optional on_match: tag. The branch that matches first
+      #      determines the path:
+      #        - on_match: "sca"  → SCA dialog appeared. Surface the
+      #          operator prompt; once the operator approves on their
+      #          phone, wait for the on_sca completion signals.
+      #        - any other on_match (or none) → already elevated. Done.
+      #   4. Caller's next phase captures the elevated state via
+      #      capture_cookie_header / capture_local_storage /
+      #      capture_outbound_request_headers.
+      #
+      # Gate via the existing when_context: field on the step — typical
+      # use is { lookback_days: { gt: 60 } } so short-window syncs that
+      # don't need elevation skip this entirely.
+      def elevate_session(step)
+        if (url = step["navigate_to"])
+          @stdout.puts "      navigate_to: #{url}"
+          @session.send_command("Page.navigate", { url: url })
+        end
+
+        if (trigger = step["trigger_selector"])
+          @stdout.puts "      trigger: #{trigger}"
+          click_selector(trigger, optional: true)
+        end
+
+        signals  = step.fetch("wait_for_first_of")
+        branches = signals.fetch("branches")
+        timeout  = Integer(signals.fetch("timeout", 30))
+
+        @stdout.print "      waiting for elevation signal (timeout: #{timeout}s)"
+        matched = wait_for_branches(branches, timeout: timeout)
+        @stdout.puts " → #{describe_branch(matched)}"
+
+        if matched["on_match"].to_s == "sca"
+          sca = step.fetch("on_sca") do
+            raise UserError, "elevate_session: a branch is tagged on_match: sca but the step has no on_sca: block"
+          end
+          run_sca_prompt(sca)
+        end
+      end
+
+      # Wait until any of the branches matches. A branch matches when its
+      # selector is present in the DOM, or its url_includes substring is
+      # in the current page URL. Returns the matched branch hash; raises
+      # UserError on timeout.
+      def wait_for_branches(branches, timeout:)
+        deadline = Time.now + timeout
+        last_dot = Time.now
+        while Time.now < deadline
+          branches.each do |branch|
+            return branch if branch_matches?(branch)
+          end
+          check_error_signals!
+
+          if Time.now - last_dot >= 2
+            @stdout.print "."
+            @stdout.flush if @stdout.respond_to?(:flush)
+            last_dot = Time.now
+          end
+          sleep WAIT_STEP_SECONDS
+        end
+
+        @stdout.puts
+        save_timeout_screenshot("elevate_session: #{branches.inspect}")
+        raise UserError, "elevate_session timed out waiting for any of #{branches.inspect}"
+      end
+
+      def branch_matches?(branch)
+        if (selector = branch["selector"])
+          return true if runtime_deep_call(<<~JS, selector)
+            (selector) => deepQuery(document, selector) !== null
+          JS
+        end
+        if (substring = branch["url_includes"])
+          return current_url_value.include?(substring)
+        end
+        false
+      end
+
+      def describe_branch(branch)
+        return "selector: #{branch["selector"].inspect}"  if branch["selector"]
+        return "url_includes: #{branch["url_includes"].inspect}" if branch["url_includes"]
+        branch.inspect
+      end
+
+      def run_sca_prompt(sca)
+        message         = sca.fetch("prompt")
+        completion      = sca.fetch("wait_for_first_of")
+        completion_to   = Integer(completion.fetch("timeout", 180))
+        prompt_timeout  = Integer(sca.fetch("prompt_timeout", completion_to))
+
+        @stdout.puts "      SCA dialog detected — surfacing operator prompt"
+        if stdin_is_tty?
+          @stderr.print(message)
+          @stderr.print(" [press Enter once approved] ")
+          @stderr.flush if @stderr.respond_to?(:flush)
+          begin
+            Timeout.timeout(prompt_timeout) { @stdin.gets }
+          rescue Timeout::Error
+            raise UserError, "elevate_session: timed out after #{prompt_timeout}s waiting for operator approval"
+          end
+        elsif (store = remote_prompt_store)
+          begin
+            store.prompt(kind: :confirm, message: message, mask: false, timeout_seconds: prompt_timeout)
+          rescue RemotePromptStore::Timeout
+            raise UserError, "elevate_session: timed out after #{prompt_timeout}s waiting for operator approval"
+          end
+        else
+          raise UserError, "elevate_session: SCA dialog detected but no operator channel (non-tty stdin and no FREENTONIC_RUN_DIR for remote prompts)"
+        end
+
+        @stdout.print "      waiting for elevation completion (timeout: #{completion_to}s)"
+        matched = wait_for_branches(completion.fetch("branches"), timeout: completion_to)
+        @stdout.puts " → #{describe_branch(matched)}"
       end
 
       def capture_response_header(host:, path:, header:, as:, required:)
