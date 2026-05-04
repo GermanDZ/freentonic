@@ -29,8 +29,18 @@ module Freentonic
     POLL_INTERVAL_SECONDS = 0.25
     PROMPT_ID_BYTES       = 12 # 24 hex chars; collision-safe within a run
 
-    def initialize(prompts_dir:, clock: Time)
+    # @param prompts_dir [String] absolute path to <run_dir>/prompts
+    # @param announce_to [IO, nil] when non-nil, every prompt() call writes a
+    #   `[freentonic][prompt] {...}` JSON-line to this IO *before* polling
+    #   for the response. simplefreen-invoke parses these lines out of the
+    #   runner's stderr to surface prompts in the admin UI; without an
+    #   announcement, prompts opened by a backgrounded extractor are
+    #   invisible to the operator. Pass `nil` (default) to skip announcing
+    #   — useful for unit tests and for callers that want to drive the
+    #   announcement themselves via the prompt() block argument.
+    def initialize(prompts_dir:, announce_to: nil, clock: Time)
       @prompts_dir = prompts_dir
+      @announce_to = announce_to
       @clock       = clock
     end
 
@@ -65,6 +75,7 @@ module Freentonic
       }
       write_json_atomic(request_path(prompt_id), request)
 
+      announce(prompt_id, request) if @announce_to
       yield prompt_id, request if block_given?
 
       response = poll_for_response(prompt_id, deadline: expires_at)
@@ -82,6 +93,23 @@ module Freentonic
     end
 
     private
+
+    # Emit the JSON-line announcement that simplefreen-invoke watches for
+    # on the runner's stderr. Best-effort: a broken IO must not fail the
+    # prompt itself.
+    def announce(prompt_id, request)
+      payload = {
+        "prompt_id"  => prompt_id,
+        "kind"       => request["kind"],
+        "message"    => request["message"],
+        "mask"       => request["mask"],
+        "expires_at" => request["expires_at"]
+      }
+      @announce_to.puts "[freentonic][prompt] #{JSON.generate(payload)}"
+      @announce_to.flush if @announce_to.respond_to?(:flush)
+    rescue StandardError
+      nil
+    end
 
     def ensure_dir
       return if Dir.exist?(@prompts_dir)

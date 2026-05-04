@@ -1,0 +1,202 @@
+# frozen_string_literal: true
+
+require_relative "test_helper"
+
+module Freentonic
+  class SourceHelpersTest < Minitest::Test
+    # Build a Network.responseReceived event with the given URL + headers.
+    def response_event(url:, headers:, request_id: "req-1")
+      {
+        "method" => "Network.responseReceived",
+        "params" => {
+          "requestId" => request_id,
+          "response"  => { "url" => url, "headers" => headers }
+        }
+      }
+    end
+
+    def extra_event(headers:, request_id: "req-1")
+      {
+        "method" => "Network.responseReceivedExtraInfo",
+        "params" => { "requestId" => request_id, "headers" => headers }
+      }
+    end
+
+    def test_find_response_header_returns_value_when_url_matches_host_and_path
+      events = [
+        response_event(url: "https://api.ing.ingdirect.es/saf/tpa/accesstoken/synchronize",
+                       headers: { "Authorization" => "Bearer abc" })
+      ]
+      assert_equal "Bearer abc",
+                   SourceHelpers.find_response_header(
+                     events,
+                     host: "api.ing.ingdirect.es",
+                     path: "/saf/tpa/accesstoken/synchronize",
+                     header: "Authorization"
+                   )
+    end
+
+    def test_find_response_header_is_case_insensitive_on_header_name
+      events = [response_event(url: "https://x.test/y", headers: { "authorization" => "Bearer x" })]
+      assert_equal "Bearer x",
+                   SourceHelpers.find_response_header(events, host: "x.test", path: "/y", header: "Authorization")
+    end
+
+    def test_find_response_header_returns_nil_when_url_does_not_match
+      events = [response_event(url: "https://other.test/path", headers: { "Authorization" => "Bearer x" })]
+      assert_nil SourceHelpers.find_response_header(events, host: "x.test", path: "/y", header: "Authorization")
+    end
+
+    def test_find_response_header_returns_nil_when_header_absent
+      events = [response_event(url: "https://x.test/y", headers: { "X-Other" => "value" })]
+      assert_nil SourceHelpers.find_response_header(events, host: "x.test", path: "/y", header: "Authorization")
+    end
+
+    def test_find_response_header_extra_info_wins_when_both_present
+      # Reality: Chrome sometimes scrubs Authorization on
+      # Network.responseReceived (the public-facing snapshot) while leaving
+      # the raw value on responseReceivedExtraInfo. Prefer the extra-info
+      # form when both are present, so we don't capture a redacted value.
+      events = [
+        response_event(url: "https://x.test/y", headers: { "Authorization" => "Bearer redacted" }),
+        extra_event(headers: { "Authorization" => "Bearer real" })
+      ]
+      assert_equal "Bearer real",
+                   SourceHelpers.find_response_header(events, host: "x.test", path: "/y", header: "Authorization")
+    end
+
+    def test_find_response_header_extra_info_alone_is_used
+      events = [
+        response_event(url: "https://x.test/y", headers: {}),
+        extra_event(headers: { "Authorization" => "Bearer extra-only" })
+      ]
+      assert_equal "Bearer extra-only",
+                   SourceHelpers.find_response_header(events, host: "x.test", path: "/y", header: "Authorization")
+    end
+
+    def test_find_response_header_most_recent_match_wins
+      # On a fresh-login handshake the same endpoint may be hit twice; the
+      # second response carries the live token. (Not the first.)
+      events = [
+        response_event(url: "https://x.test/y", headers: { "Authorization" => "Bearer stale" }, request_id: "r1"),
+        response_event(url: "https://x.test/y", headers: { "Authorization" => "Bearer live" }, request_id: "r2")
+      ]
+      assert_equal "Bearer live",
+                   SourceHelpers.find_response_header(events, host: "x.test", path: "/y", header: "Authorization")
+    end
+
+    def test_find_response_header_strips_whitespace
+      events = [response_event(url: "https://x.test/y", headers: { "Authorization" => "  Bearer v  " })]
+      assert_equal "Bearer v",
+                   SourceHelpers.find_response_header(events, host: "x.test", path: "/y", header: "Authorization")
+    end
+
+    def test_find_response_header_ignores_non_response_events
+      events = [
+        {
+          "method" => "Network.requestWillBeSent",
+          "params" => { "request" => { "url" => "https://x.test/y", "headers" => { "Authorization" => "Bearer wrong" } } }
+        }
+      ]
+      assert_nil SourceHelpers.find_response_header(events, host: "x.test", path: "/y", header: "Authorization")
+    end
+
+    # ── find_outbound_headers ────────────────────────────────────────
+
+    def request_event(url:, headers:, request_id: "req-1")
+      {
+        "method" => "Network.requestWillBeSent",
+        "params" => {
+          "requestId" => request_id,
+          "request"   => { "url" => url, "headers" => headers }
+        }
+      }
+    end
+
+    def request_extra_event(headers:, request_id: "req-1")
+      {
+        "method" => "Network.requestWillBeSentExtraInfo",
+        "params" => { "requestId" => request_id, "headers" => headers }
+      }
+    end
+
+    def test_find_outbound_headers_returns_only_requested_headers
+      events = [request_event(
+        url: "https://api.ing.ingdirect.es/v2/products/abc/transactions",
+        headers: {
+          "Authorization"                 => "Bearer xyz",
+          "X-ING-ExtendedSessionContext"  => "ESC-V",
+          "X-XSRF-TOKEN"                  => "XSRF-V",
+          "User-Agent"                    => "ignored"
+        }
+      )]
+      result = SourceHelpers.find_outbound_headers(
+        events,
+        host: "api.ing.ingdirect.es", path: "/v2/products/",
+        headers: %w[Authorization X-ING-ExtendedSessionContext X-XSRF-TOKEN]
+      )
+      assert_equal({
+        "Authorization"                 => "Bearer xyz",
+        "X-ING-ExtendedSessionContext"  => "ESC-V",
+        "X-XSRF-TOKEN"                  => "XSRF-V"
+      }, result)
+      refute result.key?("User-Agent")
+    end
+
+    def test_find_outbound_headers_most_recent_wins
+      events = [
+        request_event(url: "https://x.test/a/b", headers: { "Authorization" => "Bearer stale" }, request_id: "r1"),
+        request_event(url: "https://x.test/a/b", headers: { "Authorization" => "Bearer live"  }, request_id: "r2")
+      ]
+      live = SourceHelpers.find_outbound_headers(events, host: "x.test", path: "/a/b", headers: ["Authorization"])
+      assert_equal({ "Authorization" => "Bearer live" }, live)
+    end
+
+    def test_find_outbound_headers_first_match_with_most_recent_false
+      events = [
+        request_event(url: "https://x.test/a/b", headers: { "Authorization" => "Bearer first" }, request_id: "r1"),
+        request_event(url: "https://x.test/a/b", headers: { "Authorization" => "Bearer second" }, request_id: "r2")
+      ]
+      result = SourceHelpers.find_outbound_headers(
+        events, host: "x.test", path: "/a/b", headers: ["Authorization"], most_recent: false
+      )
+      assert_equal({ "Authorization" => "Bearer first" }, result)
+    end
+
+    def test_find_outbound_headers_extra_info_wins_on_collision
+      events = [
+        request_event(url: "https://x.test/y", headers: { "Authorization" => "Bearer redacted" }),
+        request_extra_event(headers: { "Authorization" => "Bearer real" })
+      ]
+      result = SourceHelpers.find_outbound_headers(events, host: "x.test", path: "/y", headers: ["Authorization"])
+      assert_equal({ "Authorization" => "Bearer real" }, result)
+    end
+
+    def test_find_outbound_headers_returns_canonical_name_spelling
+      # Even if the event's header is lowercase, the result uses the
+      # spelling the caller asked for, so consumers don't have to
+      # second-guess casing.
+      events = [request_event(url: "https://x.test/y", headers: { "authorization" => "Bearer v" })]
+      result = SourceHelpers.find_outbound_headers(events, host: "x.test", path: "/y", headers: ["Authorization"])
+      assert_equal({ "Authorization" => "Bearer v" }, result)
+    end
+
+    def test_find_outbound_headers_returns_empty_when_no_match
+      events = [request_event(url: "https://other.test/y", headers: { "Authorization" => "x" })]
+      result = SourceHelpers.find_outbound_headers(events, host: "x.test", path: "/y", headers: ["Authorization"])
+      assert_equal({}, result)
+    end
+
+    def test_find_outbound_headers_returns_empty_when_url_matches_but_no_requested_header_present
+      events = [request_event(url: "https://x.test/y", headers: { "User-Agent" => "x" })]
+      result = SourceHelpers.find_outbound_headers(events, host: "x.test", path: "/y", headers: ["Authorization"])
+      assert_equal({}, result)
+    end
+
+    def test_find_outbound_headers_strips_whitespace
+      events = [request_event(url: "https://x.test/y", headers: { "Authorization" => "  Bearer v  " })]
+      result = SourceHelpers.find_outbound_headers(events, host: "x.test", path: "/y", headers: ["Authorization"])
+      assert_equal({ "Authorization" => "Bearer v" }, result)
+    end
+  end
+end

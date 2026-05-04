@@ -389,5 +389,162 @@ module Freentonic
         })
         assert_nil schema.build_api_client({})
       end
+
+      # ── capture_response_header ───────────────────────────────────────
+
+      def valid_capture_response_header(extra = {})
+        {
+          "action" => "capture_response_header",
+          "host"   => "api.example.com",
+          "path"   => "/auth/token",
+          "header" => "Authorization",
+          "as"     => "bearer_token"
+        }.merge(extra)
+      end
+
+      def test_capture_response_header_accepts_full_step
+        # Sanity: a valid step should not raise.
+        schema_with_phase([valid_capture_response_header])
+      end
+
+      def test_capture_response_header_accepts_required_false
+        schema_with_phase([valid_capture_response_header("required" => false)])
+      end
+
+      %w[host path header as].each do |required_key|
+        define_method("test_capture_response_header_rejects_missing_#{required_key}") do
+          step = valid_capture_response_header
+          step.delete(required_key)
+          err = assert_raises(UserError) { schema_with_phase([step]) }
+          assert_includes err.message, required_key
+        end
+
+        define_method("test_capture_response_header_rejects_empty_#{required_key}") do
+          err = assert_raises(UserError) { schema_with_phase([valid_capture_response_header(required_key => "")]) }
+          assert_includes err.message, required_key
+        end
+
+        define_method("test_capture_response_header_rejects_non_string_#{required_key}") do
+          err = assert_raises(UserError) { schema_with_phase([valid_capture_response_header(required_key => 123)]) }
+          assert_includes err.message, required_key
+        end
+      end
+
+      def test_capture_response_header_rejects_non_boolean_required
+        err = assert_raises(UserError) do
+          schema_with_phase([valid_capture_response_header("required" => "yes")])
+        end
+        assert_includes err.message, "required"
+      end
+
+      # ── capture_local_storage / capture_session_storage ───────────────
+
+      def valid_capture_local_storage(extra = {})
+        {
+          "action" => "capture_local_storage",
+          "origin" => "https://ing.example",
+          "as"     => "ls"
+        }.merge(extra)
+      end
+
+      def test_capture_local_storage_accepts_minimal_step
+        schema_with_phase([valid_capture_local_storage])
+      end
+
+      def test_capture_local_storage_accepts_keys_allowlist
+        schema_with_phase([valid_capture_local_storage("keys" => ["a", "b"])])
+      end
+
+      def test_capture_local_storage_rejects_missing_origin
+        err = assert_raises(UserError) do
+          step = valid_capture_local_storage; step.delete("origin")
+          schema_with_phase([step])
+        end
+        assert_includes err.message, "origin"
+      end
+
+      def test_capture_local_storage_rejects_missing_as
+        err = assert_raises(UserError) do
+          step = valid_capture_local_storage; step.delete("as")
+          schema_with_phase([step])
+        end
+        assert_includes err.message, "as"
+      end
+
+      def test_capture_local_storage_rejects_non_array_keys
+        err = assert_raises(UserError) do
+          schema_with_phase([valid_capture_local_storage("keys" => "ExtendedSessionContext")])
+        end
+        assert_includes err.message, "keys"
+      end
+
+      def test_capture_local_storage_rejects_empty_keys_array
+        err = assert_raises(UserError) do
+          schema_with_phase([valid_capture_local_storage("keys" => [])])
+        end
+        assert_includes err.message, "keys"
+      end
+
+      def test_capture_local_storage_rejects_non_string_keys_entry
+        err = assert_raises(UserError) do
+          schema_with_phase([valid_capture_local_storage("keys" => ["ok", 123])])
+        end
+        assert_includes err.message, "keys"
+      end
+
+      def test_capture_session_storage_uses_same_validator
+        # capture_session_storage must follow the same validator path —
+        # otherwise providers could ship invalid YAML for one variant but
+        # not the other.
+        err = assert_raises(UserError) do
+          schema_with_phase([{ "action" => "capture_session_storage", "as" => "ss" }])
+        end
+        assert_includes err.message, "origin"
+      end
+
+      # ── capture_outbound_request_headers ───────────────────────────────
+
+      def valid_capture_outbound(extra = {})
+        {
+          "action"  => "capture_outbound_request_headers",
+          "host"    => "api.ing.example",
+          "path"    => "/v2/products/",
+          "headers" => ["Authorization", "X-XSRF-TOKEN"],
+          "as"      => "ing_api_headers"
+        }.merge(extra)
+      end
+
+      def test_capture_outbound_accepts_valid_step
+        schema_with_phase([valid_capture_outbound])
+      end
+
+      %w[host path as].each do |key|
+        define_method("test_capture_outbound_rejects_missing_#{key}") do
+          step = valid_capture_outbound; step.delete(key)
+          err = assert_raises(UserError) { schema_with_phase([step]) }
+          assert_includes err.message, key
+        end
+      end
+
+      def test_capture_outbound_rejects_missing_headers
+        step = valid_capture_outbound; step.delete("headers")
+        err = assert_raises(UserError) { schema_with_phase([step]) }
+        assert_includes err.message, "headers"
+      end
+
+      def test_capture_outbound_rejects_empty_headers_array
+        err = assert_raises(UserError) { schema_with_phase([valid_capture_outbound("headers" => [])]) }
+        assert_includes err.message, "headers"
+      end
+
+      def test_capture_outbound_rejects_non_string_headers_entry
+        err = assert_raises(UserError) { schema_with_phase([valid_capture_outbound("headers" => ["ok", 7])]) }
+        assert_includes err.message, "headers"
+      end
+
+      def test_capture_outbound_rejects_non_boolean_most_recent
+        err = assert_raises(UserError) { schema_with_phase([valid_capture_outbound("most_recent" => "yes")]) }
+        assert_includes err.message, "most_recent"
+      end
     end
   end
