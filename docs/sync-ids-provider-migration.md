@@ -181,6 +181,145 @@ provider.
 
 ---
 
+## Cards (via masked PAN)
+
+Cards have no IBAN, so the IBAN-slicing recipe doesn't apply. Every
+direct-bank UI surfaces a masked PAN somewhere (`**** **** **** 8619`,
+`XXXX-XXXX-XXXX-8619`, etc.) and Fintonic emits cards in the same
+`BANKID:LAST4` shape Fintonic uses for accounts. Direct providers can
+collide on the same shape by extracting the card last-4 from the masked
+PAN field and emitting:
+
+```ruby
+portable_ref = "#{bank_code}:#{last4}"
+portable_id  = portable_ref && "card:#{portable_ref}"
+```
+
+Use `card:` (not `bank:`) for `portable_id` so logs and the merge layer
+can tell at a glance that a match is on a card rather than an account.
+The hash digest is unaffected — only the human label differs.
+
+### The `pan_last4` helper
+
+`Freentonic::Providers::Helpers#pan_last4` (added in `sync-ids`) does the
+parsing once for everyone:
+
+```ruby
+pan_last4("**** **** **** 8619")   #=> "8619"
+pan_last4("XXXX-XXXX-XXXX-8619")   #=> "8619"
+pan_last4("5234567890128619")      #=> "8619"
+pan_last4("8619")                  #=> "8619"
+pan_last4(nil)                     #=> nil
+pan_last4("****")                  #=> nil   # no digits
+pan_last4("123")                   #=> nil   # <4 digits
+```
+
+Helper is available as an instance method inside any subclass of
+`NormalizerBase` (which includes `Helpers` already).
+
+### Per-provider scope
+
+#### Unicaja — `tarjeta:NNN` accounts
+
+The existing `unicaja_live:listatarjetas` payload carries the PAN. Look
+for `numerotarjeta` / `pan` / `mascarapan` (the field name varies by
+endpoint version). Wire it like this:
+
+```ruby
+last4        = pan_last4(raw_card["numerotarjeta"])  # adjust field name
+portable_ref = last4 && "2103:#{last4}"
+portable_id  = portable_ref && "card:#{portable_ref}"
+
+Builder.build_account(
+  institution: INSTITUTION,
+  source_id:   "tarjeta:#{raw_card['ppp']}",
+  currency:    raw_card["currency"],
+  name:        raw_card["alias"],
+  type:        "credit_card",
+  portable_ref: portable_ref,
+  portable_id:  portable_id,
+  # ...rest unchanged
+)
+```
+
+When `last4` is nil, `portable_ref` and `portable_id` are nil too —
+`build_account` falls back to the legacy `(institution, source_id)`
+derivation, so the account still gets a stable id, just not a
+cross-provider one.
+
+Cover credit cards now (the only card type currently normalized).
+Extend the same pattern to debit/prepaid types if they're ever added.
+
+#### ING — `ing_line__<v1id>_<line_amount>` cards
+
+The current `source_id` is a synthesized handle, which means the raw PAN
+is in scope but not currently surfaced. Find the field on the upstream
+card payload (likely `cardNumber`, `pan`, or similar — confirm against
+the recorded HAR or `record_requests` capture) and apply:
+
+```ruby
+last4        = pan_last4(raw_card["cardNumber"])  # adjust field name
+portable_ref = last4 && "1465:#{last4}"
+portable_id  = portable_ref && "card:#{portable_ref}"
+```
+
+Cover both card lines. The synthesized `source_id` stays as-is for
+back-compat in the fallback path; only the canonical id changes when
+`portable_ref` is derivable.
+
+#### Fintonic
+
+No change. Fintonic already emits `BANKID:LAST4` for cards (e.g.
+`2103:8619`, `1465:1087`, `1465:1095`) via the same `portable_ref`
+shape that accounts use. As long as `fintonic_type == "CREDITCARD"` is
+allowed past the type guard introduced in the previous round, cards
+will collide with whatever direct provider lands first.
+
+**Action item for the Fintonic provider PR**: the original migration
+guide instructed Fintonic to skip `portable_ref` for `CREDITCARD`. Flip
+that — emit `portable_ref` for credit cards too, gated on the same
+`/\A\d{4}\z/` `fintonic_product_id` check. Skip only when the
+product_id is opaque (the same edge case as accounts at banks like
+0232/2048).
+
+#### Revolut and other non-Spanish
+
+Out of scope. Revolut cards include virtual and disposable cards whose
+"PAN" semantics are different; they'd need a separate scheme. Flag if a
+masked-PAN-style key turns up while touching the normalizer.
+
+### Cross-provider regression test (per direct provider)
+
+```ruby
+def test_card_collides_with_fintonic_for_same_pan
+  unicaja = run_normalizer(card_with_pan: "**** **** **** 8619").accounts.first
+  fintonic_id = Freentonic::Canonical.account_id(
+    institution: "fintonic",
+    portable_ref: "2103:8619"
+  )
+  assert_equal fintonic_id, unicaja.id
+  assert_equal "card:2103:8619", unicaja.portable_id
+end
+
+def test_card_without_extractable_pan_falls_back
+  acct = run_normalizer(card_with_pan: nil).accounts.first
+  # Same id this provider produced before the portable_ref change for
+  # cards — pin the legacy hash here.
+  assert_equal "acc_<frozen_legacy_hash>", acct.id
+end
+
+def test_two_distinct_cards_get_distinct_ids
+  pans = ["**** **** **** 8619", "**** **** **** 1087"]
+  ids = pans.map { |p| run_normalizer(card_with_pan: p).accounts.first.id }
+  refute_equal ids[0], ids[1]
+end
+```
+
+Add the same shape on the Fintonic side: feed two normalizers the same
+synthetic payload and assert the resulting `Account.id` matches.
+
+---
+
 ## Verification — required tests in each provider repo
 
 Add to each provider's normalizer test file:
