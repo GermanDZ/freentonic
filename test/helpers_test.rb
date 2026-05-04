@@ -213,4 +213,49 @@ class HelpersTest < Minitest::Test
   def test_parse_timestamp_ms_nil
     assert_nil parse_timestamp_ms(nil)
   end
+
+  # --- pan_last4 ---
+
+  def test_pan_last4_asterisk_masked
+    assert_equal "8619", pan_last4("**** **** **** 8619")
+  end
+
+  def test_pan_last4_x_dashed
+    assert_equal "8619", pan_last4("XXXX-XXXX-XXXX-8619")
+  end
+
+  def test_pan_last4_partial_visible
+    # Some banks expose the BIN + last 4, others mix masks and digits;
+    # the helper must take the trailing 4 regardless of what's visible
+    # earlier.
+    assert_equal "8619", pan_last4("4123 56** **** 8619")
+  end
+
+  def test_pan_last4_full_pan
+    assert_equal "8619", pan_last4("5234567890128619")
+  end
+
+  def test_pan_last4_already_last4
+    assert_equal "8619", pan_last4("8619")
+  end
+
+  def test_pan_last4_nil_input
+    assert_nil pan_last4(nil)
+  end
+
+  def test_pan_last4_no_digits
+    assert_nil pan_last4("****")
+    assert_nil pan_last4("XXXX-XXXX")
+  end
+
+  def test_pan_last4_fewer_than_four_digits
+    assert_nil pan_last4("123")
+    assert_nil pan_last4("**1*")
+  end
+
+  def test_pan_last4_coerces_non_string
+    # Some upstreams hand us an Integer instead of a String for the bare
+    # last-4 case. to_s coercion should handle it without ceremony.
+    assert_equal "8619", pan_last4(8619)
+  end
 end
