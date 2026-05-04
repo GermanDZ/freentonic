@@ -59,7 +59,15 @@ module Freentonic
         assert_equal "EUR", acct.currency
         assert_nil acct.iban
         assert_nil acct.balance
+        assert_nil acct.portable_id
         assert_equal({}, acct.metadata)
+      end
+
+      def test_account_portable_id_round_trips_to_wire_shape
+        acct = Account.new(id: "acc_1", currency: "EUR",
+                           portable_id: "bank:1465:1272")
+        assert_equal "bank:1465:1272", acct.portable_id
+        assert_equal "bank:1465:1272", acct.to_h["portable_id"]
       end
 
       def test_account_rejects_unknown_keyword

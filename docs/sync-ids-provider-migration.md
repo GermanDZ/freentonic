@@ -78,7 +78,22 @@ Behavior:
 ### `Freentonic::Providers::CanonicalBuilder`
 
 `build_transaction` already accepts `source_id:` — confirm your normalizer
-passes it (most do). `build_account` gains a new `portable_ref:` kwarg.
+passes it (most do). `build_account` gains two new kwargs:
+
+- `portable_ref:` — feeds the digest. Opaque bytes; "BANKID:PRODUCTID" is
+  the convention for Spanish banks, but the framework treats it as an
+  arbitrary string.
+- `portable_id:` — denormalized human-readable companion that lands on
+  the resulting `Canonical::Account` as a first-class field (and in the
+  wire JSON under the same name). Not used for hashing. Convention is
+  `"bank:BANKID:PRODUCTID"` so logs and downstream tooling can eyeball
+  cross-source matches without re-deriving the hash. Pass it whenever
+  you pass `portable_ref:`.
+
+The two are kept independent: the framework will not derive one from the
+other. Different providers can choose different display strings for the
+same physical account; only `portable_ref` has to match for the IDs to
+collide.
 
 ---
 
@@ -105,7 +120,8 @@ Builder.build_account(
   currency:    raw_account["currency"],
   name:        raw_account["alias"],
   iban:        iban,
-  portable_ref: portable_ref,  # nil-safe; ignored when nil/blank
+  portable_ref: portable_ref,
+  portable_id:  portable_ref && "bank:#{portable_ref}",
   # ...rest unchanged
 )
 ```
@@ -135,7 +151,12 @@ portable_ref =
      raw_account["fintonic_product_id"].to_s =~ /\A\d{4}\z/
     "#{raw_account['fintonic_bank_id']}:#{raw_account['fintonic_product_id']}"
   end
+portable_id = portable_ref && "bank:#{portable_ref}"
 ```
+
+Pass both into `build_account`. When `portable_ref` is nil (CREDITCARD or
+opaque product_id), leave `portable_id` nil too — there's nothing
+useful to display for cross-source matching.
 
 **Important constraints:**
 
@@ -176,6 +197,7 @@ def test_account_with_iban_collides_with_fintonic_for_same_physical_account
     portable_ref: "1465:1272"
   )
   assert_equal fintonic_account_id, ing.id
+  assert_equal "bank:1465:1272", ing.portable_id
 end
 
 def test_account_without_iban_falls_back_to_legacy_derivation
