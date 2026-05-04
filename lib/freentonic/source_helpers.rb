@@ -80,6 +80,74 @@ module Freentonic
         [filtered, header]
       end
 
+      # Snapshot the listed headers from a recent outbound request whose
+      # URL contains both host and path. Used by the
+      # capture_outbound_request_headers workflow action to lift
+      # JS-computed auth headers (Authorization, X-XSRF-TOKEN,
+      # X-ING-ExtendedSessionContext, …) off the live session — values
+      # the frontend constructs from in-memory state that the headless
+      # extractor cannot reproduce.
+      #
+      # Walks Network.requestWillBeSent (which carries the URL +
+      # request.headers) plus Network.requestWillBeSentExtraInfo
+      # (which carries the post-CORS raw headers some Chrome versions
+      # only put there). ExtraInfo wins on collision: when both forms
+      # carry the header, prefer the raw-headers version.
+      #
+      # most_recent: true picks the latest matching request — a
+      # fresh-login handshake may dispatch several before the live
+      # values settle, and the latest is usually the one to capture.
+      # most_recent: false picks the first.
+      #
+      # Returns a Hash of header_name → value, with ONLY the headers
+      # that were actually present (missing names are absent, never nil-
+      # filled, so the caller can distinguish "absent" from "set to
+      # empty"). Returns {} when no request matched.
+      def find_outbound_headers(events, host:, path:, headers:, most_recent: true)
+        host_substr = host.to_s
+        path_substr = path.to_s
+        wanted = headers.map { |h| h.to_s.downcase }
+
+        # Per-request_id raw-headers map from ExtraInfo events.
+        extra_by_id = {}
+        events.each do |event|
+          next unless event["method"] == "Network.requestWillBeSentExtraInfo"
+          rid = event.dig("params", "requestId")
+          extra_by_id[rid] = event.dig("params", "headers") || {} if rid
+        end
+
+        matches = []
+        events.each do |event|
+          next unless event["method"] == "Network.requestWillBeSent"
+          url = event.dig("params", "request", "url").to_s
+          next unless url.include?(host_substr) && url.include?(path_substr)
+
+          base_headers  = event.dig("params", "request", "headers") || {}
+          rid           = event.dig("params", "requestId")
+          extra_headers = (rid && extra_by_id[rid]) || {}
+
+          merged = base_headers.merge(extra_headers)
+          captured = {}
+          merged.each do |key, value|
+            next unless wanted.include?(key.to_s.downcase)
+            captured[canonical_header_name(key, headers)] = value.to_s.strip
+          end
+          matches << captured unless captured.empty?
+        end
+
+        return {} if matches.empty?
+        most_recent ? matches.last : matches.first
+      end
+
+      # Return the requested-name spelling for `key` so callers reading
+      # ctx["ing_api_headers"]["Authorization"] don't have to
+      # second-guess casing.
+      def canonical_header_name(key, requested)
+        downcase_key = key.to_s.downcase
+        match = requested.find { |r| r.to_s.downcase == downcase_key }
+        match ? match.to_s : key.to_s
+      end
+
       def drain_session_events(session, iterations:, sleep_seconds:)
         iterations.times do
           sleep sleep_seconds

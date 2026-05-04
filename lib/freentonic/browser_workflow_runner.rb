@@ -163,6 +163,17 @@ module Freentonic
             is_local: false,
             required: step.fetch("required", true)
           )
+        when "capture_outbound_request_headers"
+          host    = step.fetch("host")
+          path    = step.fetch("path")
+          headers = step.fetch("headers")
+          as      = step.fetch("as")
+          @stdout.puts "    [yml] capture_outbound_request_headers: #{host}#{path} → ctx.#{as}"
+          capture_outbound_request_headers(
+            host: host, path: path, headers: headers, as: as,
+            most_recent: step.fetch("most_recent", true),
+            required: step.fetch("required", true)
+          )
         when "capture_response_json"
           url_includes = step.fetch("url_includes")
           field = step.fetch("field")
@@ -576,6 +587,26 @@ module Freentonic
 
         @context[as.to_s] = captured
         @stdout.puts "      ✓ #{captured.size} #{kind} keys captured"
+      end
+
+      def capture_outbound_request_headers(host:, path:, headers:, as:, most_recent:, required:)
+        captured = SourceHelpers.find_outbound_headers(
+          @session.pending_events,
+          host: host, path: path, headers: headers, most_recent: most_recent
+        )
+
+        if captured.empty?
+          if required
+            raise UserError, "workflow capture_outbound_request_headers: " \
+                             "no matching outbound request for #{host}#{path}"
+          end
+          return nil
+        end
+
+        @context[as.to_s] = captured
+        # Don't log header values — Authorization bearers, XSRF tokens,
+        # and JWT-shaped session contexts are exactly what this captures.
+        @stdout.puts "      ✓ #{captured.size} headers captured: #{captured.keys.join(", ")}"
       end
 
       def capture_response_header(host:, path:, header:, as:, required:)

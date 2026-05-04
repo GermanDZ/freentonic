@@ -1731,6 +1731,128 @@ module Freentonic
         assert_raises(UserError) { runner.execute_phase("capture_credentials") }
       end
 
+      # ── capture_outbound_request_headers ─────────────────────────────
+
+      def test_capture_outbound_request_headers_lifts_named_headers_from_match
+        session = FakeSession.new
+        session.pending_events << {
+          "method" => "Network.requestWillBeSent",
+          "params" => {
+            "requestId" => "req-1",
+            "request" => {
+              "url" => "https://api.ing.ingdirect.es/v2/products/abc/transactions",
+              "headers" => {
+                "Authorization"                => "Bearer post-elev",
+                "X-ING-ExtendedSessionContext" => "ESC-XXX",
+                "X-XSRF-TOKEN"                 => "XSRF-XXX",
+                "User-Agent"                   => "ignored"
+              }
+            }
+          }
+        }
+        steps = [{
+          "action" => "capture_outbound_request_headers",
+          "host"   => "api.ing.ingdirect.es",
+          "path"   => "/v2/products/",
+          "headers" => ["Authorization", "X-ING-ExtendedSessionContext", "X-XSRF-TOKEN"],
+          "as"     => "ing_api_headers"
+        }]
+        ctx = {}
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: CaptureResponseHeaderSchemaDouble.new(steps),
+          context: ctx,
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        ).execute_phase("capture_credentials")
+
+        assert_equal({
+          "Authorization"                => "Bearer post-elev",
+          "X-ING-ExtendedSessionContext" => "ESC-XXX",
+          "X-XSRF-TOKEN"                 => "XSRF-XXX"
+        }, ctx["ing_api_headers"])
+      end
+
+      def test_capture_outbound_request_headers_does_not_log_values
+        session = FakeSession.new
+        session.pending_events << {
+          "method" => "Network.requestWillBeSent",
+          "params" => {
+            "requestId" => "req-1",
+            "request" => {
+              "url" => "https://x.test/y/z",
+              "headers" => { "Authorization" => "Bearer ABSOLUTELYSECRET" }
+            }
+          }
+        }
+        steps = [{
+          "action" => "capture_outbound_request_headers",
+          "host" => "x.test", "path" => "/y/", "headers" => ["Authorization"],
+          "as" => "h"
+        }]
+        stdout = StringIO.new
+        stderr = StringIO.new
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: CaptureResponseHeaderSchemaDouble.new(steps),
+          context: {},
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: stdout, stderr: stderr
+        ).execute_phase("capture_credentials")
+
+        refute_includes stdout.string, "ABSOLUTELYSECRET"
+        refute_includes stderr.string, "ABSOLUTELYSECRET"
+        # But the header NAME should be visible to confirm capture occurred.
+        assert_includes stdout.string, "Authorization"
+      end
+
+      def test_capture_outbound_request_headers_required_false_does_not_raise_on_miss
+        session = FakeSession.new  # no pending events
+        steps = [{
+          "action" => "capture_outbound_request_headers",
+          "host" => "x.test", "path" => "/y/", "headers" => ["Authorization"],
+          "as" => "h", "required" => false
+        }]
+        ctx = {}
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: CaptureResponseHeaderSchemaDouble.new(steps),
+          context: ctx,
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        ).execute_phase("capture_credentials")
+
+        refute ctx.key?("h")
+      end
+
+      def test_capture_outbound_request_headers_required_true_raises_on_miss
+        session = FakeSession.new
+        steps = [{
+          "action" => "capture_outbound_request_headers",
+          "host" => "x.test", "path" => "/y/", "headers" => ["Authorization"],
+          "as" => "h"
+        }]
+        runner = BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: CaptureResponseHeaderSchemaDouble.new(steps),
+          context: {},
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        )
+        assert_raises(UserError) { runner.execute_phase("capture_credentials") }
+      end
+
       def test_capture_local_storage_does_not_log_values
         # JWTs / bearer tokens are exactly what this captures; stdout +
         # stderr must not contain a verbatim value, only a count.
