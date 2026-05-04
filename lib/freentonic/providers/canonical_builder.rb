@@ -72,7 +72,8 @@ module Freentonic
           account_id:      account_id,
           date:            date,
           amount:          amount,
-          raw_description: raw_description || description
+          raw_description: raw_description || description,
+          source_id:       source_id
         )
         Freentonic::Canonical::Transaction.new(
           id:              id,
