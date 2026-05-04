@@ -38,6 +38,7 @@ option tables, behaviour notes, and examples.
 | ------ | ----------- | ---- |
 | `capture_header` | Extract an HTTP header value into context | [workflow-action-capture-header.md](workflow-action-capture-header.md) |
 | `capture_cookie_header` | Build a Cookie header for a host/path and store it | [workflow-action-capture-cookie-header.md](workflow-action-capture-cookie-header.md) |
+| `capture_response_header` | Lift a header value off a matching HTTP response into context | [workflow-action-capture-response-header.md](workflow-action-capture-response-header.md) |
 | `capture_response_json` | Extract a JSON field from a response body | [workflow-action-capture-response-json.md](workflow-action-capture-response-json.md) |
 | `capture_url` | Store the current page URL into context | [workflow-action-capture-url.md](workflow-action-capture-url.md) |
 

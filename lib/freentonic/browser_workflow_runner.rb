@@ -127,6 +127,19 @@ module Freentonic
             as: as,
             required: step.fetch("required", true)
           )
+        when "capture_response_header"
+          host   = step.fetch("host")
+          path   = step.fetch("path")
+          header = step.fetch("header")
+          as     = step.fetch("as")
+          @stdout.puts "    [yml] capture_response_header: #{host}#{path} #{header} → ctx.#{as}"
+          capture_response_header(
+            host: host,
+            path: path,
+            header: header,
+            as: as,
+            required: step.fetch("required", true)
+          )
         when "capture_response_json"
           url_includes = step.fetch("url_includes")
           field = step.fetch("field")
@@ -359,6 +372,20 @@ module Freentonic
         @context[as.to_s] = header
         @context["#{as}_cookie_count"] = filtered.size
         @stdout.puts "      ✓ #{filtered.size} cookies captured"
+      end
+
+      def capture_response_header(host:, path:, header:, as:, required:)
+        value = SourceHelpers.find_response_header(@session.pending_events, host: host, path: path, header: header)
+
+        if value.nil? || value.empty?
+          raise UserError, "workflow capture_response_header found no #{header} on response for #{host}#{path}" if required
+          return nil
+        end
+
+        @context[as.to_s] = value
+        # Never log the value itself — bearer tokens, signed JWTs, and
+        # short-lived sessions are exactly what this action captures.
+        @stdout.puts "      ✓ #{header}: captured"
       end
 
       def capture_response_json(url_includes:, exclude_url:, field:, as:, retries:, interval_seconds:, required:)
