@@ -70,10 +70,23 @@ Per-entity recipes:
 
 | Helper                        | Components                                           |
 | ----------------------------- | ---------------------------------------------------- |
-| `Canonical.transaction_id`    | `account_id`, `date` (ISO), `amount` (`to_s("F")`), `raw_description` (stripped) |
-| `Canonical.account_id`        | `institution`, then `iban` if present, else `source_id` if stable, else `name` |
+| `Canonical.transaction_id`    | `(account_id, source_id)` when `source_id` is non-blank; otherwise `(account_id, date (ISO), amount (to_s("F")), raw_description (stripped))` |
+| `Canonical.account_id`        | `(portable_ref)` alone when non-blank — `institution` is intentionally excluded so two providers scraping the same physical account collide. Otherwise `(institution, first_non_empty(stable_ref, iban, source_id, name))` |
 | `Canonical.liability_id`      | `account_id`, `type`, optional sub-ref               |
 | `Canonical.investment_id`     | `account_id`, `symbol`                               |
+
+The `source_id`-preferred branch on `transaction_id` exists because two
+distinct upstream debits sharing the same `(date, amount, description)`
+on the same account otherwise collapse to one canonical id, and SimpleFIN
+clients then dedup the duplicates away. The `portable_ref` branch on
+`account_id` is the foundation for cross-provider account matching: see
+`docs/sync-ids-provider-migration.md` for the per-provider derivation
+recipes (Spanish IBAN slicing, Fintonic `bank_id:product_id`).
+
+Accounts also carry an optional `portable_id` first-class field — a
+denormalized human-readable companion to `portable_ref` (e.g.
+`"bank:1465:1272"`). It is *not* used for hashing; it lands on the
+entity and the wire JSON for human/log/debug consumption only.
 
 When inputs cannot produce a stable ID (e.g., an account with no IBAN, no
 stable source ref, and a display name the bank rotates), the helper raises

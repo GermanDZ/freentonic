@@ -38,14 +38,26 @@ module Freentonic
       # --- Entity factories ------------------------------------------------
 
       # Build a Canonical::Account. Computes id via Canonical.account_id.
+      #
+      # portable_ref, when supplied, makes the account id provider-agnostic
+      # — see Canonical.account_id for the cross-provider matching contract.
+      # Normalizers should set it whenever they can derive a stable per-
+      # account key (e.g. "BANKID:PRODUCTID" for Spanish banks lifted from
+      # the IBAN or split out by an aggregator).
+      #
+      # portable_id is the human-readable companion to portable_ref. The
+      # framework does not derive one from the other — providers pass both
+      # explicitly so they can choose conventions like "bank:1465:1272"
+      # without coupling the digest input to the display string.
       def build_account(institution:, source_id:, currency:,
                         name: nil, type: nil, iban: nil, balance: nil,
-                        metadata: {})
+                        metadata: {}, portable_ref: nil, portable_id: nil)
         id = Freentonic::Canonical.account_id(
-          institution: institution,
-          iban: iban,
-          source_id: source_id,
-          name: name
+          institution:  institution,
+          portable_ref: portable_ref,
+          iban:         iban,
+          source_id:    source_id,
+          name:         name
         )
         Freentonic::Canonical::Account.new(
           id:          id,
@@ -56,7 +68,8 @@ module Freentonic
           currency:    currency,
           iban:        iban,
           balance:     balance,
-          metadata:    metadata || {}
+          metadata:    metadata || {},
+          portable_id: portable_id
         )
       end
 
@@ -72,7 +85,8 @@ module Freentonic
           account_id:      account_id,
           date:            date,
           amount:          amount,
-          raw_description: raw_description || description
+          raw_description: raw_description || description,
+          source_id:       source_id
         )
         Freentonic::Canonical::Transaction.new(
           id:              id,

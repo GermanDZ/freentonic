@@ -173,6 +173,33 @@ module Freentonic
         nil
       end
 
+      # Extract the last 4 digits of a card number for use in a card-account
+      # portable_ref ("BANKID:LAST4"). Tolerates the masking patterns banks
+      # actually emit:
+      #
+      #   pan_last4("**** **** **** 8619")   #=> "8619"
+      #   pan_last4("XXXX-XXXX-XXXX-8619")   #=> "8619"
+      #   pan_last4("4123 56** **** 8619")   #=> "8619"
+      #   pan_last4("5234567890128619")      #=> "8619"   (full PAN)
+      #   pan_last4("8619")                  #=> "8619"   (already last-4)
+      #   pan_last4(nil)                     #=> nil
+      #   pan_last4("****")                  #=> nil      (no digits)
+      #   pan_last4("123")                   #=> nil      (<4 digits)
+      #
+      # Strategy: strip everything non-digit, take the last 4 if at least 4
+      # digits remain. Caller is responsible for passing a PAN-shaped
+      # string — this helper does not validate that the digits *are* a PAN
+      # (e.g. passing "2026-04-27" would return "0427"). When the upstream
+      # field for a given card is nil/blank/opaque, the helper returns nil
+      # and the normalizer should fall back to the source_id-based id
+      # rather than emit a portable_ref derived from garbage.
+      def pan_last4(value)
+        return nil if value.nil?
+        digits = value.to_s.gsub(/\D/, "")
+        return nil if digits.length < 4
+        digits[-4, 4]
+      end
+
       private
 
       # Walk a dotted path into a nested hash, returning nil at the first

@@ -17,8 +17,21 @@ module Freentonic
     # escaping ambiguity when joining hash components.
     UNIT_SEPARATOR = "\x1f"
 
-    # txn_<16 hex>
-    def self.transaction_id(account_id:, date:, amount:, raw_description:)
+    # txn_<16 hex>. When source_id is non-blank, hash (account_id, source_id);
+    # otherwise hash (account_id, date, amount, raw_description). Mirrors how
+    # Canonical.account_id prefers iban/source_id over name.
+    #
+    # Without the source_id branch, two distinct upstream transactions sharing
+    # the same (date, amount, description) on the same account collapse to
+    # one id and SimpleFIN clients dedup the duplicates away (real bug seen
+    # with ING Kepler debits on 2026-05-04).
+    def self.transaction_id(account_id:, date:, amount:, raw_description:,
+                            source_id: nil)
+      sid = source_id.to_s.strip
+      unless sid.empty?
+        return Ids.digest("txn_", [account_id.to_s, sid])
+      end
+
       components = [
         account_id.to_s,
         Ids.date_component(date),
@@ -28,9 +41,32 @@ module Freentonic
       Ids.digest("txn_", components)
     end
 
-    # acc_<16 hex>. Picks the first non-empty of: stable_ref, iban,
-    # source_id, name. Raises UnstableIdError if none are usable.
-    def self.account_id(institution:, iban: nil, source_id: nil, name: nil, stable_ref: nil)
+    # acc_<16 hex>.
+    #
+    # When portable_ref is non-blank, it is the *only* input to the digest
+    # — institution is intentionally excluded so two providers scraping the
+    # same physical account (e.g. ING via direct provider and Fintonic via
+    # aggregator) collide on the same acc_<hex>. The portable_ref is a
+    # provider-agnostic key derived from the account itself; for Spanish
+    # banks the convention is "BANKID:PRODUCTID" — the 4-digit CCC bank
+    # code and the last 4 digits of the account number. Both can be lifted
+    # from an IBAN (positions 5–8 and the trailing 4 of the BBAN) or read
+    # directly from aggregator payloads that already split them out.
+    #
+    # When portable_ref is absent, falls back to (institution, ref) where
+    # ref is the first non-empty of stable_ref, iban, source_id, name.
+    # Used for accounts where no portable key exists — cash, brokerage,
+    # aggregator-only banks whose product_ids are opaque hashes.
+    #
+    # Raises UnstableIdError if neither portable_ref nor any fallback ref
+    # is usable.
+    def self.account_id(institution:, portable_ref: nil, iban: nil,
+                        source_id: nil, name: nil, stable_ref: nil)
+      portable = portable_ref.to_s.strip if portable_ref
+      if portable && !portable.empty?
+        return Ids.digest("acc_", [portable])
+      end
+
       ref = [stable_ref, iban, source_id, name]
         .map { |v| v.to_s.strip if v }
         .find { |v| v && !v.empty? }
@@ -38,8 +74,8 @@ module Freentonic
       if ref.nil?
         raise UnstableIdError,
               "Canonical.account_id(institution: #{institution.inspect}) " \
-              "needs at least one of iban:, source_id:, name:, or stable_ref: " \
-              "to produce a stable ID"
+              "needs at least one of portable_ref:, iban:, source_id:, name:, " \
+              "or stable_ref: to produce a stable ID"
       end
 
       Ids.digest("acc_", [institution.to_s, ref])

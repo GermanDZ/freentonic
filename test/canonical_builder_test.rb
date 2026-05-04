@@ -65,6 +65,57 @@ class CanonicalBuilderTest < Minitest::Test
     assert_equal({ "ing_product_type" => 20 }, acct.metadata)
   end
 
+  def test_build_account_portable_ref_collides_cross_provider
+    # The simulated end-to-end check: two normalizers (a direct provider
+    # and an aggregator) produce identical Account.id for the same physical
+    # account when both pass the same portable_ref derived from their
+    # respective payloads.
+    direct = Builder.build_account(
+      institution: "ing", source_id: "ing-uuid-aaa", currency: "EUR",
+      name: "Cuenta Naranja", iban: "ES5914650100981714391272",
+      portable_ref: "1465:1272"
+    )
+    aggregator = Builder.build_account(
+      institution: "fintonic", source_id: "fintonic-id-zzz", currency: "EUR",
+      name: "ING Cuenta Naranja",
+      portable_ref: "1465:1272"
+    )
+    assert_equal direct.id, aggregator.id
+    # Other fields stay provider-specific — the collision is on id only.
+    assert_equal "ing-uuid-aaa",      direct.source_id
+    assert_equal "fintonic-id-zzz",   aggregator.source_id
+  end
+
+  def test_build_account_portable_id_is_independent_of_portable_ref
+    # Providers pass both: portable_ref drives the digest, portable_id is
+    # the human-readable companion. Hash collides on portable_ref alone,
+    # even when the two providers chose different display strings.
+    a = Builder.build_account(
+      institution: "ing", source_id: "ing-uuid", currency: "EUR",
+      portable_ref: "1465:1272", portable_id: "bank:1465:1272"
+    )
+    b = Builder.build_account(
+      institution: "fintonic", source_id: "ftc-id", currency: "EUR",
+      portable_ref: "1465:1272", portable_id: "ES_1465_1272"
+    )
+    assert_equal a.id, b.id
+    assert_equal "bank:1465:1272", a.portable_id
+    assert_equal "ES_1465_1272",   b.portable_id
+  end
+
+  def test_build_account_portable_id_defaults_to_nil
+    acct = Builder.build_account(institution: "ing", source_id: "p", currency: "EUR")
+    assert_nil acct.portable_id
+  end
+
+  def test_build_account_without_portable_ref_keeps_legacy_id
+    # Back-compat for accounts that can't surface a portable key.
+    a = Builder.build_account(institution: "ing", source_id: "p", currency: "EUR")
+    b = Builder.build_account(institution: "ing", source_id: "p", currency: "EUR",
+                              portable_ref: nil)
+    assert_equal a.id, b.id
+  end
+
   def test_build_account_id_is_deterministic
     args = { institution: "ing", source_id: "p", currency: "EUR" }
     a = Builder.build_account(**args)
@@ -100,6 +151,32 @@ class CanonicalBuilderTest < Minitest::Test
     }
     assert_equal Builder.build_transaction(**args).id,
                  Builder.build_transaction(**args).id
+  end
+
+  def test_build_transaction_source_id_disambiguates_same_day_duplicates
+    base = {
+      account_id: "acc_1", amount: BigDecimal("-680"), currency: "EUR",
+      date: Date.new(2026, 5, 4), raw_description: "KEPLER"
+    }
+    a = Builder.build_transaction(**base, source_id: "v1id-aaaa")
+    b = Builder.build_transaction(**base, source_id: "v1id-bbbb")
+    refute_equal a.id, b.id
+    assert_equal "v1id-aaaa", a.source_id
+    assert_equal "v1id-bbbb", b.source_id
+  end
+
+  def test_build_transaction_blank_source_id_uses_legacy_derivation
+    # Mixed presence is fine: rows without a source_id still get a stable id
+    # from (account_id, date, amount, raw_description).
+    no_source = Builder.build_transaction(
+      account_id: "acc_1", amount: BigDecimal("-680"), currency: "EUR",
+      date: Date.new(2026, 5, 4), raw_description: "KEPLER"
+    )
+    blank_source = Builder.build_transaction(
+      account_id: "acc_1", amount: BigDecimal("-680"), currency: "EUR",
+      date: Date.new(2026, 5, 4), raw_description: "KEPLER", source_id: ""
+    )
+    assert_equal no_source.id, blank_source.id
   end
 
   def test_build_transaction_id_falls_back_to_description_when_raw_missing
