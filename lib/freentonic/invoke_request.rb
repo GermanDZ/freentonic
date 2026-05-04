@@ -46,7 +46,7 @@ module Freentonic
 
     attr_reader :run_id, :profile_key, :timeout_sec, :lookback, :workflow_path,
                 :credentials_inline, :credentials_file, :export, :chrome,
-                :vnc_password, :interactive
+                :vnc_password, :interactive, :recording
 
     # @param body [Hash] parsed JSON request
     # @param workflows_dir [String] absolute path to the workflows root
@@ -70,12 +70,16 @@ module Freentonic
       @profile_key = parse_profile_key
       @credentials_inline, @credentials_file = parse_credentials
       @interactive = parse_interactive
-      # Interactive (browse) mode short-circuits the engine at Connect,
-      # so no exporter ever runs. Skip export parsing entirely so a
-      # client that always ships an `export` block (e.g. simplefreen)
-      # can flip `interactive: true` without also having to scrub the
-      # otherwise-required exporter fields.
-      @export = @interactive ? nil : parse_export
+      @recording   = parse_recording
+      if @recording && @interactive
+        raise InvokeError.new(:bad_request, "recording and interactive are mutually exclusive — pick one")
+      end
+      # Interactive (browse) and recording modes both short-circuit the
+      # engine at Connect, so no exporter ever runs. Skip export parsing
+      # entirely so a client that always ships an `export` block (e.g.
+      # simplefreen) can flip either flag without also having to scrub
+      # the otherwise-required exporter fields.
+      @export = (@interactive || @recording) ? nil : parse_export
       @timeout_sec = parse_timeout
       @lookback = parse_lookback
       @chrome = parse_chrome
@@ -310,6 +314,24 @@ module Freentonic
       return false if value.nil?
       unless [true, false].include?(value)
         raise InvokeError.new(:bad_request, "interactive must be boolean")
+      end
+      value
+    end
+
+    # Recording-mode flag. Like interactive (the engine short-circuits
+    # at Connect and idles until SIGTERM), but Chrome is launched on
+    # the CDP path with the standard webdriver mask, and freentonic
+    # injects a probe script that captures the operator's click /
+    # change / submit / navigate events to <run_dir>/recording.jsonl.
+    # Used to bootstrap or repair a workflow YAML by walking the bank's
+    # UI by hand and reading off the actual selectors. NOT meant for
+    # production syncs — recording opens a CDP port that anti-bot
+    # heuristics may still flag despite the mask.
+    def parse_recording
+      value = @body["recording"]
+      return false if value.nil?
+      unless [true, false].include?(value)
+        raise InvokeError.new(:bad_request, "recording must be boolean")
       end
       value
     end

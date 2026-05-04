@@ -43,6 +43,7 @@ module Freentonic
       404 => "Not Found",
       405 => "Method Not Allowed",
       409 => "Conflict",
+      410 => "Gone",
       413 => "Payload Too Large",
       416 => "Range Not Satisfiable",
       422 => "Unprocessable Entity",
@@ -52,6 +53,7 @@ module Freentonic
     }.freeze
 
     RUN_ID_PATTERN     = /\A[A-Za-z0-9_\-:.]{1,64}\z/.freeze
+    PROMPT_ID_PATTERN  = /\Ap_[A-Fa-f0-9]{4,64}\z/.freeze
     LOG_CHUNK_BYTES    = 64 * 1024
 
     def initialize(
@@ -204,6 +206,35 @@ module Freentonic
       if (match = path.match(%r{\A/runs/([^/]+)/log\z}))
         if request.method == "GET"
           handle_log(client, request, match[1])
+        else
+          write_response(client, 405, { "error" => "method not allowed" })
+        end
+        return
+      end
+
+      if (match = path.match(%r{\A/runs/([^/]+)/recording\z}))
+        if request.method == "GET"
+          handle_recording(client, request, match[1])
+        else
+          write_response(client, 405, { "error" => "method not allowed" })
+        end
+        return
+      end
+
+      if (match = path.match(%r{\A/runs/([^/]+)/prompts\z}))
+        if request.method == "GET"
+          status, body = handle_list_prompts(request, match[1])
+          write_response(client, status, body)
+        else
+          write_response(client, 405, { "error" => "method not allowed" })
+        end
+        return
+      end
+
+      if (match = path.match(%r{\A/runs/([^/]+)/prompts/([^/]+)\z}))
+        if request.method == "POST"
+          status, body = handle_submit_prompt(request, match[1], match[2])
+          write_response(client, status, body)
         else
           write_response(client, 405, { "error" => "method not allowed" })
         end
@@ -499,6 +530,53 @@ module Freentonic
       # Client went away mid-stream. Not our problem.
     end
 
+    # GET /runs/{run_id}/recording
+    #
+    # Serves <run_dir>/recording.jsonl as text/plain. No Range support
+    # — recordings are short (a single browse session, on the order of
+    # tens of KB) and the simplefreen UI parses the whole thing in one
+    # shot. 404 if no recording exists for this run_id (i.e. the run
+    # was not started in recording mode, or never produced any
+    # events).
+    def handle_recording(client, req, run_id)
+      unless authenticated?(req)
+        return write_response(client, 401, { "error" => "missing or invalid bearer token" })
+      end
+      unless run_id =~ RUN_ID_PATTERN
+        return write_response(client, 404, { "error" => "run_id not found" })
+      end
+
+      file_path = File.join(@runner.runs_dir, run_id, "recording.jsonl")
+      unless File.file?(file_path)
+        return write_response(client, 404, { "error" => "recording not found for run_id=#{run_id}" })
+      end
+
+      # Same realpath escape guard as handle_log — defends against any
+      # symlink shenanigans inside the runs dir.
+      begin
+        runs_real = File.realpath(@runner.runs_dir)
+        file_real = File.realpath(file_path)
+      rescue Errno::ENOENT
+        return write_response(client, 404, { "error" => "recording not found" })
+      end
+      unless file_real.start_with?(runs_real + File::SEPARATOR)
+        return write_response(client, 404, { "error" => "recording path escapes runs dir" })
+      end
+
+      body = File.binread(file_path)
+      headers = [
+        "HTTP/1.1 200 OK",
+        "Content-Type: application/x-ndjson; charset=utf-8",
+        "Content-Length: #{body.bytesize}",
+        "Cache-Control: no-store",
+        "Connection: close"
+      ]
+      client.write(headers.join("\r\n") + "\r\n\r\n")
+      client.write(body) unless body.empty?
+    rescue Errno::EPIPE, Errno::ECONNRESET
+      # Client went away. Not our problem.
+    end
+
     # Returns:
     #   nil              — no Range header (client wants the whole file)
     #   [first, last]    — inclusive byte range, 0-indexed
@@ -577,6 +655,141 @@ module Freentonic
         "\r\n" \
         "#{body}"
       )
+    end
+
+    # GET /runs/{run_id}/prompts
+    #
+    # Returns 200 with the list of prompts whose request file exists and
+    # whose response file does not. Used by HTTP clients to discover when
+    # a workflow is paused waiting for an out-of-band 2FA / SMS code.
+    def handle_list_prompts(req, run_id)
+      return unauthorized unless authenticated?(req)
+      return [404, { "error" => "run_id not found" }] unless run_id =~ RUN_ID_PATTERN
+
+      prompts_dir = run_subpath(run_id, "prompts")
+      return [200, { "run_id" => run_id, "prompts" => [] }] unless prompts_dir && Dir.exist?(prompts_dir)
+
+      pending = []
+      Dir.each_child(prompts_dir).sort.each do |name|
+        next unless name.end_with?(".request.json")
+        prompt_id = name.sub(/\.request\.json\z/, "")
+        next unless prompt_id =~ PROMPT_ID_PATTERN
+        response_file = File.join(prompts_dir, "#{prompt_id}.response.json")
+        next if File.exist?(response_file)
+
+        request_path = File.join(prompts_dir, name)
+        begin
+          payload = JSON.parse(File.read(request_path))
+        rescue StandardError
+          next
+        end
+        pending << {
+          "prompt_id"  => payload["prompt_id"],
+          "kind"       => payload["kind"],
+          "message"    => payload["message"],
+          "mask"       => payload["mask"],
+          "created_at" => payload["created_at"],
+          "expires_at" => payload["expires_at"]
+        }
+      end
+
+      [200, { "run_id" => run_id, "prompts" => pending }]
+    end
+
+    # POST /runs/{run_id}/prompts/{prompt_id}
+    #
+    # Body: { "value": "..." } for kind=input, or {} for kind=confirm.
+    # 204 on success, 404 if unknown, 409 if already answered, 410 if
+    # expired, 400 on shape errors.
+    def handle_submit_prompt(req, run_id, prompt_id)
+      return unauthorized unless authenticated?(req)
+      return [404, { "error" => "run_id not found" }] unless run_id =~ RUN_ID_PATTERN
+      return [404, { "error" => "prompt_id not found" }] unless prompt_id =~ PROMPT_ID_PATTERN
+
+      prompts_dir = run_subpath(run_id, "prompts")
+      return [404, { "error" => "no prompts directory for run_id=#{run_id}" }] unless prompts_dir && Dir.exist?(prompts_dir)
+
+      request_path  = File.join(prompts_dir, "#{prompt_id}.request.json")
+      response_path = File.join(prompts_dir, "#{prompt_id}.response.json")
+
+      return [404, { "error" => "prompt not found" }] unless File.file?(request_path)
+      return [409, { "error" => "prompt already answered" }] if File.exist?(response_path)
+
+      begin
+        request_payload = JSON.parse(File.read(request_path))
+      rescue StandardError
+        return [500, { "error" => "could not read prompt request" }]
+      end
+
+      if (expires_at = request_payload["expires_at"])
+        begin
+          if Time.iso8601(expires_at) < Time.now
+            return [410, { "error" => "prompt expired" }]
+          end
+        rescue ArgumentError
+          # malformed expires_at; treat as not-expired and let the runner's
+          # own deadline catch it. We avoid 500-ing on a stale-on-disk file.
+        end
+      end
+
+      body = parse_json_body(req) || {}
+
+      response_payload = { "prompt_id" => prompt_id, "submitted_at" => Time.now.utc.iso8601 }
+      case request_payload["kind"]
+      when "input"
+        value = body["value"]
+        unless value.is_a?(String) && !value.empty?
+          return [400, { "error" => "missing or empty value for input prompt" }]
+        end
+        response_payload["value"] = value
+      when "confirm"
+        response_payload["confirmed"] = true
+      else
+        return [500, { "error" => "unknown prompt kind in stored request" }]
+      end
+
+      tmp = "#{response_path}.tmp.#{Process.pid}.#{rand(1 << 32)}"
+      begin
+        File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |f|
+          f.write(JSON.generate(response_payload))
+        end
+        # rename(2) fails if the destination already exists on most
+        # filesystems? Actually POSIX rename overwrites. We've already
+        # checked above (and the runner consumes single-shot), so a race
+        # against a second concurrent POST is the only way two writes
+        # collide; the second overwrite is harmless because the value
+        # is the same shape, but we still want single-use semantics.
+        # File.link gives us atomic "fail if exists":
+        begin
+          File.link(tmp, response_path)
+          File.unlink(tmp)
+        rescue Errno::EEXIST
+          File.unlink(tmp) rescue nil
+          return [409, { "error" => "prompt already answered" }]
+        end
+      rescue StandardError => e
+        File.unlink(tmp) rescue nil
+        log_exception("submit_prompt", e)
+        return [500, { "error" => "could not record prompt response" }]
+      end
+
+      [200, { "ok" => true, "prompt_id" => prompt_id }]
+    end
+
+    # Resolve <runs_dir>/<run_id>/<sub> with a realpath escape guard.
+    # Returns nil if the path doesn't exist or escapes the runs root.
+    def run_subpath(run_id, sub)
+      return nil unless run_id =~ RUN_ID_PATTERN
+      candidate = File.join(@runner.runs_dir, run_id, sub)
+      return nil unless File.exist?(candidate)
+      begin
+        runs_real = File.realpath(@runner.runs_dir)
+        real      = File.realpath(candidate)
+      rescue Errno::ENOENT
+        return nil
+      end
+      return nil unless real == runs_real || real.start_with?(runs_real + File::SEPARATOR)
+      candidate
     end
 
     # POST /profiles/prune

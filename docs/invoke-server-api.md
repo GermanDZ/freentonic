@@ -15,6 +15,8 @@ For deployment and container setup, see
 | `POST` | `/invoke` | Run one workflow end-to-end. Blocks until it finishes. |
 | `POST` | `/cancel/{run_id}` | Best-effort SIGTERM to an in-flight invoke. |
 | `GET` | `/runs/{run_id}/log` | Stream (or `Range`-poll) a run's log file. |
+| `GET` | `/runs/{run_id}/prompts` | List interactive prompts (2FA / SMS) waiting for a value. |
+| `POST` | `/runs/{run_id}/prompts/{prompt_id}` | Submit the value for a pending prompt. |
 | `POST` | `/profiles/prune` | Delete one or more Chrome profile directories. |
 
 Base URL on the host that runs the container: `http://127.0.0.1:7878`
@@ -397,6 +399,117 @@ The run is considered finished from the caller's perspective once
 `POST /invoke` returns (the blocking call). After that, the log file
 is stable and `Range` isn't strictly necessary — but it's the same
 code path.
+
+---
+
+## `GET /runs/{run_id}/prompts` and `POST /runs/{run_id}/prompts/{prompt_id}`
+
+Out-of-band fulfillment of interactive prompts that the workflow would
+otherwise read from the operator's terminal — typically the SMS / OTP
+code entered with `prompt_stdin_and_fill`, or the manual approval
+waited for with `pause` after a 2FA push notification.
+
+In CLI mode these actions block on stdin. In server mode there is no
+TTY, so the runner instead writes a request file under
+`<runs_dir>/<run_id>/prompts/<prompt_id>.request.json` and polls for
+the matching response file. These two endpoints are the API used by
+HTTP clients to discover and answer those prompts.
+
+### Discovering pending prompts
+
+```
+GET /runs/{run_id}/prompts
+Authorization: Bearer <token>
+```
+
+Returns 200 with the list of prompts the runner is currently waiting
+on. `prompts: []` means nothing is pending (either the run is making
+progress on its own, or the run hasn't reached a prompt yet, or it has
+finished). 404 only when the `run_id` itself is malformed; an unknown
+or finished `run_id` returns 200 with an empty list.
+
+```json
+{
+  "run_id": "2026-04-30T12-34-56Z-abc",
+  "prompts": [
+    {
+      "prompt_id":  "p_2c54ab83de40912a",
+      "kind":       "input",
+      "message":    "Enter the SMS code: ",
+      "mask":       false,
+      "created_at": "2026-04-30T12:35:18Z",
+      "expires_at": "2026-04-30T12:40:18Z"
+    }
+  ]
+}
+```
+
+`kind` is one of:
+
+- `input` — the workflow is waiting for a string. Submit it under
+  `value` (typically a 6-digit OTP code).
+- `confirm` — the workflow is paused waiting for a manual approval
+  (operator pressed the push notification on their phone). Submit an
+  empty body.
+
+`mask: true` is an advisory hint that the value is sensitive and
+should be entered into a masked field on the operator UI; the server
+treats `mask: true` and `mask: false` identically.
+
+### Submitting a value
+
+```
+POST /runs/{run_id}/prompts/{prompt_id}
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"value": "123456"}      # for kind=input
+{}                       # for kind=confirm
+```
+
+Returns 200 on success:
+
+```json
+{ "ok": true, "prompt_id": "p_2c54ab83de40912a" }
+```
+
+Error codes:
+
+- `400` — body has no `value` for an `input`-kind prompt, or `value`
+  is empty.
+- `404` — unknown `run_id`, unknown `prompt_id`, or already consumed
+  by the runner (the request file is gone). A second client racing to
+  answer a prompt that was just consumed will see this.
+- `409` — a response was already submitted for this prompt. Single-use.
+- `410` — the prompt's `expires_at` has passed; the runner will fail
+  with a `UserError` shortly even if you POST now.
+
+### Log marker
+
+The runner also emits a structured advisory line on stderr (which goes
+into the run log) just before the request file is written:
+
+```
+[freentonic][prompt] {"prompt_id":"p_2c54ab83de40912a","kind":"input","message":"Enter the SMS code: ","mask":false,"expires_at":"2026-04-30T12:40:18Z"}
+```
+
+The line never contains the response value. It's useful for humans
+tailing the log, but **HTTP clients should poll
+`GET /runs/{run_id}/prompts` rather than parse log output** — the API
+is the contract.
+
+### End-to-end pattern
+
+While `POST /invoke` is blocking, run a small companion goroutine /
+thread that polls every ~500 ms:
+
+1. `GET /runs/{run_id}/prompts`
+2. If `prompts` is non-empty, surface the message to the operator,
+   collect the value, then `POST /runs/{run_id}/prompts/{prompt_id}`.
+3. Repeat until the main `POST /invoke` returns.
+
+Combine with `Range`-polling on `/runs/{run_id}/log` if you want to
+stream the run's progress to the operator at the same time.
 
 ---
 

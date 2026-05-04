@@ -95,6 +95,10 @@ module Freentonic
     def run(request, &on_start)
       run_dir = File.join(@runs_dir, request.run_id)
       FileUtils.mkdir_p(run_dir, mode: 0o750)
+      # Rendezvous directory for out-of-band prompts (2FA / SMS code entry).
+      # Pre-created so the server's GET /runs/{run_id}/prompts can return an
+      # empty list immediately without racing the subprocess startup.
+      FileUtils.mkdir_p(File.join(run_dir, "prompts"), mode: 0o700)
 
       chrome_profile_dir = File.join(@chrome_profile_root, request.profile_key)
       FileUtils.mkdir_p(chrome_profile_dir, mode: 0o750)
@@ -204,12 +208,13 @@ module Freentonic
       argv << "--isolated" if request.chrome["isolated"]
       argv << "--headless" if request.chrome["headless"]
       argv << "--interactive" if request.interactive
+      argv << "--recording"   if request.recording
 
-      # Skip exporter argv plumbing in interactive (browse) mode — the
-      # engine short-circuits at Connect, so no exporter ever fires.
-      # Pushing --export with no scrape output would fail CLI
-      # validation downstream.
-      if (export = request.export) && !request.interactive
+      # Skip exporter argv plumbing in interactive (browse) and
+      # recording modes — both short-circuit the engine at Connect, so
+      # no exporter ever fires. Pushing --export with no scrape output
+      # would fail CLI validation downstream.
+      if (export = request.export) && !request.interactive && !request.recording
         argv.push("--export", export["mode"])
         case export["mode"]
         when "http"

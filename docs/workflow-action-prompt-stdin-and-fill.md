@@ -30,15 +30,26 @@ exists only for the duration of this single fill.
 
 ## Behaviour
 
-- Requires an interactive TTY. Raises `UserError` if stdin is not a
-  TTY (prevents silently consuming piped input).
-- Prints the prompt to stderr, reads one line from stdin.
+- When stdin is a TTY: prints the prompt to stderr and reads one line
+  from stdin (CLI mode).
+- When stdin is not a TTY but `FREENTONIC_RUN_DIR` is set (which the
+  invoke server populates automatically): falls back to the [remote
+  prompt protocol](invoke-server-api.md#get-runsrun_idprompts-and-post-runsrun_idpromptsprompt_id).
+  The runner writes a request file under `<run_dir>/prompts/`; an HTTP
+  client discovers it via `GET /runs/{run_id}/prompts` and submits the
+  value via `POST /runs/{run_id}/prompts/{prompt_id}`. Same YAML, no
+  changes needed for server vs. CLI.
+- When neither a TTY nor `FREENTONIC_RUN_DIR` is available, raises
+  `UserError` (prevents silently consuming piped input).
 - Raises `UserError` if the input is empty or the timeout expires.
 - Types the value using the same CDP keystroke simulation as
   [`fill`](workflow-action-fill.md) — never interpolated into JS.
 - If `submit_selector` is set, clicks that element after filling.
 - Logs `[yml] prompt_stdin_and_fill: filled <selector>` — never logs
-  the captured value or its length.
+  the captured value or its length. In server mode, also emits one
+  `[freentonic][prompt] {…json…}` advisory line on stderr so humans
+  tailing the log see why the run paused; that line never contains
+  the value.
 
 ## Schema validation
 
