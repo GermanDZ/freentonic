@@ -17,8 +17,21 @@ module Freentonic
     # escaping ambiguity when joining hash components.
     UNIT_SEPARATOR = "\x1f"
 
-    # txn_<16 hex>
-    def self.transaction_id(account_id:, date:, amount:, raw_description:)
+    # txn_<16 hex>. When source_id is non-blank, hash (account_id, source_id);
+    # otherwise hash (account_id, date, amount, raw_description). Mirrors how
+    # Canonical.account_id prefers iban/source_id over name.
+    #
+    # Without the source_id branch, two distinct upstream transactions sharing
+    # the same (date, amount, description) on the same account collapse to
+    # one id and SimpleFIN clients dedup the duplicates away (real bug seen
+    # with ING Kepler debits on 2026-05-04).
+    def self.transaction_id(account_id:, date:, amount:, raw_description:,
+                            source_id: nil)
+      sid = source_id.to_s.strip
+      unless sid.empty?
+        return Ids.digest("txn_", [account_id.to_s, sid])
+      end
+
       components = [
         account_id.to_s,
         Ids.date_component(date),

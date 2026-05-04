@@ -47,6 +47,50 @@ module Freentonic
         refute_equal id1, id2
       end
 
+      def test_transaction_id_distinguishes_distinct_source_ids
+        # Repro: two ING Kepler debits on the same date/amount/desc used to
+        # collapse to a single id and get deduped by SimpleFIN clients.
+        base = {
+          account_id: "acc_1", date: "2026-05-04", amount: "-680",
+          raw_description: "KEPLER"
+        }
+        id1 = Canonical.transaction_id(**base, source_id: "v1id-aaaa")
+        id2 = Canonical.transaction_id(**base, source_id: "v1id-bbbb")
+        refute_equal id1, id2
+        assert_match(/\Atxn_[0-9a-f]{16}\z/, id1)
+        assert_match(/\Atxn_[0-9a-f]{16}\z/, id2)
+      end
+
+      def test_transaction_id_falls_back_to_legacy_derivation_when_source_id_blank
+        # Same-provider mixed presence: rows without a source_id keep hashing
+        # off the (account_id, date, amount, raw_description) tuple.
+        legacy = Canonical.transaction_id(
+          account_id: "a", date: "2026-01-01", amount: "1", raw_description: "x"
+        )
+        [nil, "", "   "].each do |blank|
+          assert_equal legacy,
+                       Canonical.transaction_id(
+                         account_id: "a", date: "2026-01-01",
+                         amount: "1", raw_description: "x", source_id: blank
+                       )
+        end
+      end
+
+      def test_transaction_id_source_id_branch_ignores_other_components
+        # When source_id wins, date/amount/desc don't enter the hash — so a
+        # later sync that re-fetches the same upstream row with a corrected
+        # date or cleaned description still produces the same canonical id.
+        a = Canonical.transaction_id(
+          account_id: "acc_1", date: "2026-05-04", amount: "-680",
+          raw_description: "KEPLER", source_id: "v1id-aaaa"
+        )
+        b = Canonical.transaction_id(
+          account_id: "acc_1", date: "2026-05-05", amount: "-681",
+          raw_description: "KEPLER CORRECTED", source_id: "v1id-aaaa"
+        )
+        assert_equal a, b
+      end
+
       def test_transaction_id_handles_missing_date
         assert_match(/\Atxn_[0-9a-f]{16}\z/,
                      Canonical.transaction_id(account_id: "a", date: nil,

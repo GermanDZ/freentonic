@@ -102,6 +102,32 @@ class CanonicalBuilderTest < Minitest::Test
                  Builder.build_transaction(**args).id
   end
 
+  def test_build_transaction_source_id_disambiguates_same_day_duplicates
+    base = {
+      account_id: "acc_1", amount: BigDecimal("-680"), currency: "EUR",
+      date: Date.new(2026, 5, 4), raw_description: "KEPLER"
+    }
+    a = Builder.build_transaction(**base, source_id: "v1id-aaaa")
+    b = Builder.build_transaction(**base, source_id: "v1id-bbbb")
+    refute_equal a.id, b.id
+    assert_equal "v1id-aaaa", a.source_id
+    assert_equal "v1id-bbbb", b.source_id
+  end
+
+  def test_build_transaction_blank_source_id_uses_legacy_derivation
+    # Mixed presence is fine: rows without a source_id still get a stable id
+    # from (account_id, date, amount, raw_description).
+    no_source = Builder.build_transaction(
+      account_id: "acc_1", amount: BigDecimal("-680"), currency: "EUR",
+      date: Date.new(2026, 5, 4), raw_description: "KEPLER"
+    )
+    blank_source = Builder.build_transaction(
+      account_id: "acc_1", amount: BigDecimal("-680"), currency: "EUR",
+      date: Date.new(2026, 5, 4), raw_description: "KEPLER", source_id: ""
+    )
+    assert_equal no_source.id, blank_source.id
+  end
+
   def test_build_transaction_id_falls_back_to_description_when_raw_missing
     # Should not crash and should still produce a txn_ id when raw_description is nil.
     tx = Builder.build_transaction(
