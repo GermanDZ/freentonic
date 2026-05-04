@@ -501,5 +501,50 @@ module Freentonic
         end
         assert_includes err.message, "origin"
       end
+
+      # ── capture_outbound_request_headers ───────────────────────────────
+
+      def valid_capture_outbound(extra = {})
+        {
+          "action"  => "capture_outbound_request_headers",
+          "host"    => "api.ing.example",
+          "path"    => "/v2/products/",
+          "headers" => ["Authorization", "X-XSRF-TOKEN"],
+          "as"      => "ing_api_headers"
+        }.merge(extra)
+      end
+
+      def test_capture_outbound_accepts_valid_step
+        schema_with_phase([valid_capture_outbound])
+      end
+
+      %w[host path as].each do |key|
+        define_method("test_capture_outbound_rejects_missing_#{key}") do
+          step = valid_capture_outbound; step.delete(key)
+          err = assert_raises(UserError) { schema_with_phase([step]) }
+          assert_includes err.message, key
+        end
+      end
+
+      def test_capture_outbound_rejects_missing_headers
+        step = valid_capture_outbound; step.delete("headers")
+        err = assert_raises(UserError) { schema_with_phase([step]) }
+        assert_includes err.message, "headers"
+      end
+
+      def test_capture_outbound_rejects_empty_headers_array
+        err = assert_raises(UserError) { schema_with_phase([valid_capture_outbound("headers" => [])]) }
+        assert_includes err.message, "headers"
+      end
+
+      def test_capture_outbound_rejects_non_string_headers_entry
+        err = assert_raises(UserError) { schema_with_phase([valid_capture_outbound("headers" => ["ok", 7])]) }
+        assert_includes err.message, "headers"
+      end
+
+      def test_capture_outbound_rejects_non_boolean_most_recent
+        err = assert_raises(UserError) { schema_with_phase([valid_capture_outbound("most_recent" => "yes")]) }
+        assert_includes err.message, "most_recent"
+      end
     end
   end

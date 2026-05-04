@@ -256,6 +256,8 @@ module Freentonic
         validate_elevate_session!(phase_name, step, index)
       when "capture_local_storage", "capture_session_storage"
         validate_capture_dom_storage!(phase_name, step, index)
+      when "capture_outbound_request_headers"
+        validate_capture_outbound_request_headers!(phase_name, step, index)
       when "prompt_stdin_and_fill"
         loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: prompt_stdin_and_fill"
         unless step["selector"].is_a?(String) && !step["selector"].empty?
@@ -420,6 +422,29 @@ module Freentonic
       end
       if branch.key?("on_match") && !branch["on_match"].is_a?(String)
         raise UserError, "#{loc} #{path}.on_match must be a string when set"
+      end
+    end
+
+    def validate_capture_outbound_request_headers!(phase_name, step, index)
+      loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: capture_outbound_request_headers"
+
+      %w[host path as].each do |key|
+        unless step[key].is_a?(String) && !step[key].empty?
+          raise UserError, "#{loc} requires a non-empty #{key}:"
+        end
+      end
+
+      headers = step["headers"]
+      unless headers.is_a?(Array) && !headers.empty? && headers.all? { |h| h.is_a?(String) && !h.empty? }
+        raise UserError, "#{loc} headers: must be a non-empty array of non-empty strings"
+      end
+
+      if step.key?("most_recent") && ![true, false].include?(step["most_recent"])
+        raise UserError, "#{loc} most_recent: must be true or false"
+      end
+
+      if step.key?("required") && ![true, false].include?(step["required"])
+        raise UserError, "#{loc} required: must be true or false"
       end
     end
 
