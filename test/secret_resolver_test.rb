@@ -71,6 +71,70 @@ module Freentonic
         assert_equal [["ing", "PIN_DIGIT_2"]], store.prompt_calls.map { |call| call.first(2) }
       end
 
+      # Indexed-reference form: `secret(NAME[N])` looks up the bare
+      # `NAME` and slices character `N`. Lets a workflow replay a single
+      # stored PIN like "1234" into 4 separate input fields without
+      # forcing the operator to store each digit independently.
+      def test_indexed_reference_slices_bare_secret
+        store = FakeSecretStore.new(["ing", "USER_PIN"] => "1234")
+        resolver = SecretResolver.new(secret_store: store, stdout: StringIO.new, stderr: StringIO.new)
+        source = SourceDouble.new
+        schema = SchemaDouble.new
+
+        assert_equal "1", resolver.resolve_value(source: source, schema: schema, value: "secret(USER_PIN[0])")
+        assert_equal "2", resolver.resolve_value(source: source, schema: schema, value: "secret(USER_PIN[1])")
+        assert_equal "3", resolver.resolve_value(source: source, schema: schema, value: "secret(USER_PIN[2])")
+        assert_equal "4", resolver.resolve_value(source: source, schema: schema, value: "secret(USER_PIN[3])")
+        # The bare secret is fetched exactly once across all references.
+        assert_equal 1, store.fetch_calls.count { |_, name| name == "USER_PIN" }
+        # The literal indexed name is NEVER looked up in the store
+        # (would fail the store's key-validation regex, since brackets
+        # aren't allowed in stored secret names).
+        store.fetch_calls.each { |_, name| refute_match(/\[/, name, "bracketed name leaked to store: #{name}") }
+      end
+
+      def test_indexed_reference_out_of_range_raises_user_error
+        store = FakeSecretStore.new(["ing", "USER_PIN"] => "12")
+        resolver = SecretResolver.new(secret_store: store, stdout: StringIO.new, stderr: StringIO.new)
+
+        error = assert_raises(UserError) do
+          resolver.resolve_value(
+            source: SourceDouble.new,
+            schema: SchemaDouble.new,
+            value: "secret(USER_PIN[5])"
+          )
+        end
+        assert_match(/index 5 out of range/, error.message)
+        assert_match(/USER_PIN/, error.message)
+        assert_match(/length 2/, error.message)
+      end
+
+      def test_indexed_reference_prompts_for_bare_name_when_missing
+        store = FakeSecretStore.new
+        resolver = SecretResolver.new(secret_store: store, stdout: StringIO.new, stderr: StringIO.new)
+        schema = SchemaDouble.new("USER_PIN" => "Enter your 4-digit PIN")
+
+        # FakeSecretStore.prompt_and_store stores "prompted-user_pin"
+        # (13 chars) — we expect index 0 to slice to "p".
+        value = resolver.resolve_value(source: SourceDouble.new, schema: schema, value: "secret(USER_PIN[0])")
+        assert_equal "p", value
+        # Prompt was issued for the *bare* name, not the indexed form.
+        assert_equal [["ing", "USER_PIN"]], store.prompt_calls.map { |call| call.first(2) }
+      end
+
+      def test_indexed_reference_caches_per_index_independently
+        store = FakeSecretStore.new(["ing", "USER_PIN"] => "9876")
+        resolver = SecretResolver.new(secret_store: store, stdout: StringIO.new, stderr: StringIO.new)
+        source = SourceDouble.new
+
+        2.times do
+          assert_equal "9", resolver.resolve_value(source: source, schema: SchemaDouble.new, value: "secret(USER_PIN[0])")
+          assert_equal "8", resolver.resolve_value(source: source, schema: SchemaDouble.new, value: "secret(USER_PIN[1])")
+        end
+        # Bare USER_PIN fetched once total — index lookups don't refetch.
+        assert_equal 1, store.fetch_calls.count { |_, name| name == "USER_PIN" }
+      end
+
       def test_recursively_resolves_secret_references
         store = FakeSecretStore.new(
           ["ing", "PIN_DIGIT_1"] => "1",
