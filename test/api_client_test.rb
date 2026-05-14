@@ -687,4 +687,187 @@ module Freentonic
     end
   end
 
+  # ── Per-host auth_header scoping ─────────────────────────────────────
+
+  class PerHostHeaderClient < Freentonic::ApiClient
+    base_url "https://legacy.example.com"
+    auth_header "Cookie",        from: :cookie
+    auth_header "Authorization", from: :bearer, host: "api.example.com"
+    auth_header "X-ESC",         from: :esc,    host: "api.example.com"
+
+    def initialize(cookie:, bearer:, esc:)
+      @cookie = cookie
+      @bearer = bearer
+      @esc    = esc
+    end
+
+    public :auth_headers_for, :auth_headers
+
+    private
+
+    attr_reader :cookie, :bearer, :esc
+  end
+
+  class PerHostAuthHeaderTest < Minitest::Test
+    def client
+      PerHostHeaderClient.new(cookie: "c=1", bearer: "Bearer abc", esc: "esc-val")
+    end
+
+    def test_legacy_host_omits_scoped_headers
+      h = client.auth_headers_for("https://legacy.example.com/foo")
+      assert_equal "c=1", h["Cookie"]
+      refute h.key?("Authorization")
+      refute h.key?("X-ESC")
+    end
+
+    def test_api_host_includes_scoped_headers
+      h = client.auth_headers_for("https://api.example.com/v2/products")
+      assert_equal "c=1",        h["Cookie"]
+      assert_equal "Bearer abc", h["Authorization"]
+      assert_equal "esc-val",    h["X-ESC"]
+    end
+
+    def test_unmatched_host_only_gets_unscoped_headers
+      h = client.auth_headers_for("https://other.example.com/x")
+      assert_equal "c=1", h["Cookie"]
+      refute h.key?("Authorization")
+    end
+
+    def test_auth_headers_without_url_returns_unscoped_only
+      h = client.auth_headers
+      assert_equal "c=1", h["Cookie"]
+      refute h.key?("Authorization")
+    end
+
+    def test_update_auth_headers_with_host_scopes_override
+      c = client
+      c.update_auth_headers!({ "Authorization" => "Bearer rotated" }, host: "api.example.com")
+
+      api  = c.auth_headers_for("https://api.example.com/x")
+      leg  = c.auth_headers_for("https://legacy.example.com/x")
+      oth  = c.auth_headers_for("https://other.example.com/x")
+
+      assert_equal "Bearer rotated", api["Authorization"]
+      refute leg.key?("Authorization")
+      refute oth.key?("Authorization")
+    end
+
+    def test_unscoped_override_applies_everywhere
+      c = client
+      c.update_auth_headers!("X-Trace" => "abc")
+      assert_equal "abc", c.auth_headers_for("https://api.example.com/x")["X-Trace"]
+      assert_equal "abc", c.auth_headers_for("https://legacy.example.com/x")["X-Trace"]
+    end
+
+    def test_host_scoped_override_wins_over_unscoped
+      c = client
+      c.update_auth_headers!("X-Trace" => "default")
+      c.update_auth_headers!({ "X-Trace" => "api-only" }, host: "api.example.com")
+      assert_equal "api-only", c.auth_headers_for("https://api.example.com/x")["X-Trace"]
+      assert_equal "default",  c.auth_headers_for("https://legacy.example.com/x")["X-Trace"]
+    end
+
+    def test_host_scoped_nil_reverts_scoped_override
+      c = client
+      c.update_auth_headers!({ "Authorization" => "Bearer rotated" }, host: "api.example.com")
+      c.update_auth_headers!({ "Authorization" => nil }, host: "api.example.com")
+      assert_equal "Bearer abc", c.auth_headers_for("https://api.example.com/x")["Authorization"]
+    end
+  end
+
+  # ── raw_request honors per-host scoping ─────────────────────────────
+
+  class PerHostRawRequestClient < Freentonic::ApiClient
+    base_url "https://legacy.example.com"
+    auth_header "Cookie",        from: :cookie
+    auth_header "Authorization", from: :bearer, host: "api.example.com"
+
+    def initialize(cookie:, bearer:)
+      @cookie = cookie
+      @bearer = bearer
+    end
+
+    private
+
+    attr_reader :cookie, :bearer
+  end
+
+  class PerHostRawRequestTest < Minitest::Test
+    def fake_http(captured)
+      h = Object.new
+      h.define_singleton_method(:use_ssl=)      { |_| }
+      h.define_singleton_method(:open_timeout=) { |_| }
+      h.define_singleton_method(:read_timeout=) { |_| }
+      h.define_singleton_method(:request) do |req|
+        captured[:headers] = req.each_header.to_h
+        captured[:resp] || RawFakeResp.new("200", '{"ok":true}', { "content-type" => "application/json" })
+      end
+      h
+    end
+
+    def test_raw_request_to_api_host_carries_bearer
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = PerHostRawRequestClient.new(cookie: "c=1", bearer: "Bearer abc")
+        c.raw_request(method: :get, path: "/x", base: "https://api.example.com")
+      end
+      assert_equal "c=1",        captured[:headers]["cookie"]
+      assert_equal "Bearer abc", captured[:headers]["authorization"]
+    end
+
+    def test_raw_request_to_legacy_host_omits_bearer
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = PerHostRawRequestClient.new(cookie: "c=1", bearer: "Bearer abc")
+        c.raw_request(method: :get, path: "/x")  # default base = legacy host
+      end
+      assert_equal "c=1", captured[:headers]["cookie"]
+      refute captured[:headers].key?("authorization")
+    end
+  end
+
+  # ── |iso interpolation filter ────────────────────────────────────────
+
+  class IsoFilterClient < Freentonic::ApiClient
+    date_format "%d/%m/%Y"
+    public :ep_interpolate_val, :ep_format_iso
+  end
+
+  class IsoFilterTest < Minitest::Test
+    def client = IsoFilterClient.new
+
+    def test_iso_filter_formats_date
+      assert_equal "2024-03-15",
+                   client.ep_interpolate_val("{d|iso}", { d: Date.new(2024, 3, 15) })
+    end
+
+    def test_iso_filter_formats_datetime
+      assert_equal "2024-03-15",
+                   client.ep_interpolate_val("{d|iso}", { d: DateTime.new(2024, 3, 15, 10, 30) })
+    end
+
+    def test_iso_filter_parses_string
+      assert_equal "2024-03-15",
+                   client.ep_interpolate_val("{d|iso}", { d: "2024-03-15" })
+    end
+
+    def test_iso_filter_returns_nil_for_missing_kwarg
+      assert_nil client.ep_interpolate_val("{d|iso}", {})
+    end
+
+    def test_iso_filter_raises_on_unparseable_string
+      assert_raises(ArgumentError) do
+        client.ep_format_iso("not a date")
+      end
+    end
+
+    def test_iso_filter_coexists_with_date_filter
+      # Same workflow, two filters — |date uses class date_format,
+      # |iso always produces yyyy-mm-dd.
+      d = Date.new(2024, 3, 15)
+      assert_equal "15/03/2024", client.ep_interpolate_val("{d|date}", { d: d })
+      assert_equal "2024-03-15", client.ep_interpolate_val("{d|iso}",  { d: d })
+    end
+  end
+
 end

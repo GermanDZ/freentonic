@@ -546,5 +546,84 @@ module Freentonic
         err = assert_raises(UserError) { schema_with_phase([valid_capture_outbound("most_recent" => "yes")]) }
         assert_includes err.message, "most_recent"
       end
+
+      # ── auth_headers Array (per-host) form ─────────────────────────────
+
+      def per_host_schema
+        schema_with(
+          "base_url"     => "https://legacy.example.com",
+          "credentials"  => ["cookie", "bearer"],
+          "auth_headers" => [
+            { "headers" => { "Cookie" => "{cookie}" } },
+            { "host"    => "api.example.com",
+              "headers" => { "Authorization" => "{bearer}" } }
+          ]
+        )
+      end
+
+      def test_auth_headers_array_form_unscoped_block_applies_everywhere
+        client = per_host_schema.build_api_client({ cookie: "c=1", bearer: "Bearer abc" })
+        h = client.send(:auth_headers_for, "https://legacy.example.com/x")
+        assert_equal "c=1", h["Cookie"]
+        refute h.key?("Authorization")
+      end
+
+      def test_auth_headers_array_form_scoped_block_applies_only_on_match
+        client = per_host_schema.build_api_client({ cookie: "c=1", bearer: "Bearer abc" })
+        h = client.send(:auth_headers_for, "https://api.example.com/v2")
+        assert_equal "c=1",        h["Cookie"]
+        assert_equal "Bearer abc", h["Authorization"]
+      end
+
+      def test_auth_headers_array_form_supports_static_values
+        schema = schema_with(
+          "auth_headers" => [{ "host" => "api.example.com",
+                               "headers" => { "X-Static" => "lit" } }]
+        )
+        client = schema.build_api_client({})
+        assert_equal "lit", client.send(:auth_headers_for, "https://api.example.com/x")["X-Static"]
+        refute client.send(:auth_headers_for, "https://other.example.com/x").key?("X-Static")
+      end
+
+      def test_auth_headers_hash_form_still_works
+        schema = schema_with(
+          "credentials"  => ["token"],
+          "auth_headers" => { "Authorization" => "{token}", "X-Static" => "lit" }
+        )
+        client = schema.build_api_client({ token: "tok" })
+        h = client.send(:auth_headers_for, "https://anything.example.com/x")
+        assert_equal "tok", h["Authorization"]
+        assert_equal "lit", h["X-Static"]
+      end
+
+      def test_auth_headers_array_rejects_block_without_headers
+        schema = schema_with("auth_headers" => [{ "host" => "api.example.com" }])
+        err = assert_raises(UserError) { schema.build_api_client({}) }
+        assert_includes err.message, "headers"
+      end
+
+      def test_auth_headers_array_rejects_empty_headers_hash
+        schema = schema_with("auth_headers" => [{ "host" => "api.example.com", "headers" => {} }])
+        err = assert_raises(UserError) { schema.build_api_client({}) }
+        assert_includes err.message, "headers"
+      end
+
+      def test_auth_headers_array_rejects_non_hash_block
+        schema = schema_with("auth_headers" => ["just a string"])
+        err = assert_raises(UserError) { schema.build_api_client({}) }
+        assert_includes err.message, "auth_headers"
+      end
+
+      def test_auth_headers_array_rejects_empty_host
+        schema = schema_with("auth_headers" => [{ "host" => "", "headers" => { "X" => "y" } }])
+        err = assert_raises(UserError) { schema.build_api_client({}) }
+        assert_includes err.message, "host"
+      end
+
+      def test_auth_headers_rejects_non_hash_non_array
+        schema = schema_with("auth_headers" => "Cookie: c")
+        err = assert_raises(UserError) { schema.build_api_client({}) }
+        assert_includes err.message, "auth_headers"
+      end
     end
   end

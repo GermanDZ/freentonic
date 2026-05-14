@@ -67,9 +67,15 @@ module Freentonic
       # Declare a request header.
       #   auth_header "Origin",  "https://example.com"     # static value
       #   auth_header "Cookie",  from: :cookie              # dynamic: send(:cookie) on the instance
-      def auth_header(name, value = nil, from: nil)
+      #
+      # Pass host: "api.example.com" to scope the header to a single host —
+      # it will only be attached to requests whose resolved URL has that
+      # host. Useful when the client talks to two hosts with different auth
+      # scopes (e.g. a legacy cookie host + a v2 bearer host) and one set
+      # of headers must NOT leak to the other.
+      def auth_header(name, value = nil, from: nil, host: nil)
         @auth_header_decls ||= []
-        @auth_header_decls << { name: name, value: value, from: from }
+        @auth_header_decls << { name: name, value: value, from: from, host: host }
       end
 
       def auth_header_decls
@@ -292,8 +298,8 @@ module Freentonic
       req["User-Agent"]      = DEFAULT_UA
       req["Accept"]          = "application/json"
       req["Accept-Language"] = "es-ES"
-      auth_headers.each { |name, value| req[name] = value.to_s if value }
-      headers.each       { |name, value| req[name] = value.to_s if value }
+      auth_headers_for(base_url).each { |name, value| req[name] = value.to_s if value }
+      headers.each                    { |name, value| req[name] = value.to_s if value }
 
       if body
         if body.is_a?(String)
@@ -324,13 +330,25 @@ module Freentonic
     # bearer token. update_auth_headers!("Authorization" => "Bearer #{new}")
     # rotates it onto the client without rebuilding the client (which
     # would lose pagination state, retry counters, etc.).
-    def update_auth_headers!(headers_hash)
+    #
+    # Pass host: "api.example.com" to scope the override to a single host.
+    # The override then only applies to requests whose URL has that host;
+    # other hosts continue to see the declared (or previously-overridden,
+    # unscoped) value. Without host:, the override applies to all hosts
+    # (back-compat behavior).
+    def update_auth_headers!(headers_hash = nil, host: nil, **other_headers)
+      # Accept both explicit-hash calls — update_auth_headers!({"X" => "y"}, host: "api") —
+      # and implicit-hash calls — update_auth_headers!("X" => "y"). In the implicit
+      # form Ruby 3 routes the trailing hash into **other_headers since host: is the
+      # only explicit kwarg, so we fold it back into headers_hash here.
+      headers_hash = other_headers if headers_hash.nil?
       @auth_header_overrides ||= {}
       headers_hash.each do |k, v|
+        key = [k.to_s, host]
         if v.nil?
-          @auth_header_overrides.delete(k.to_s)
+          @auth_header_overrides.delete(key)
         else
-          @auth_header_overrides[k.to_s] = v.to_s
+          @auth_header_overrides[key] = v.to_s
         end
       end
       self
@@ -429,7 +447,7 @@ module Freentonic
       req["User-Agent"]      = DEFAULT_UA
       req["Accept"]          = "application/json"
       req["Accept-Language"] = "es-ES"
-      auth_headers.each { |name, value| req[name] = value.to_s if value }
+      auth_headers_for(base_url).each { |name, value| req[name] = value.to_s if value }
 
       if method == :post && form.any?
         req["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8"
@@ -472,24 +490,51 @@ module Freentonic
       { "_raw" => body.to_s }
     end
 
-    # Build auth headers from class-level auth_header declarations, then
-    # apply any in-flight overrides from update_auth_headers!.
+    # Build auth headers for a request to a specific URL. Resolves
+    # class-level auth_header declarations and update_auth_headers!
+    # overrides against the URL's host, so headers scoped to one host
+    # (e.g. an api.* Bearer) don't leak to another (e.g. the legacy
+    # cookie host).
     #
-    # For dynamic entries (from:), calls send(method_name) on self. Nil
-    # results — declared or override — produce no header at all (so an
-    # update_auth_headers!("X" => nil) reverts to the declared value, and
-    # if there isn't one, the header is absent).
+    # Resolution order — later passes override earlier ones on a name
+    # collision; nil values produce no header:
     #
-    # Subclasses can override this method entirely if a custom shape is
-    # needed; the override mechanism honors the class-level declarations
-    # plus this base implementation.
-    def auth_headers
-      base = self.class.auth_header_decls.each_with_object({}) do |decl, h|
+    #   1. Unscoped declarations (no host:).
+    #   2. Declarations whose host: matches URI(url).host.
+    #   3. Unscoped overrides from update_auth_headers!.
+    #   4. Host-scoped overrides from update_auth_headers!(host: ...).
+    #
+    # A nil url resolves to host=nil, so only unscoped declarations and
+    # overrides apply — that's the back-compat path for `auth_headers`.
+    def auth_headers_for(url)
+      target_host = url ? URI(url.to_s).host : nil
+      result = {}
+
+      self.class.auth_header_decls.each do |decl|
+        next if decl[:host]
         value = decl[:from] ? send(decl[:from]) : decl[:value]
-        h[decl[:name]] = value.to_s if value
+        result[decl[:name]] = value.to_s if value
       end
-      return base if @auth_header_overrides.nil? || @auth_header_overrides.empty?
-      base.merge(@auth_header_overrides)
+
+      self.class.auth_header_decls.each do |decl|
+        next unless decl[:host] && decl[:host] == target_host
+        value = decl[:from] ? send(decl[:from]) : decl[:value]
+        result[decl[:name]] = value.to_s if value
+      end
+
+      overrides = @auth_header_overrides
+      if overrides && !overrides.empty?
+        overrides.each { |(name, h), v| result[name] = v if h.nil? }
+        overrides.each { |(name, h), v| result[name] = v if h && h == target_host }
+      end
+
+      result
+    end
+
+    # Back-compat alias. Returns unscoped declarations + unscoped
+    # overrides. Use auth_headers_for(url) when host scoping matters.
+    def auth_headers
+      auth_headers_for(nil)
     end
 
     # ─── Endpoint template helpers ────────────────────────────────────
@@ -523,14 +568,27 @@ module Freentonic
     # Literal (non-string or no {…}) → returned as-is.
     # {offset}      → the pagination offset integer.
     # {name}        → kwargs[:name].
-    # {name|date}   → format_date(kwargs[:name]).
+    # {name|date}   → format_date(kwargs[:name]) (workflow's date_format).
+    # {name|iso}    → kwargs[:name] formatted as yyyy-mm-dd, regardless
+    #                 of date_format. Accepts Date, DateTime, or String;
+    #                 raises ArgumentError on unparseable strings.
     def ep_interpolate_val(val, kwargs, offset: nil)
       return val unless val.is_a?(String) && val.match?(/\A\{[^}]+\}\z/)
       inner = val[1..-2]
       return offset if inner == "offset"
       name, filter = inner.split("|", 2)
       raw = kwargs[name.to_sym]
-      filter == "date" ? format_date(raw) : raw
+      case filter
+      when "date" then format_date(raw)
+      when "iso"  then ep_format_iso(raw)
+      else raw
+      end
+    end
+
+    def ep_format_iso(raw)
+      return nil if raw.nil?
+      d = raw.is_a?(Date) ? raw : Date.parse(raw.to_s)
+      d.strftime("%Y-%m-%d")
     end
   end
 
