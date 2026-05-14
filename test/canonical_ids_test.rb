@@ -110,7 +110,7 @@ module Freentonic
 
       def test_account_id_portable_ref_distinguishes_distinct_accounts
         a = Canonical.account_id(institution: "ing", portable_ref: "9999:0001")
-        b = Canonical.account_id(institution: "ing", portable_ref: "1465:9999")
+        b = Canonical.account_id(institution: "ing", portable_ref: "9999:0009")
         refute_equal a, b
       end
 
