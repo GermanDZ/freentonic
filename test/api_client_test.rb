@@ -826,6 +826,101 @@ module Freentonic
     end
   end
 
+  # ── derived_credentials key: (Hash pluck) form ───────────────────────
+
+  class HashDerivedClient < Freentonic::ApiClient
+    credentials :ing_api_headers
+
+    derived_credentials ing_api_authorization: { from: :ing_api_headers, key: "Authorization" },
+                        ing_api_esc:           { from: :ing_api_headers, key: "X-ING-ExtendedSessionContext" }
+
+    public :ing_api_authorization, :ing_api_esc, :ing_api_headers
+  end
+
+  class HashDerivedCredentialsTest < Minitest::Test
+    def test_key_plucks_value_from_hash_source
+      c = HashDerivedClient.new(ing_api_headers: { "Authorization" => "Bearer abc",
+                                                   "X-ING-ExtendedSessionContext" => "esc-val" })
+      assert_equal "Bearer abc", c.ing_api_authorization
+      assert_equal "esc-val",    c.ing_api_esc
+    end
+
+    def test_key_returns_nil_for_missing_key
+      c = HashDerivedClient.new(ing_api_headers: { "Other" => "x" })
+      assert_nil c.ing_api_authorization
+    end
+
+    def test_key_returns_nil_when_source_is_nil
+      c = HashDerivedClient.new(ing_api_headers: nil)
+      assert_nil c.ing_api_authorization
+    end
+
+    def test_key_returns_nil_when_source_is_not_a_hash
+      c = HashDerivedClient.new(ing_api_headers: "not a hash")
+      assert_nil c.ing_api_authorization
+    end
+
+    def test_key_branch_is_memoized
+      c = HashDerivedClient.new(ing_api_headers: { "Authorization" => "Bearer first" })
+      assert_equal "Bearer first", c.ing_api_authorization
+      # Mutate the underlying credential — memoized value should be returned.
+      c.ing_api_headers["Authorization"] = "Bearer second"
+      assert_equal "Bearer first", c.ing_api_authorization
+    end
+
+    def test_key_reader_is_private
+      c = HashDerivedClient.new(ing_api_headers: { "Authorization" => "Bearer x" })
+      klass = Class.new(Freentonic::ApiClient) do
+        credentials :ing_api_headers
+        derived_credentials ing_api_authorization: { from: :ing_api_headers, key: "Authorization" }
+      end
+      instance = klass.new(ing_api_headers: c.ing_api_headers)
+      assert_raises(NoMethodError) { instance.ing_api_authorization }
+    end
+
+    def test_macro_raises_when_both_regex_and_key_present
+      err = assert_raises(ArgumentError) do
+        Class.new(Freentonic::ApiClient) do
+          derived_credentials foo: { from: :x, regex: "(.+)", key: "k" }
+        end
+      end
+      assert_includes err.message, "both"
+      assert_includes err.message, "regex"
+      assert_includes err.message, "key"
+    end
+
+    def test_macro_raises_when_neither_regex_nor_key_present
+      err = assert_raises(ArgumentError) do
+        Class.new(Freentonic::ApiClient) do
+          derived_credentials foo: { from: :x }
+        end
+      end
+      assert_includes err.message, "must declare"
+    end
+
+    def test_regex_branch_still_works_unchanged
+      # Same behavior as before — String source, capture group.
+      klass = Class.new(Freentonic::ApiClient) do
+        credentials :cookie
+        derived_credentials sid: { from: :cookie, regex: 'sid=([^;]+)', capture: 1 }
+        public :sid
+      end
+      c = klass.new(cookie: "sid=xyz789; other=1")
+      assert_equal "xyz789", c.sid
+    end
+
+    def test_regex_branch_returns_nil_when_source_is_not_a_string
+      # New explicit type guard — used to rely on Object#match raising.
+      klass = Class.new(Freentonic::ApiClient) do
+        credentials :payload
+        derived_credentials sid: { from: :payload, regex: 'sid=([^;]+)', capture: 1 }
+        public :sid
+      end
+      c = klass.new(payload: { "sid" => "xyz" })
+      assert_nil c.sid
+    end
+  end
+
   # ── |iso interpolation filter ────────────────────────────────────────
 
   class IsoFilterClient < Freentonic::ApiClient

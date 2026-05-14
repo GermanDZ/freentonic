@@ -27,11 +27,39 @@ so humans tailing `/runs/{run_id}/log` see why the run paused.
 
 See `docs/invoke-server-api.md` for full API reference.
 
-## 0.7.0 — Per-host auth headers + `|iso` date filter
+## 0.7.0 — Per-host auth headers + `|iso` date filter + `derived_credentials` Hash pluck
 
-Two additive features unblock fully-declarative YAML for providers that
+Three additive features unblock fully-declarative YAML for providers that
 talk to two hosts with different auth scopes (e.g. ING's legacy
 cookie host + the v2 Bearer host on `api.ing.ingdirect.es`).
+
+### `derived_credentials` Hash-pluck (`key:`) form
+
+`derived_credentials:` gains a second extraction mode alongside the
+existing `regex:` + `capture:`. The new `key:` form plucks a single
+key out of a Hash source — the natural shape of credentials produced
+by `capture_outbound_request_headers`, which always emits a Hash
+keyed by header name. Source not a Hash, or key missing, yields nil
+(symmetric with the regex branch's "no match → nil" behavior).
+Exactly one of `regex:` / `key:` must be set per entry — both or
+neither raises a clear workflow validation error.
+
+```yaml
+derived_credentials:
+  genoma_session_id:
+    from: cookie
+    regex: 'genoma-session-id=([^;]+)'
+    capture: 1
+  ing_api_authorization:
+    from: ing_api_headers
+    key:  Authorization
+```
+
+The regex branch additionally gains an explicit `is_a?(String)` type
+guard, symmetric with the Hash type check in the new branch; this
+was previously implicit (regex matching on a non-String would have
+raised).
+
 
 ### Per-host `auth_header`
 
