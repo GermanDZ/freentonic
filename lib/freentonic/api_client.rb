@@ -147,25 +147,58 @@ module Freentonic
         private :handle_response
       end
 
-      # Declare credentials derived from other credentials via regex.
+      # Declare credentials derived from other credentials.
       # Generates a private memoized reader for each entry.
       #
-      #   derived_credentials genoma_session_id: { from: :cookie,
-      #     regex: 'genoma-session-id=([^;]+)', capture: 1 }
+      # Two extraction modes — exactly one per entry:
+      #
+      #   regex: + capture: — match a String source with the pattern and
+      #   return the capture group (defaults to 1). Source not a String
+      #   yields nil.
+      #
+      #     derived_credentials genoma_session_id: { from: :cookie,
+      #       regex: 'genoma-session-id=([^;]+)', capture: 1 }
+      #
+      #   key: — pluck a single key out of a Hash source. Single-level
+      #   lookup only (use ext: for nested paths). Source not a Hash, or
+      #   key missing, yields nil.
+      #
+      #     derived_credentials ing_api_authorization: { from: :ing_api_headers,
+      #       key: "Authorization" }
       def derived_credentials(derivations)
         derivations.each do |name, spec|
-          name_sym  = name.to_sym
-          ivar      = :"@#{name}"
-          from_sym  = spec[:from].to_sym
-          regex_str = spec[:regex].to_s
-          cap_idx   = spec[:capture].to_i
+          name_sym = name.to_sym
+          ivar     = :"@#{name}"
+          from_sym = spec[:from].to_sym
+          has_regex = spec.key?(:regex) && !spec[:regex].nil?
+          has_key   = spec.key?(:key)   && !spec[:key].nil?
 
-          define_method(name_sym) do
-            source = send(from_sym)
-            return nil unless source
-            return instance_variable_get(ivar) if instance_variable_defined?(ivar)
-            m = source.match(Regexp.new(regex_str))
-            instance_variable_set(ivar, m ? m[cap_idx] : nil)
+          if has_regex && has_key
+            raise ArgumentError, "derived_credentials[#{name.inspect}]: " \
+                                 "cannot declare both regex: and key:"
+          elsif !has_regex && !has_key
+            raise ArgumentError, "derived_credentials[#{name.inspect}]: " \
+                                 "must declare regex: or key:"
+          end
+
+          if has_regex
+            regex_str = spec[:regex].to_s
+            cap_idx   = (spec[:capture] || 1).to_i
+            define_method(name_sym) do
+              source = send(from_sym)
+              return nil unless source.is_a?(String)
+              return instance_variable_get(ivar) if instance_variable_defined?(ivar)
+              m = source.match(Regexp.new(regex_str))
+              instance_variable_set(ivar, m ? m[cap_idx] : nil)
+            end
+          else
+            key = spec[:key].to_s
+            define_method(name_sym) do
+              source = send(from_sym)
+              return nil unless source.is_a?(Hash)
+              return instance_variable_get(ivar) if instance_variable_defined?(ivar)
+              instance_variable_set(ivar, source[key])
+            end
           end
           private name_sym
         end

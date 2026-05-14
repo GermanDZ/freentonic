@@ -625,5 +625,63 @@ module Freentonic
         err = assert_raises(UserError) { schema.build_api_client({}) }
         assert_includes err.message, "auth_headers"
       end
+
+      # ── derived_credentials key: (Hash pluck) form ─────────────────────
+
+      def test_derived_credentials_key_form_plucks_from_hash
+        schema = schema_with(
+          "credentials" => ["headers_bag"],
+          "derived_credentials" => {
+            "auth_token" => { "from" => "headers_bag", "key" => "Authorization" }
+          }
+        )
+        client = schema.build_api_client({ headers_bag: { "Authorization" => "Bearer abc" } })
+        assert_equal "Bearer abc", client.send(:auth_token)
+      end
+
+      def test_derived_credentials_key_form_missing_key_returns_nil
+        schema = schema_with(
+          "credentials" => ["bag"],
+          "derived_credentials" => {
+            "auth_token" => { "from" => "bag", "key" => "Authorization" }
+          }
+        )
+        client = schema.build_api_client({ bag: { "Other" => "x" } })
+        assert_nil client.send(:auth_token)
+      end
+
+      def test_derived_credentials_regex_form_still_works
+        schema = schema_with(
+          "credentials" => ["cookie"],
+          "derived_credentials" => {
+            "session_id" => { "from" => "cookie", "regex" => "session-id=([^;]+)", "capture" => 1 }
+          }
+        )
+        client = schema.build_api_client({ cookie: "session-id=abc; other=1" })
+        assert_equal "abc", client.send(:session_id)
+      end
+
+      def test_derived_credentials_rejects_both_regex_and_key
+        schema = schema_with(
+          "derived_credentials" => {
+            "x" => { "from" => "y", "regex" => "(.+)", "key" => "k" }
+          }
+        )
+        err = assert_raises(UserError) { schema.build_api_client({}) }
+        assert_includes err.message, '"x"'
+        assert_includes err.message, "regex"
+        assert_includes err.message, "key"
+      end
+
+      def test_derived_credentials_rejects_neither_regex_nor_key
+        schema = schema_with(
+          "derived_credentials" => {
+            "x" => { "from" => "y" }
+          }
+        )
+        err = assert_raises(UserError) { schema.build_api_client({}) }
+        assert_includes err.message, '"x"'
+        assert_includes err.message, "must declare"
+      end
     end
   end

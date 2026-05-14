@@ -81,8 +81,21 @@ module Freentonic
       klass.date_format(ac["date_format"])                   if ac["date_format"]
 
       if ac["derived_credentials"]
-        specs = ac["derived_credentials"].transform_values do |v|
-          { from: v["from"], regex: v["regex"], capture: (v["capture"] || 1) }
+        specs = ac["derived_credentials"].each_with_object({}) do |(name, v), h|
+          has_regex = v.key?("regex") && !v["regex"].nil?
+          has_key   = v.key?("key")   && !v["key"].nil?
+          if has_regex && has_key
+            raise UserError, "workflow #{@path} derived_credentials[#{name.inspect}]: " \
+                             "cannot declare both regex: and key:"
+          elsif !has_regex && !has_key
+            raise UserError, "workflow #{@path} derived_credentials[#{name.inspect}]: " \
+                             "must declare regex: or key:"
+          end
+          h[name] = if has_regex
+                      { from: v["from"], regex: v["regex"], capture: (v["capture"] || 1) }
+                    else
+                      { from: v["from"], key: v["key"].to_s }
+                    end
         end
         klass.derived_credentials(specs)
       end
