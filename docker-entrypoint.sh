@@ -17,6 +17,18 @@ umask 0077
 # cli mode: seeded at startup (env or random) and then static for the run.
 VNC_PASSWORD_FILE="${FREENTONIC_VNC_PASSWORD_FILE:-/dev/shm/freentonic/vnc-password}"
 
+# Xvfb screen geometry. Default to a laptop-friendly 1280×800 (16:10)
+# so the noVNC iframe in simplefreen's admin UI doesn't waste vertical
+# space on a typical 13"–15" laptop screen. Override per-deployment
+# via env: `-e FREENTONIC_XVFB_GEOMETRY=1920x1080x24`.
+#
+# Format: `<width>x<height>x<depth>`. Depth is always 24 in practice;
+# include it so the value is a drop-in for `Xvfb -screen 0 …`.
+#
+# Note: if you override this, simplefreen's `.vnc-iframe` aspect-ratio
+# CSS rule should match (it's pinned to 16/10 to match this default).
+XVFB_GEOMETRY="${FREENTONIC_XVFB_GEOMETRY:-1280x800x24}"
+
 # Seed the passwdfile. Echoes the chosen password on stdout so callers can
 # decide whether to show it to the operator (cli mode) or keep it hidden
 # (server mode, where the real password comes from the /invoke body).
@@ -79,7 +91,7 @@ start_vnc_stack_if_enabled() {
 if [ "${1:-}" = "cli" ]; then
   shift
   # Xvfb is still needed for the CLI's Chrome.
-  Xvfb :99 -screen 0 1920x1080x24 &>/dev/null &
+  Xvfb :99 -screen 0 "${XVFB_GEOMETRY}" &>/dev/null &
   export DISPLAY=:99
   sleep 0.3
   start_vnc_stack_if_enabled cli
@@ -104,7 +116,7 @@ chmod 0700 "${TMPFS_DIR}"
 
 # Always use Xvfb virtual display — gives Chrome a real display context so
 # behavioral captchas don't reject it. Lightweight (~8MB RAM).
-Xvfb :99 -screen 0 1920x1080x24 &>/dev/null &
+Xvfb :99 -screen 0 "${XVFB_GEOMETRY}" &>/dev/null &
 export DISPLAY=:99
 sleep 0.3
 
