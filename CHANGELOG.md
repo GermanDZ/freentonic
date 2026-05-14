@@ -27,6 +27,66 @@ so humans tailing `/runs/{run_id}/log` see why the run paused.
 
 See `docs/invoke-server-api.md` for full API reference.
 
+## 0.7.0 — Per-host auth headers + `|iso` date filter
+
+Two additive features unblock fully-declarative YAML for providers that
+talk to two hosts with different auth scopes (e.g. ING's legacy
+cookie host + the v2 Bearer host on `api.ing.ingdirect.es`).
+
+### Per-host `auth_header`
+
+`auth_header` and `update_auth_headers!` gain a `host:` kwarg. A
+declaration scoped to a host only attaches to requests whose URL has
+that host; unscoped declarations continue to apply to every host
+(back-compat). Resolution order: unscoped declarations, then
+host-scoped declarations, then unscoped overrides, then host-scoped
+overrides — later passes win on a name collision; nil values omit the
+header.
+
+```ruby
+class IngClient < Freentonic::ApiClient
+  base_url "https://ing.ingdirect.es"
+  auth_header "Cookie", from: :cookie                                  # all hosts
+  auth_header "Authorization", host: "api.ing.ingdirect.es", from: :bearer
+end
+
+client.update_auth_headers!({ "Authorization" => "Bearer …" },
+                            host: "api.ing.ingdirect.es")
+```
+
+YAML accepts both the existing flat-Hash form and a new
+Array-of-host-blocks form:
+
+```yaml
+api_client:
+  auth_headers:
+    - headers:
+        Cookie: "{cookie}"
+    - host: "api.ing.ingdirect.es"
+      headers:
+        Authorization: "{bearer}"
+        X-ING-ExtendedSessionContext: "{esc}"
+```
+
+`request` and `raw_request` now resolve headers against the actual
+request URL via the new `auth_headers_for(url)` instance method;
+`auth_headers` is preserved as a back-compat alias that returns
+unscoped declarations + unscoped overrides.
+
+### `{name|iso}` interpolation filter
+
+`ep_interpolate_val` gains an `|iso` branch that formats `Date`,
+`DateTime`, or `String` values as `yyyy-mm-dd`, regardless of the
+workflow's `date_format:`. Useful for endpoints that want ISO dates in
+a workflow that otherwise uses a locale-specific format (e.g. ING's
+legacy `dd/mm/yyyy` + v2 ISO).
+
+```yaml
+params:
+  fromDate: "{from_date|date}"   # uses workflow date_format
+  toDate:   "{to_date|iso}"      # always yyyy-mm-dd
+```
+
 ## 0.6.0 — LegacyKeys removed; canonical-only payloads
 
 The receiver-side transition window has closed (verified against
