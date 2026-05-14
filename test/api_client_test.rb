@@ -687,4 +687,282 @@ module Freentonic
     end
   end
 
+  # ── Per-host auth_header scoping ─────────────────────────────────────
+
+  class PerHostHeaderClient < Freentonic::ApiClient
+    base_url "https://legacy.example.com"
+    auth_header "Cookie",        from: :cookie
+    auth_header "Authorization", from: :bearer, host: "api.example.com"
+    auth_header "X-ESC",         from: :esc,    host: "api.example.com"
+
+    def initialize(cookie:, bearer:, esc:)
+      @cookie = cookie
+      @bearer = bearer
+      @esc    = esc
+    end
+
+    public :auth_headers_for, :auth_headers
+
+    private
+
+    attr_reader :cookie, :bearer, :esc
+  end
+
+  class PerHostAuthHeaderTest < Minitest::Test
+    def client
+      PerHostHeaderClient.new(cookie: "c=1", bearer: "Bearer abc", esc: "esc-val")
+    end
+
+    def test_legacy_host_omits_scoped_headers
+      h = client.auth_headers_for("https://legacy.example.com/foo")
+      assert_equal "c=1", h["Cookie"]
+      refute h.key?("Authorization")
+      refute h.key?("X-ESC")
+    end
+
+    def test_api_host_includes_scoped_headers
+      h = client.auth_headers_for("https://api.example.com/v2/products")
+      assert_equal "c=1",        h["Cookie"]
+      assert_equal "Bearer abc", h["Authorization"]
+      assert_equal "esc-val",    h["X-ESC"]
+    end
+
+    def test_unmatched_host_only_gets_unscoped_headers
+      h = client.auth_headers_for("https://other.example.com/x")
+      assert_equal "c=1", h["Cookie"]
+      refute h.key?("Authorization")
+    end
+
+    def test_auth_headers_without_url_returns_unscoped_only
+      h = client.auth_headers
+      assert_equal "c=1", h["Cookie"]
+      refute h.key?("Authorization")
+    end
+
+    def test_update_auth_headers_with_host_scopes_override
+      c = client
+      c.update_auth_headers!({ "Authorization" => "Bearer rotated" }, host: "api.example.com")
+
+      api  = c.auth_headers_for("https://api.example.com/x")
+      leg  = c.auth_headers_for("https://legacy.example.com/x")
+      oth  = c.auth_headers_for("https://other.example.com/x")
+
+      assert_equal "Bearer rotated", api["Authorization"]
+      refute leg.key?("Authorization")
+      refute oth.key?("Authorization")
+    end
+
+    def test_unscoped_override_applies_everywhere
+      c = client
+      c.update_auth_headers!("X-Trace" => "abc")
+      assert_equal "abc", c.auth_headers_for("https://api.example.com/x")["X-Trace"]
+      assert_equal "abc", c.auth_headers_for("https://legacy.example.com/x")["X-Trace"]
+    end
+
+    def test_host_scoped_override_wins_over_unscoped
+      c = client
+      c.update_auth_headers!("X-Trace" => "default")
+      c.update_auth_headers!({ "X-Trace" => "api-only" }, host: "api.example.com")
+      assert_equal "api-only", c.auth_headers_for("https://api.example.com/x")["X-Trace"]
+      assert_equal "default",  c.auth_headers_for("https://legacy.example.com/x")["X-Trace"]
+    end
+
+    def test_host_scoped_nil_reverts_scoped_override
+      c = client
+      c.update_auth_headers!({ "Authorization" => "Bearer rotated" }, host: "api.example.com")
+      c.update_auth_headers!({ "Authorization" => nil }, host: "api.example.com")
+      assert_equal "Bearer abc", c.auth_headers_for("https://api.example.com/x")["Authorization"]
+    end
+  end
+
+  # ── raw_request honors per-host scoping ─────────────────────────────
+
+  class PerHostRawRequestClient < Freentonic::ApiClient
+    base_url "https://legacy.example.com"
+    auth_header "Cookie",        from: :cookie
+    auth_header "Authorization", from: :bearer, host: "api.example.com"
+
+    def initialize(cookie:, bearer:)
+      @cookie = cookie
+      @bearer = bearer
+    end
+
+    private
+
+    attr_reader :cookie, :bearer
+  end
+
+  class PerHostRawRequestTest < Minitest::Test
+    def fake_http(captured)
+      h = Object.new
+      h.define_singleton_method(:use_ssl=)      { |_| }
+      h.define_singleton_method(:open_timeout=) { |_| }
+      h.define_singleton_method(:read_timeout=) { |_| }
+      h.define_singleton_method(:request) do |req|
+        captured[:headers] = req.each_header.to_h
+        captured[:resp] || RawFakeResp.new("200", '{"ok":true}', { "content-type" => "application/json" })
+      end
+      h
+    end
+
+    def test_raw_request_to_api_host_carries_bearer
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = PerHostRawRequestClient.new(cookie: "c=1", bearer: "Bearer abc")
+        c.raw_request(method: :get, path: "/x", base: "https://api.example.com")
+      end
+      assert_equal "c=1",        captured[:headers]["cookie"]
+      assert_equal "Bearer abc", captured[:headers]["authorization"]
+    end
+
+    def test_raw_request_to_legacy_host_omits_bearer
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        c = PerHostRawRequestClient.new(cookie: "c=1", bearer: "Bearer abc")
+        c.raw_request(method: :get, path: "/x")  # default base = legacy host
+      end
+      assert_equal "c=1", captured[:headers]["cookie"]
+      refute captured[:headers].key?("authorization")
+    end
+  end
+
+  # ── derived_credentials key: (Hash pluck) form ───────────────────────
+
+  class HashDerivedClient < Freentonic::ApiClient
+    credentials :ing_api_headers
+
+    derived_credentials ing_api_authorization: { from: :ing_api_headers, key: "Authorization" },
+                        ing_api_esc:           { from: :ing_api_headers, key: "X-ING-ExtendedSessionContext" }
+
+    public :ing_api_authorization, :ing_api_esc, :ing_api_headers
+  end
+
+  class HashDerivedCredentialsTest < Minitest::Test
+    def test_key_plucks_value_from_hash_source
+      c = HashDerivedClient.new(ing_api_headers: { "Authorization" => "Bearer abc",
+                                                   "X-ING-ExtendedSessionContext" => "esc-val" })
+      assert_equal "Bearer abc", c.ing_api_authorization
+      assert_equal "esc-val",    c.ing_api_esc
+    end
+
+    def test_key_returns_nil_for_missing_key
+      c = HashDerivedClient.new(ing_api_headers: { "Other" => "x" })
+      assert_nil c.ing_api_authorization
+    end
+
+    def test_key_returns_nil_when_source_is_nil
+      c = HashDerivedClient.new(ing_api_headers: nil)
+      assert_nil c.ing_api_authorization
+    end
+
+    def test_key_returns_nil_when_source_is_not_a_hash
+      c = HashDerivedClient.new(ing_api_headers: "not a hash")
+      assert_nil c.ing_api_authorization
+    end
+
+    def test_key_branch_is_memoized
+      c = HashDerivedClient.new(ing_api_headers: { "Authorization" => "Bearer first" })
+      assert_equal "Bearer first", c.ing_api_authorization
+      # Mutate the underlying credential — memoized value should be returned.
+      c.ing_api_headers["Authorization"] = "Bearer second"
+      assert_equal "Bearer first", c.ing_api_authorization
+    end
+
+    def test_key_reader_is_private
+      c = HashDerivedClient.new(ing_api_headers: { "Authorization" => "Bearer x" })
+      klass = Class.new(Freentonic::ApiClient) do
+        credentials :ing_api_headers
+        derived_credentials ing_api_authorization: { from: :ing_api_headers, key: "Authorization" }
+      end
+      instance = klass.new(ing_api_headers: c.ing_api_headers)
+      assert_raises(NoMethodError) { instance.ing_api_authorization }
+    end
+
+    def test_macro_raises_when_both_regex_and_key_present
+      err = assert_raises(ArgumentError) do
+        Class.new(Freentonic::ApiClient) do
+          derived_credentials foo: { from: :x, regex: "(.+)", key: "k" }
+        end
+      end
+      assert_includes err.message, "both"
+      assert_includes err.message, "regex"
+      assert_includes err.message, "key"
+    end
+
+    def test_macro_raises_when_neither_regex_nor_key_present
+      err = assert_raises(ArgumentError) do
+        Class.new(Freentonic::ApiClient) do
+          derived_credentials foo: { from: :x }
+        end
+      end
+      assert_includes err.message, "must declare"
+    end
+
+    def test_regex_branch_still_works_unchanged
+      # Same behavior as before — String source, capture group.
+      klass = Class.new(Freentonic::ApiClient) do
+        credentials :cookie
+        derived_credentials sid: { from: :cookie, regex: 'sid=([^;]+)', capture: 1 }
+        public :sid
+      end
+      c = klass.new(cookie: "sid=xyz789; other=1")
+      assert_equal "xyz789", c.sid
+    end
+
+    def test_regex_branch_returns_nil_when_source_is_not_a_string
+      # New explicit type guard — used to rely on Object#match raising.
+      klass = Class.new(Freentonic::ApiClient) do
+        credentials :payload
+        derived_credentials sid: { from: :payload, regex: 'sid=([^;]+)', capture: 1 }
+        public :sid
+      end
+      c = klass.new(payload: { "sid" => "xyz" })
+      assert_nil c.sid
+    end
+  end
+
+  # ── |iso interpolation filter ────────────────────────────────────────
+
+  class IsoFilterClient < Freentonic::ApiClient
+    date_format "%d/%m/%Y"
+    public :ep_interpolate_val, :ep_format_iso
+  end
+
+  class IsoFilterTest < Minitest::Test
+    def client = IsoFilterClient.new
+
+    def test_iso_filter_formats_date
+      assert_equal "2024-03-15",
+                   client.ep_interpolate_val("{d|iso}", { d: Date.new(2024, 3, 15) })
+    end
+
+    def test_iso_filter_formats_datetime
+      assert_equal "2024-03-15",
+                   client.ep_interpolate_val("{d|iso}", { d: DateTime.new(2024, 3, 15, 10, 30) })
+    end
+
+    def test_iso_filter_parses_string
+      assert_equal "2024-03-15",
+                   client.ep_interpolate_val("{d|iso}", { d: "2024-03-15" })
+    end
+
+    def test_iso_filter_returns_nil_for_missing_kwarg
+      assert_nil client.ep_interpolate_val("{d|iso}", {})
+    end
+
+    def test_iso_filter_raises_on_unparseable_string
+      assert_raises(ArgumentError) do
+        client.ep_format_iso("not a date")
+      end
+    end
+
+    def test_iso_filter_coexists_with_date_filter
+      # Same workflow, two filters — |date uses class date_format,
+      # |iso always produces yyyy-mm-dd.
+      d = Date.new(2024, 3, 15)
+      assert_equal "15/03/2024", client.ep_interpolate_val("{d|date}", { d: d })
+      assert_equal "2024-03-15", client.ep_interpolate_val("{d|iso}",  { d: d })
+    end
+  end
+
 end

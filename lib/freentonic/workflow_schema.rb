@@ -81,8 +81,21 @@ module Freentonic
       klass.date_format(ac["date_format"])                   if ac["date_format"]
 
       if ac["derived_credentials"]
-        specs = ac["derived_credentials"].transform_values do |v|
-          { from: v["from"], regex: v["regex"], capture: (v["capture"] || 1) }
+        specs = ac["derived_credentials"].each_with_object({}) do |(name, v), h|
+          has_regex = v.key?("regex") && !v["regex"].nil?
+          has_key   = v.key?("key")   && !v["key"].nil?
+          if has_regex && has_key
+            raise UserError, "workflow #{@path} derived_credentials[#{name.inspect}]: " \
+                             "cannot declare both regex: and key:"
+          elsif !has_regex && !has_key
+            raise UserError, "workflow #{@path} derived_credentials[#{name.inspect}]: " \
+                             "must declare regex: or key:"
+          end
+          h[name] = if has_regex
+                      { from: v["from"], regex: v["regex"], capture: (v["capture"] || 1) }
+                    else
+                      { from: v["from"], key: v["key"].to_s }
+                    end
         end
         klass.derived_credentials(specs)
       end
@@ -92,13 +105,7 @@ module Freentonic
                                 content_type: ac["expected_content_type"])
       end
 
-      (ac["auth_headers"] || {}).each do |name, val|
-        if (m = val.to_s.match(/\A\{(\w+)\}\z/))
-          klass.auth_header(name, from: m[1].to_sym)
-        else
-          klass.auth_header(name, val.to_s)
-        end
-      end
+      apply_auth_headers(klass, ac["auth_headers"])
 
       Array(ac["endpoints"]).each do |ep|
         name       = ep["name"].to_sym
@@ -126,6 +133,47 @@ module Freentonic
 
       load_client_ext(klass, ac["ext"]) if ac["ext"]
       klass
+    end
+
+    # Translate the api_client.auth_headers YAML into klass.auth_header
+    # macro calls. Accepts two shapes:
+    #
+    #   1. Hash — flat name→value map applied to all hosts (back-compat).
+    #   2. Array — list of host-scoped blocks, each:
+    #        { "host" => optional_string, "headers" => Hash }
+    #      The "host" key is optional; omit it for a default block that
+    #      applies to all hosts. Blocks with "host" only apply to
+    #      requests whose URL has that host.
+    def apply_auth_headers(klass, ah)
+      return if ah.nil?
+
+      if ah.is_a?(Hash)
+        ah.each { |name, val| declare_auth_header(klass, name, val, nil) }
+        return
+      end
+
+      unless ah.is_a?(Array)
+        raise UserError, "workflow #{@path} api_client.auth_headers must be a Hash or Array of host blocks"
+      end
+
+      ah.each_with_index do |block, idx|
+        unless block.is_a?(Hash) && block["headers"].is_a?(Hash) && !block["headers"].empty?
+          raise UserError, "workflow #{@path} api_client.auth_headers[#{idx}]: must be a hash with a non-empty headers: hash"
+        end
+        host = block["host"]
+        if host && !(host.is_a?(String) && !host.empty?)
+          raise UserError, "workflow #{@path} api_client.auth_headers[#{idx}].host: must be a non-empty string when set"
+        end
+        block["headers"].each { |name, val| declare_auth_header(klass, name, val, host) }
+      end
+    end
+
+    def declare_auth_header(klass, name, val, host)
+      if (m = val.to_s.match(/\A\{(\w+)\}\z/))
+        klass.auth_header(name, from: m[1].to_sym, host: host)
+      else
+        klass.auth_header(name, val.to_s, host: host)
+      end
     end
 
     def apply_credentials(klass, cred_config)
