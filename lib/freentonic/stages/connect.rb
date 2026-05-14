@@ -3,6 +3,8 @@
 require "date"
 require "tmpdir"
 
+require_relative "../display_geometry"
+
 module Freentonic
   module Stages
     # Connect stage: launches Chrome via CDP, runs the YAML-declared
@@ -117,10 +119,9 @@ module Freentonic
 
       # Recording mode stealth overrides. The CDP launch path (used by
       # recording so the probe can be injected) doesn't ship with the
-      # browse-mode launch flags (--user-agent, --accept-lang,
-      # --force-device-scale-factor=2, --disable-features=UserAgentClientHint,
-      # TZ env). Applying them at runtime via CDP covers everything banks
-      # fingerprint at the JS / HTTP-header layer:
+      # browse-mode launch flags (--user-agent, --accept-lang, TZ env).
+      # Applying them at runtime via CDP covers what banks fingerprint
+      # at the JS / HTTP-header layer:
       #
       #   - Network.setUserAgentOverride spoofs the UA string AND the
       #     UA-CH headers (sec-ch-ua, sec-ch-ua-platform, …) via
@@ -131,9 +132,14 @@ module Freentonic
       #     navigator.languages so they match the IP's expected locale.
       #   - Emulation.setTimezoneOverride makes Intl/Date report
       #     Europe/Madrid instead of UTC.
-      #   - Emulation.setDeviceMetricsOverride bumps devicePixelRatio
-      #     to 2 (Retina) — vanishingly few real banking customers are
-      #     on 1× monitors in 2026.
+      #   - Emulation.setDeviceMetricsOverride pins devicePixelRatio
+      #     to 1. The earlier "pretend to be Retina (DPR=2)" override
+      #     was dropped: at DPR=2 with a 1280×800 backing display the
+      #     CSS viewport collapses to 640×400 and Chrome's physical
+      #     window blows past the Xvfb dimensions. A plain 1×
+      #     "crappy laptop" fingerprint is also a perfectly common
+      #     real-customer profile (lots of older Windows machines in
+      #     the Spanish banking customer base).
       #
       # NOT covered (would require modifying chrome_cdp.launch_chrome):
       # WebGL vendor/renderer (banks fingerprint these via the canvas
@@ -165,13 +171,14 @@ module Freentonic
         })
         @session.send_command("Emulation.setLocaleOverride",   { locale: locale })
         @session.send_command("Emulation.setTimezoneOverride", { timezoneId: tz })
+        emul_w, emul_h = DisplayGeometry.call
         @session.send_command("Emulation.setDeviceMetricsOverride", {
-          width:             1920,
-          height:            1080,
-          deviceScaleFactor: 2,
+          width:             emul_w,
+          height:            emul_h,
+          deviceScaleFactor: 1,
           mobile:            false
         })
-        stdout.puts "Recording: stealth overrides applied (UA/UA-CH=macOS, lang=#{locale}, tz=#{tz}, dpr=2)."
+        stdout.puts "Recording: stealth overrides applied (UA/UA-CH=macOS, lang=#{locale}, tz=#{tz}, dpr=1, viewport=#{emul_w}x#{emul_h})."
       end
 
       # In headless mode, also mask the "HeadlessChrome" User-Agent string
@@ -248,6 +255,22 @@ module Freentonic
         url   = initial_url_from_workflow
         lang  = ENV.fetch("FREENTONIC_INTERACTIVE_LANG", INTERACTIVE_DEFAULT_LANG)
         tz    = ENV.fetch("FREENTONIC_INTERACTIVE_TZ",   INTERACTIVE_DEFAULT_TZ)
+        win_w, win_h = DisplayGeometry.call
+
+        # Clear Chromium's singleton-lock sentinels. They live in
+        # --user-data-dir and exist to prevent two Chromes from
+        # corrupting the same profile; Chrome removes them on a clean
+        # exit. But Browse sessions cancelled mid-run (operator clicks
+        # Stop, container restart, scheduler SIGTERM) leave the lock
+        # symlinks behind, and the *next* Browse launch sees them and
+        # bails with "profile in use by another Chromium process",
+        # which is why Browse can look like it died randomly on every
+        # second attempt. The CDP path does this same cleanup before
+        # launch (see chrome_cdp.rb#start); mirror it here.
+        %w[SingletonLock SingletonCookie SingletonSocket].each do |f|
+          path = File.join(chrome_cdp.profile_dir, f)
+          File.delete(path) if File.symlink?(path) || File.exist?(path)
+        end
 
         args = [
           chrome_cdp.chrome_binary,
@@ -260,11 +283,25 @@ module Freentonic
           # ships an empty-ish default that flags as "fresh container,
           # no real user" against banks that fingerprint locale.
           "--accept-lang=#{lang}",
-          # Pretend to be a Retina (2× DPI) display — vanishingly few
-          # real banking customers are on 1× monitors in 2026. The
-          # real Xvfb display stays 1920×1080; this just changes what
-          # CSS / window.devicePixelRatio reports.
-          "--force-device-scale-factor=2",
+          # NOTE: we intentionally do NOT set --force-device-scale-factor
+          # here (the CDP/Recording path does). Chrome interprets
+          # --window-size in CSS pixels, so DPR=2 with window-size=1280,800
+          # makes the physical window 2560×1600 — bigger than the Xvfb
+          # display, so the right/bottom edges clip outside what noVNC
+          # can show. Browse is human-driven (the operator provides all
+          # the legitimate interaction signals), so the anti-bot benefit
+          # of pretending to be Retina is much weaker than for Sync.
+          # Trade-off: banks see DPR=1, which Windows laptops report
+          # natively — still a plausible real-customer fingerprint.
+          #
+          # We also do NOT set --test-type here even though it would
+          # suppress the "unsupported flag --no-sandbox" yellow bar at
+          # the top of the page. --test-type is fine for CDP-controlled
+          # Chrome (Sync/Record) but on the no-CDP interactive launch
+          # it puts Chrome into an automated-testing mode that exits
+          # early — i.e. it visibly breaks Browse. Leaving the
+          # cosmetic yellow bar is the right tradeoff: the bank page
+          # still renders below it and the operator can scroll past.
           # Mute the User-Agent Client Hints headers (sec-ch-ua,
           # sec-ch-ua-platform, sec-ch-ua-mobile, …). The `--user-agent`
           # flag above only spoofs the legacy UA string; UA-CH would
@@ -276,13 +313,17 @@ module Freentonic
           # similar. The proper fix is the puppeteer-stealth-style
           # extension that spoofs the values; that's roadmap.
           "--disable-features=UserAgentClientHint",
-          # Match the Xvfb display (1920x1080 in docker-entrypoint.sh).
-          # Without this, Chromium picks a smaller default size and
-          # anchors lower-left, leaving the noVNC viewer with empty
-          # desktop margin around the bank UI. --start-maximized would
-          # be more idiomatic but Xvfb has no window manager to honor
-          # the maximize hint; an explicit size is the reliable form.
-          "--window-size=1920,1080"
+          # Match the Xvfb display (driven by FREENTONIC_XVFB_GEOMETRY in
+          # docker-entrypoint.sh, default 1280x800). Without this,
+          # Chromium either picks a smaller default and anchors lower-
+          # left (empty desktop margin around the bank UI) or — worse,
+          # if we hardcoded a larger value than the Xvfb display —
+          # asks for a window the display can't accommodate and Chrome
+          # exits, taking the VNC session down with it.
+          # --start-maximized would be more idiomatic but Xvfb has no
+          # window manager to honor the maximize hint; an explicit size
+          # is the reliable form.
+          "--window-size=#{win_w},#{win_h}"
         ]
         if @context[:no_sandbox]
           # --no-sandbox is mandatory for Chrome inside an unprivileged
@@ -314,16 +355,24 @@ module Freentonic
         stdout.puts "  url:     #{url || '(none — opens to new tab)'}"
         stdout.puts "  lang:    #{lang}"
         stdout.puts "  tz:      #{tz}"
+        stdout.puts "  window:  #{win_w}x#{win_h} (driven by FREENTONIC_XVFB_GEOMETRY)"
+        stdout.puts "  display: #{ENV['DISPLAY']}"
 
         # `TZ` env makes JS `Intl.DateTimeFormat().resolvedOptions().timeZone`
         # return the configured zone — without this it would say UTC,
         # which doesn't match an IP-geolocated Spanish customer and is
         # a classic anti-bot heuristic. Also affects Date()'s offset.
+        #
+        # Chrome stderr is routed to the run's stderr (which the
+        # invoke server captures into the run log) so SIGSEGV / GPU
+        # init failures / "Display :99 cannot be opened" / etc. are
+        # visible. Previously it went to /dev/null and the run would
+        # silently die seconds after launch with no breadcrumb.
         @interactive_chrome_pid = Process.spawn(
           { "TZ" => tz },
           *args,
           out: "/dev/null",
-          err: "/dev/null"
+          err: stderr
         )
         # Detach so the kernel reaps the child as soon as it exits.
         # Without this, an operator-closed Chrome lingers as a zombie

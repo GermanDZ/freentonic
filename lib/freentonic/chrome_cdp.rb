@@ -16,6 +16,8 @@ require "socket"
 require "base64"
 require "securerandom"
 
+require_relative "display_geometry"
+
 module Freentonic
   module ChromeCdp
     CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -181,6 +183,7 @@ module Freentonic
         File.delete(path) if File.symlink?(path) || File.exist?(path)
       end
 
+      width, height = DisplayGeometry.call
       args = [
         chrome_binary,
         "--remote-debugging-port=#{@port}",
@@ -190,14 +193,16 @@ module Freentonic
         "--disable-features=IsolateOrigins,site-per-process",
         "--disable-infobars",
         "--lang=es-ES",
-        # Match the Xvfb display (1920x1080 in docker-entrypoint.sh) so the
-        # Chrome window fills the X display end-to-end. Without this,
-        # Chromium picks a smaller default and the noVNC viewer shows
-        # Chrome anchored in a corner with empty desktop margin around it.
-        # Headed (recording) and headless both want the same dimensions —
-        # headless only needs an explicit size at all because there's no
-        # display to inherit from, but matching Xvfb is correct in both.
-        "--window-size=1920,1080"
+        # Match the Xvfb display (driven by FREENTONIC_XVFB_GEOMETRY in
+        # docker-entrypoint.sh) so the Chrome window fills the X display
+        # end-to-end. Without this Chromium picks a smaller default and
+        # the noVNC viewer shows Chrome anchored in a corner with empty
+        # desktop margin around it; with a window-size larger than the
+        # display, Chrome clips or refuses to launch. Headed (recording)
+        # and headless both want the same dimensions — headless only
+        # needs an explicit size at all because there's no display to
+        # inherit from, but matching Xvfb is correct in both.
+        "--window-size=#{width},#{height}"
       ]
       args << "--headless=new" if @headless
       # Prevent Chrome from exposing automation signals (navigator.webdriver,
