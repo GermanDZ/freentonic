@@ -34,7 +34,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for defense-in-depth.
-RUN groupadd -r freentonic && useradd -r -g freentonic -m -s /bin/bash freentonic
+#
+# Stable explicit uid (vs `useradd -r`'s Debian-dynamic system uid) so
+# volumes are owned predictably across rebuilds, and so sibling
+# containers that share `/workspace/runs` or `/home/freentonic/workflows`
+# (e.g. simplefreen's bridge) can mount them under the same uid and
+# avoid cross-uid permission games.
+ARG FREENTONIC_UID=10001
+RUN groupadd -g ${FREENTONIC_UID} freentonic \
+ && useradd  -u ${FREENTONIC_UID} -g ${FREENTONIC_UID} -m -s /bin/bash freentonic
 
 # noVNC static assets + websockify. Runs under the freentonic user at
 # runtime; read-only access is enough.
