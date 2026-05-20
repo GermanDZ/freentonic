@@ -108,12 +108,6 @@ if [ ! -d "${WORKFLOWS_DIR}" ] || [ -z "$(ls -A "${WORKFLOWS_DIR}" 2>/dev/null)"
   echo "[entrypoint]   -v /path/to/workflows:${WORKFLOWS_DIR}:ro"
 fi
 
-# Tmpfs dir for per-invoke secret files. /dev/shm is a container-local
-# tmpfs so it never hits the backing filesystem and evaporates on restart.
-TMPFS_DIR="${FREENTONIC_TMPFS_DIR:-/dev/shm/freentonic/runs}"
-mkdir -p "${TMPFS_DIR}"
-chmod 0700 "${TMPFS_DIR}"
-
 # Always use Xvfb virtual display — gives Chrome a real display context so
 # behavioral captchas don't reject it. Lightweight (~8MB RAM).
 Xvfb :99 -screen 0 "${XVFB_GEOMETRY}" &>/dev/null &

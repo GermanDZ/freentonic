@@ -21,9 +21,10 @@ A single container that:
 - Writes per-run artifacts (screenshots, logs) under `/workspace/runs/<run_id>/`,
   which you bind-mount to a host directory. The web app reads files
   directly from that host directory.
-- Passes credentials through an in-memory tmpfs and the API token
-  through a child-only environment variable — neither touches disk
-  (other than the tmpfs) and neither appears in `ps` output or argv.
+- Passes credentials in-process through an inherited pipe (the
+  child's `inline_fd` secret backend) and the API token through a
+  child-only environment variable — neither touches disk and neither
+  appears in `ps` output or argv.
 
 Non-goals for v1: parallelism across tenants, log streaming, metrics.
 See the plan file for the full follow-up list.
@@ -185,7 +186,6 @@ Everything else below is optional.
 | `FREENTONIC_LISTEN_PORT` | `7878` | Port inside the container. |
 | `FREENTONIC_WORKFLOWS_DIR` | `/home/freentonic/workflows` | Workflow root inside the container. The `/invoke` request's `workflow` field is resolved against this path. |
 | `FREENTONIC_RUNS_DIR` | `/workspace/runs` | Per-run artifact root inside the container. |
-| `FREENTONIC_TMPFS_DIR` | `/dev/shm/freentonic/runs` | Where inline credentials are written during a run (auto-cleaned). |
 | `FREENTONIC_CHROME_PROFILE_ROOT` | `/home/freentonic/.cache/freentonic/chrome` | Chrome profile parent. Subdirectories are created per `profile_key`. |
 | `FREENTONIC_VNC_PASSWORD_FILE` | `/dev/shm/freentonic/vnc-password` | Tmpfs path that x11vnc reads with `-passwdfile read:` and the server rotates per-invoke. Rarely worth overriding. |
 | `FREENTONIC_VNC` | `1` | Starts x11vnc on `:5900` and noVNC on `:6080`. No container-wide default password — in server mode the password comes from each `/invoke`'s `vnc_password`; in `cli` mode it comes from `FREENTONIC_VNC_PASSWORD` (below) or a random value printed on startup. See [Step 8](#step-8--debugging-with-vnc). |
@@ -461,9 +461,11 @@ want that reset.
   the same `profile_key` with different credentials, their sessions
   can conflict. Always derive a per-tenant `profile_key` (e.g.
   `acme__tenant42`) in your web app.
-- **The tmpfs secrets file at `/dev/shm/freentonic/runs/<run_id>/secrets.env`**
-  lives only for the duration of the invoke and has mode `0600`.
-  Because invokes are serialized, two runs' secrets files never coexist.
+- **Inline credentials are passed via an inherited pipe**, not a
+  file. The child reads them from fd 3 (the `inline_fd` secret
+  backend) and the bytes never reach a filesystem path. Because
+  invokes are serialized and the pipe is anonymous, two runs'
+  credentials never coexist on disk.
 
 ---
 

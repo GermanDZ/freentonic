@@ -79,6 +79,7 @@ module Freentonic
         from_normalized: nil,
         secrets_backend: nil,
         secrets_file: nil,
+        secrets_fd: nil,
         exporters: [], # array of { name:, options: {} }
         purge: false,
         force: false,
@@ -106,6 +107,7 @@ module Freentonic
 
         opts.on("--secrets BACKEND", "Secret backend (#{Secrets.registered.join("|")})") { |v| options[:secrets_backend] = v.to_sym }
         opts.on("--secrets-file PATH", "Path for plain_file backend") { |v| options[:secrets_file] = v }
+        opts.on("--secrets-fd N", Integer, "Inherited fd carrying a dotenv payload for the inline_fd backend") { |v| options[:secrets_fd] = v }
 
         opts.on("--export NAME", "Add an exporter (#{Exporters.registered.join("|")}); repeatable") do |v|
           options[:exporters] << { name: v.to_sym, options: {} }
@@ -260,10 +262,26 @@ module Freentonic
 
     def build_secret_store(options)
       name = options[:secrets_backend] || Secrets.default_name
-      if name == :plain_file
+
+      # Validation matrix for the three secret-source flags. `--secrets-fd`
+      # only makes sense alongside `--secrets inline_fd`; covers both
+      # `--secrets-fd N` alone (default backend != inline_fd) and any
+      # other-backend + --secrets-fd combo.
+      if options[:secrets_fd] && name != :inline_fd
+        raise UserError, "--secrets-fd requires --secrets inline_fd"
+      end
+      if name == :inline_fd && options[:secrets_file]
+        raise UserError, "--secrets inline_fd does not take --secrets-file"
+      end
+
+      case name
+      when :plain_file
         path = options[:secrets_file] or raise UserError, "--secrets plain_file requires --secrets-file PATH"
         @stderr.puts(Secrets::PlainFile.insecure_banner)
         Secrets::PlainFile.new(path: path)
+      when :inline_fd
+        fd = options[:secrets_fd] or raise UserError, "--secrets inline_fd requires --secrets-fd N"
+        Secrets::InlineFd.new(fd: fd)
       else
         Secrets.build(name)
       end
