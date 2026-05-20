@@ -6,9 +6,10 @@ require "securerandom"
 
 module Freentonic
   # Per-invoke work unit. Owns the filesystem side of running one freentonic
-  # subprocess: creating the run directory, writing the tmpfs secrets file,
-  # spawning the child with a scoped ENV, enforcing the timeout, and cleaning
-  # up the tmpfs file afterwards. Never touches the host-owned run directory
+  # subprocess: creating the run directory, spawning the child with a scoped
+  # ENV, enforcing the timeout. Inline credentials are passed in-process via
+  # an inherited pipe (fd 3) consumed by the child's `inline_fd` secret
+  # backend — no on-disk artifact. Never touches the host-owned run directory
   # or the chrome profile directory (both are meant to persist).
   #
   # Serialization is the server's responsibility — this class assumes the
@@ -47,7 +48,6 @@ module Freentonic
       end
     end
 
-    DEFAULT_TMPFS_DIR            = "/dev/shm/freentonic/runs"
     DEFAULT_RUNS_DIR             = "/workspace/runs"
     DEFAULT_WORKFLOWS_DIR        = "/home/freentonic/workflows"
     DEFAULT_CHROME_PROFILE_ROOT  = File.expand_path("~/.cache/freentonic/chrome")
@@ -63,12 +63,15 @@ module Freentonic
       SecureRandom.hex(32)
     end
 
-    attr_reader :workflows_dir, :runs_dir, :tmpfs_dir, :chrome_profile_root, :vnc_password_file
+    attr_reader :workflows_dir, :runs_dir, :chrome_profile_root, :vnc_password_file
+
+    # Pre-assigned fd number used to hand inline credentials to the child.
+    # 0/1/2 are stdin/stdout/stderr; 3 is the first free slot.
+    INLINE_SECRETS_FD = 3
 
     def initialize(
       workflows_dir:          DEFAULT_WORKFLOWS_DIR,
       runs_dir:               DEFAULT_RUNS_DIR,
-      tmpfs_dir:              DEFAULT_TMPFS_DIR,
       chrome_profile_root:    DEFAULT_CHROME_PROFILE_ROOT,
       freentonic_cmd:         DEFAULT_FREENTONIC_CMD,
       artifact_root:          DEFAULT_ARTIFACT_ROOT,
@@ -77,7 +80,6 @@ module Freentonic
     )
       @workflows_dir       = workflows_dir
       @runs_dir            = runs_dir
-      @tmpfs_dir           = tmpfs_dir
       @chrome_profile_root = chrome_profile_root
       @freentonic_cmd      = Array(freentonic_cmd).dup.freeze
       @artifact_root       = artifact_root
@@ -103,24 +105,13 @@ module Freentonic
       chrome_profile_dir = File.join(@chrome_profile_root, request.profile_key)
       FileUtils.mkdir_p(chrome_profile_dir, mode: 0o750)
 
-      tmpfs_run_dir = nil
-      secrets_path  = nil
-
       started_at = Time.now
       warnings   = []
 
-      if request.credentials_inline
-        tmpfs_run_dir = File.join(@tmpfs_dir, request.run_id)
-        FileUtils.mkdir_p(@tmpfs_dir, mode: 0o700)
-        FileUtils.mkdir_p(tmpfs_run_dir, mode: 0o700)
-        secrets_path = File.join(tmpfs_run_dir, "secrets.env")
-        write_secrets_file(secrets_path, request.credentials_inline)
-      else
-        secrets_path = request.credentials_file
-      end
+      secrets_arg, extra_fds = build_secrets_handoff(request)
 
       env  = build_env(request, chrome_profile_dir: chrome_profile_dir, run_dir: run_dir)
-      argv = build_argv(request, secrets_path: secrets_path, run_dir: run_dir)
+      argv = build_argv(request, secrets_arg: secrets_arg, run_dir: run_dir)
 
       # Set the VNC password for this run before spawning the child. If the
       # caller didn't supply one, we write an unreachable value so attaching
@@ -129,7 +120,7 @@ module Freentonic
       write_vnc_password(request.vnc_password || self.class.random_unreachable_password)
 
       log_path = File.join(run_dir, "log")
-      exit_code, timed_out, signaled = spawn_and_wait(env, argv, log_path, request.timeout_sec, &on_start)
+      exit_code, timed_out, signaled = spawn_and_wait(env, argv, log_path, request.timeout_sec, extra_fds: extra_fds, &on_start)
       warnings << "timeout reached (#{request.timeout_sec}s); child was terminated" if timed_out
 
       Result.new(
@@ -144,7 +135,6 @@ module Freentonic
       )
     ensure
       cleanup_chrome(chrome_profile_dir) if chrome_profile_dir
-      cleanup_tmpfs(tmpfs_run_dir)       if tmpfs_run_dir
       # Always relock VNC after a run, regardless of exit path (timeout,
       # crash, validation-late error). x11vnc re-reads its passwdfile
       # on every new client connection, so the next noVNC attach sees
@@ -175,11 +165,28 @@ module Freentonic
       log("vnc passwdfile write failed at #{@vnc_password_file}: #{e.class}: #{e.message}")
     end
 
-    def write_secrets_file(path, inline)
-      File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |f|
-        inline.each do |key, value|
-          f.puts("#{key}=#{value}")
-        end
+    # Returns [secrets_arg, extra_fds] where:
+    #   secrets_arg : [:fd, n] or [:file, path] — consumed by #build_argv.
+    #   extra_fds   : Hash<Integer, IO> merged into Process.spawn options
+    #                 (the IOs are closed in the parent after spawn returns,
+    #                 in #spawn_and_wait).
+    #
+    # For inline credentials we buffer the dotenv payload through a pipe
+    # whose read end the child inherits as INLINE_SECRETS_FD. The payload
+    # is written and the write end closed BEFORE spawn so the child sees
+    # EOF after consuming the buffered bytes. Inline payloads are well
+    # below the Linux 64KB pipe buffer, so the synchronous write never
+    # blocks; no writer thread required.
+    def build_secrets_handoff(request)
+      if request.credentials_inline
+        read_io, write_io = IO.pipe
+        payload = request.credentials_inline
+          .sort.map { |k, v| "#{k}=#{v}" }.join("\n")
+        write_io.write(payload)
+        write_io.close
+        [[:fd, INLINE_SECRETS_FD], { INLINE_SECRETS_FD => read_io }]
+      else
+        [[:file, request.credentials_file], {}]
       end
     end
 
@@ -199,11 +206,14 @@ module Freentonic
       env
     end
 
-    def build_argv(request, secrets_path:, run_dir:)
+    def build_argv(request, secrets_arg:, run_dir:)
       argv = @freentonic_cmd.dup
       argv << "--no-sandbox"
       argv.push("--workflow", request.workflow_path)
-      argv.push("--secrets", "plain_file", "--secrets-file", secrets_path)
+      case secrets_arg
+      in [:file, path] then argv.push("--secrets", "plain_file", "--secrets-file", path)
+      in [:fd,   n]    then argv.push("--secrets", "inline_fd",  "--secrets-fd",   n.to_s)
+      end
       argv.push("--lookback", request.lookback.to_s) if request.lookback
       argv << "--isolated" if request.chrome["isolated"]
       argv << "--headless" if request.chrome["headless"]
@@ -236,7 +246,7 @@ module Freentonic
       argv
     end
 
-    def spawn_and_wait(env, argv, log_path, timeout_sec, &on_start)
+    def spawn_and_wait(env, argv, log_path, timeout_sec, extra_fds: {}, &on_start)
       log_fd = File.open(log_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600)
       begin
         pid = Process.spawn(
@@ -245,10 +255,15 @@ module Freentonic
           close_others:    true,
           pgroup:          true,
           out:             log_fd,
-          err:             log_fd
+          err:             log_fd,
+          **extra_fds
         )
       ensure
         log_fd.close rescue nil
+        # Parent's copies of any inherited pipe ends are no longer needed —
+        # the child has its own dup'd fd. Closing here releases the
+        # parent-side fd promptly instead of waiting for GC.
+        extra_fds.each_value { |io| io.close rescue nil }
       end
 
       pgid = begin
@@ -307,14 +322,6 @@ module Freentonic
       Process.kill("-#{signal}", pgid)
     rescue Errno::ESRCH
       nil
-    end
-
-    def cleanup_tmpfs(tmpfs_run_dir)
-      return unless tmpfs_run_dir && Dir.exist?(tmpfs_run_dir)
-      # rm_rf handles the secrets file + any stragglers the child might have written.
-      FileUtils.rm_rf(tmpfs_run_dir)
-    rescue StandardError => e
-      log("tmpfs cleanup failed at #{tmpfs_run_dir}: #{e.class}: #{e.message}")
     end
 
     def cleanup_chrome(profile_dir)

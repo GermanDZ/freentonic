@@ -25,6 +25,7 @@ require_relative "freentonic/secrets/store"
 require_relative "freentonic/secrets/cli"
 require_relative "freentonic/secrets/macos_keychain"
 require_relative "freentonic/secrets/plain_file"
+require_relative "freentonic/secrets/inline_fd"
 require_relative "freentonic/secret_resolver"
 
 require_relative "freentonic/canonical"

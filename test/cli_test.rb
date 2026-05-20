@@ -172,6 +172,57 @@ module Freentonic
       assert_match(/--interactive cannot be combined with --dump-normalized/, err.message)
     end
 
+    # --- Secret-backend option matrix --------------------------------------
+
+    def secret_options(overrides = {})
+      {
+        secrets_backend: nil,
+        secrets_file: nil,
+        secrets_fd: nil
+      }.merge(overrides)
+    end
+
+    def test_inline_fd_without_secrets_fd_rejects
+      cli = Cli.new(stderr: StringIO.new)
+      err = assert_raises(UserError) do
+        cli.send(:build_secret_store, secret_options(secrets_backend: :inline_fd))
+      end
+      assert_match(/inline_fd requires --secrets-fd/, err.message)
+    end
+
+    def test_inline_fd_with_secrets_file_rejects
+      cli = Cli.new(stderr: StringIO.new)
+      err = assert_raises(UserError) do
+        cli.send(:build_secret_store, secret_options(
+          secrets_backend: :inline_fd, secrets_fd: 3, secrets_file: "/tmp/x"
+        ))
+      end
+      assert_match(/inline_fd does not take --secrets-file/, err.message)
+    end
+
+    def test_plain_file_with_secrets_fd_rejects
+      # Same "--secrets-fd requires --secrets inline_fd" rule — there is no
+      # combination of plain_file + --secrets-fd that's meaningful.
+      cli = Cli.new(stderr: StringIO.new)
+      err = assert_raises(UserError) do
+        cli.send(:build_secret_store, secret_options(
+          secrets_backend: :plain_file, secrets_file: "/tmp/x", secrets_fd: 3
+        ))
+      end
+      assert_match(/--secrets-fd requires --secrets inline_fd/, err.message)
+    end
+
+    def test_secrets_fd_without_inline_fd_backend_rejects
+      cli = Cli.new(stderr: StringIO.new)
+      err = assert_raises(UserError) do
+        # backend left as nil, so Secrets.default_name kicks in (cli or
+        # macos_keychain depending on host). Either way, --secrets-fd is
+        # only valid alongside --secrets inline_fd.
+        cli.send(:build_secret_store, secret_options(secrets_fd: 3))
+      end
+      assert_match(/--secrets-fd requires --secrets inline_fd/, err.message)
+    end
+
     def test_interactive_rejects_export
       # Output-producing exporters can never fire on the interactive path
       # (engine short-circuits at Connect). Reject explicitly so the

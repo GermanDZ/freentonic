@@ -101,8 +101,8 @@ FREENTONIC_SECRETS_FILE=~/.freentonic-secrets ./docker-run-freentonic.sh cli \
 ```
 
 In server mode you don't need any of this — the web app sends
-credentials on the `/invoke` body and the server writes the tmpfs
-file itself.
+credentials on the `/invoke` body and the server hands them to the
+child process through an inherited pipe.
 
 ## Chrome profile persistence
 

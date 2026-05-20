@@ -11,11 +11,10 @@ class InvokeRunnerTest < Minitest::Test
     @root = Dir.mktmpdir("freentonic-runner-test-")
     @workflows_dir       = File.join(@root, "workflows")
     @runs_dir            = File.join(@root, "runs")
-    @tmpfs_dir           = File.join(@root, "tmpfs")
     @chrome_profile_root = File.join(@root, "chrome")
     @vnc_dir             = File.join(@root, "vnc")
     @vnc_password_file   = File.join(@vnc_dir, "password")
-    FileUtils.mkdir_p([@workflows_dir, @runs_dir, @tmpfs_dir, @chrome_profile_root, @vnc_dir])
+    FileUtils.mkdir_p([@workflows_dir, @runs_dir, @chrome_profile_root, @vnc_dir])
 
     @workflow_rel = "acme/workflow.yml"
     @workflow_abs = File.join(@workflows_dir, @workflow_rel)
@@ -27,9 +26,10 @@ class InvokeRunnerTest < Minitest::Test
     FileUtils.rm_rf(@root)
   end
 
-  # The stub masquerades as bin/freentonic. Writes its argv, env, and the
-  # contents/mode of its --secrets-file into $FREENTONIC_RUN_DIR/stub/ so
-  # the test can assert on them after the run finishes.
+  # The stub masquerades as bin/freentonic. Writes its argv, env, the
+  # contents of the inherited inline-secrets fd (when present), and a
+  # snapshot of the pre-spawn VNC passwdfile into $FREENTONIC_RUN_DIR/stub/
+  # so the test can assert on them after the run finishes.
   STUB_HEADER = <<~'BASH'
     #!/bin/bash
     set +e
@@ -40,9 +40,13 @@ class InvokeRunnerTest < Minitest::Test
 
     # Find --secrets-file PATH in argv (paired, preserves spaces in values).
     secrets_path=""
+    secrets_fd=""
     prev=""
     for arg in "$@"; do
-      if [ "$prev" = "--secrets-file" ]; then secrets_path="$arg"; break; fi
+      case "$prev" in
+        --secrets-file) secrets_path="$arg" ;;
+        --secrets-fd)   secrets_fd="$arg" ;;
+      esac
       prev="$arg"
     done
 
@@ -50,6 +54,12 @@ class InvokeRunnerTest < Minitest::Test
       stat -c "%a" "$secrets_path" 2>/dev/null > "$R/secrets_mode" || \
       stat -f "%OLp" "$secrets_path"           > "$R/secrets_mode"
       cp "$secrets_path" "$R/secrets_contents"
+    fi
+
+    # Drain the inherited inline-secrets fd. The runner always picks fd 3,
+    # so hardcode it (bash redirection numbers must be literal).
+    if [ -n "$secrets_fd" ]; then
+      cat <&3 > "$R/secrets_contents"
     fi
 
     # Snapshot the vnc passwdfile that the server wrote BEFORE spawning us.
@@ -75,7 +85,6 @@ class InvokeRunnerTest < Minitest::Test
     Freentonic::InvokeRunner.new(
       workflows_dir:       @workflows_dir,
       runs_dir:            @runs_dir,
-      tmpfs_dir:           @tmpfs_dir,
       chrome_profile_root: @chrome_profile_root,
       freentonic_cmd:      ["/bin/bash", stub_path],
       artifact_root:       @root,
@@ -119,8 +128,13 @@ class InvokeRunnerTest < Minitest::Test
     argv = read_stub(run_dir, "argv")
     assert_includes argv, "--workflow\n"
     assert_includes argv, "--secrets\n"
-    assert_includes argv, "plain_file\n"
-    assert_includes argv, "--secrets-file\n"
+    assert_includes argv, "inline_fd\n"
+    assert_includes argv, "--secrets-fd\n"
+    assert_includes argv, "3\n", "inline-cred runs hand the dotenv over on fd 3"
+    refute_includes argv, "plain_file\n",
+      "inline credentials must not route through the plain_file backend"
+    refute_includes argv, "--secrets-file\n",
+      "inline credentials must not surface a file path"
     assert_includes argv, "--export\n"
     assert_includes argv, "http\n"
     assert_includes argv, "--export-url\n"
@@ -151,27 +165,18 @@ class InvokeRunnerTest < Minitest::Test
     assert_equal 0, result.exit_code
   end
 
-  def test_inline_secrets_written_with_mode_0600_and_content
+  def test_inline_secrets_handed_over_fd3_to_child
     stub = write_stub("exit 0")
     runner = build_runner(stub)
     request = build_request
     runner.run(request)
     run_dir = File.join(@runs_dir, request.run_id)
 
-    assert_equal "600", read_stub(run_dir, "secrets_mode").to_s.strip
     contents = read_stub(run_dir, "secrets_contents").to_s
     assert_includes contents, "USER=alice"
     assert_includes contents, "PW=s3cret"
-  end
-
-  def test_tmpfs_secrets_dir_removed_after_run
-    stub = write_stub("exit 0")
-    runner = build_runner(stub)
-    request = build_request
-    runner.run(request)
-
-    tmpfs_run = File.join(@tmpfs_dir, request.run_id)
-    refute Dir.exist?(tmpfs_run), "tmpfs run dir should be cleaned up: #{tmpfs_run}"
+    assert_nil read_stub(run_dir, "secrets_mode"),
+      "no on-disk secrets file should exist — the fd path bypasses the filesystem"
   end
 
   def test_log_file_is_written_with_mode_0600
