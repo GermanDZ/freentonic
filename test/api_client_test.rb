@@ -1029,14 +1029,19 @@ module Freentonic
     end
 
     def test_json_body_is_json_encoded_with_correct_content_type
+      # No charset suffix on application/json. RFC 8259 doesn't define
+      # one (JSON text is implicitly UTF-8) and at least one production
+      # API (ING /v2/products/transactions/search) silently rejects
+      # requests carrying ;charset=… by returning HTTP 200 with an
+      # empty result body. Pin the canonical media type to prevent
+      # accidental drift.
       captured = {}
       with_net_http_new(fake_http(captured)) do
         JsonPostFixtureClient.new.search_txs(uuids: ["a-uuid", "b-uuid"],
                                               from_date: Date.new(2026, 1, 1))
       end
       assert_equal "POST", captured[:method]
-      assert_equal "application/json;charset=UTF-8",
-                   captured[:headers]["content-type"]
+      assert_equal "application/json", captured[:headers]["content-type"]
     end
 
     def test_json_body_preserves_array_literal

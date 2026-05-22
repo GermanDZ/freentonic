@@ -538,7 +538,13 @@ module Freentonic
       auth_headers_for(base_url).each { |name, value| req[name] = value.to_s if value }
 
       if method == :post && !json.nil?
-        req["Content-Type"] = "application/json;charset=UTF-8"
+        # No charset suffix. application/json is implicitly UTF-8 per
+        # RFC 8259, but more importantly ING's API edge silently
+        # rejects requests whose Content-Type carries `;charset=…`,
+        # returning HTTP 200 with an empty `transactions: []` body
+        # rather than an error status. raw_request has always used
+        # the bare media type; keep json_post consistent.
+        req["Content-Type"] = "application/json"
         req.body = JSON.generate(json)
       elsif method == :post && form.any?
         req["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8"
