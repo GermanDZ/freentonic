@@ -124,8 +124,15 @@ module Freentonic
                            pagination: pagination, limit: limit,
                            response_extract_batch: rk)
         when "POST"
-          form = ep["form"] || {}
-          klass.define_post(name, path, base: base, form: form,
+          form = ep["form"]
+          json = ep["json"]
+          if form && json
+            raise UserError,
+                  "workflow #{@path} api_client.endpoints[#{name}] declares both " \
+                  "form: and json: — pick one (form: → application/x-www-form-urlencoded, " \
+                  "json: → application/json with Array/Hash literals preserved)."
+          end
+          klass.define_post(name, path, base: base, form: form, json: json,
                             pagination: pagination, limit: limit,
                             response_extract_batch: rk)
         end

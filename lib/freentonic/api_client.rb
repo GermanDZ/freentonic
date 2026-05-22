@@ -112,14 +112,44 @@ module Freentonic
         end
       end
 
-      # Generate a public POST method (form-encoded body).
-      # define_post :create_foo, "/foo",
-      #   form: { ppp: "{ppp}", fechaDesde: "{fecha_desde|date}" }
+      # Generate a public POST method.
+      #
+      # Body shape — pass exactly one of:
+      #
+      #   form: form-encoded body. Values stringify via URI.encode_www_form,
+      #   so nested structures (Arrays, Hashes) are lossy. Use for legacy
+      #   APIs that expect application/x-www-form-urlencoded.
+      #
+      #     define_post :create_foo, "/foo",
+      #       form: { ppp: "{ppp}", fechaDesde: "{fecha_desde|date}" }
+      #
+      #   json: JSON body (Content-Type: application/json). Values are
+      #   serialized via JSON.generate, so Arrays / nested Hashes /
+      #   booleans / integers round-trip unchanged. Use for modern JSON
+      #   APIs whose request bodies carry array fields.
+      #
+      #     define_post :search_txs, "/v2/products/transactions/search",
+      #       json: { uuids: "{uuids}", fromDate: "{from_date|iso}",
+      #               offset: "{offset}", limit: 100, withComment: false }
+      #
+      # Templates inside form/json are interpolated identically — both
+      # call ep_interpolate_hash, so {name}, {name|date}, {name|iso}, and
+      # {offset} all work in either shape. Literal values (numbers,
+      # booleans) pass through untouched, which only round-trips
+      # correctly in the json case.
+      #
       # response_extract_batch: same as define_get.
-      def define_post(method_name, path_template, base: nil, form: {}, pagination: nil,
-                      limit: 100, response_extract_batch: nil)
+      def define_post(method_name, path_template, base: nil, form: nil, json: nil,
+                      pagination: nil, limit: 100, response_extract_batch: nil)
+        if form && json
+          raise ArgumentError,
+                "define_post(#{method_name.inspect}): pass form: OR json:, not both"
+        end
+        body_format = json ? :json : :form
+        template    = json || form || {}
         _define_parameterized(method_name, :post, path_template, base: base,
-                               request_template: form, pagination: pagination, limit: limit,
+                               request_template: template, body_format: body_format,
+                               pagination: pagination, limit: limit,
                                response_extract_batch: response_extract_batch)
       end
 
@@ -249,7 +279,8 @@ module Freentonic
       private
 
       def _define_parameterized(method_name, http_method, path_template, base:,
-                                 request_template: {}, pagination: nil, limit: 100,
+                                 request_template: {}, body_format: :form,
+                                 pagination: nil, limit: 100,
                                  response_extract_batch: nil)
         rk = response_extract_batch
         define_method(method_name) do |**kwargs|
@@ -258,18 +289,28 @@ module Freentonic
           path      = ep_interpolate_path(path_template, kwargs)
           full_path = "#{self.class.get_api_root}#{path}"
 
+          dispatch = lambda do |resolved|
+            case http_method
+            when :get
+              get(resolved_url, full_path, params: resolved)
+            when :post
+              if body_format == :json
+                json_post(resolved_url, full_path, json: resolved)
+              else
+                post(resolved_url, full_path, form: resolved)
+              end
+            end
+          end
+
           case pagination&.to_s
           when "offset"
             paginate_by_offset(limit: limit) do |offset|
               resolved = ep_interpolate_hash(request_template, kwargs, offset: offset)
-              data = http_method == :get ? get(resolved_url, full_path, params: resolved)
-                                        : post(resolved_url, full_path, form: resolved)
-              extract_batch(data)
+              extract_batch(dispatch.call(resolved))
             end
           else
             resolved = ep_interpolate_hash(request_template, kwargs)
-            data = http_method == :get ? get(resolved_url, full_path, params: resolved)
-                                       : post(resolved_url, full_path, form: resolved)
+            data = dispatch.call(resolved)
             rk ? ep_extract_batch(data, rk) : data
           end
         end
@@ -401,6 +442,15 @@ module Freentonic
       request(:post, base_url, path, form: form)
     end
 
+    # Issue a POST request with a JSON body. Returns parsed JSON. The
+    # `json:` argument is serialized via JSON.generate, so Arrays /
+    # nested Hashes / booleans survive round-trip unchanged — which the
+    # form-encoded path can't promise (URI.encode_www_form stringifies
+    # everything).
+    def json_post(base_url, path, json: {})
+      request(:post, base_url, path, json: json)
+    end
+
     # Convenience: GET using the class-level base_url + api_root.
     def api_get(path, params: {})
       get(self.class.get_base_url, "#{self.class.get_api_root}#{path}", params: params)
@@ -409,6 +459,11 @@ module Freentonic
     # Convenience: POST using the class-level base_url + api_root.
     def api_post(path, form: {})
       post(self.class.get_base_url, "#{self.class.get_api_root}#{path}", form: form)
+    end
+
+    # Convenience: POST a JSON body using the class-level base_url + api_root.
+    def api_json_post(path, json: {})
+      json_post(self.class.get_base_url, "#{self.class.get_api_root}#{path}", json: json)
     end
 
     # Read a value from the api_client: YAML section.
@@ -463,7 +518,7 @@ module Freentonic
 
     private
 
-    def request(method, base_url, path, params: {}, form: {})
+    def request(method, base_url, path, params: {}, form: {}, json: nil)
       uri = URI("#{base_url}#{path}")
       uri.query = URI.encode_www_form(params) if params.any?
 
@@ -482,7 +537,16 @@ module Freentonic
       req["Accept-Language"] = "es-ES"
       auth_headers_for(base_url).each { |name, value| req[name] = value.to_s if value }
 
-      if method == :post && form.any?
+      if method == :post && !json.nil?
+        # No charset suffix. application/json is implicitly UTF-8 per
+        # RFC 8259, but more importantly ING's API edge silently
+        # rejects requests whose Content-Type carries `;charset=…`,
+        # returning HTTP 200 with an empty `transactions: []` body
+        # rather than an error status. raw_request has always used
+        # the bare media type; keep json_post consistent.
+        req["Content-Type"] = "application/json"
+        req.body = JSON.generate(json)
+      elsif method == :post && form.any?
         req["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8"
         req.body = URI.encode_www_form(form)
       end
