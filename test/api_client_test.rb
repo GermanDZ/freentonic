@@ -410,6 +410,16 @@ module Freentonic
       assert_respond_to client, :create_entry
     end
 
+    def test_define_post_form_and_json_are_mutually_exclusive
+      err = assert_raises(ArgumentError) do
+        Class.new(Freentonic::ApiClient) do
+          base_url "https://api.example.com"
+          define_post :bad_endpoint, "/x", form: { a: "{a}" }, json: { b: "{b}" }
+        end
+      end
+      assert_match(/form: OR json:/, err.message)
+    end
+
     # ── derived_credentials ──────────────────────────────────────────
 
     def test_derived_credential_extracts_via_regex
@@ -962,6 +972,140 @@ module Freentonic
       d = Date.new(2024, 3, 15)
       assert_equal "15/03/2024", client.ep_interpolate_val("{d|date}", { d: d })
       assert_equal "2024-03-15", client.ep_interpolate_val("{d|iso}",  { d: d })
+    end
+  end
+
+  # ── define_post with JSON body ───────────────────────────────────────
+  #
+  # The json: variant exists for modern APIs whose request bodies carry
+  # array or nested-hash fields — form: stringifies through
+  # URI.encode_www_form, which collapses Arrays to a lossy representation
+  # the server can't round-trip. ING's /v2/products/transactions/search
+  # is the motivating case (uuids: ["..."]).
+
+  class JsonPostFixtureClient < Freentonic::ApiClient
+    base_url "https://api.example.com"
+    api_root "/v1"
+    batch_keys "transactions"
+
+    define_post :search_txs, "/search",
+                json: {
+                  uuids:       "{uuids}",
+                  fromDate:    "{from_date|iso}",
+                  limit:       100,
+                  withComment: false
+                }
+
+    define_post :paged_search, "/paged-search",
+                json: {
+                  uuids:  "{uuids}",
+                  offset: "{offset}",
+                  limit:  2
+                },
+                pagination: :offset, limit: 2,
+                response_extract_batch: ["transactions"]
+
+    def pagination_sleep = nil
+  end
+
+  class JsonPostBodyTest < Minitest::Test
+    def fake_http(captured, response_body: '{"transactions":[]}')
+      h = Object.new
+      h.define_singleton_method(:use_ssl=)      { |_| }
+      h.define_singleton_method(:open_timeout=) { |_| }
+      h.define_singleton_method(:read_timeout=) { |_| }
+      h.define_singleton_method(:request) do |req|
+        captured[:method]  = req.method
+        captured[:path]    = req.path
+        captured[:body]    = req.body
+        captured[:headers] = req.each_header.to_h
+        captured[:calls] ||= 0
+        captured[:calls]  += 1
+        bodies = captured[:response_bodies]
+        body   = bodies ? bodies.shift || '{"transactions":[]}' : response_body
+        RawFakeResp.new("200", body, { "content-type" => "application/json" })
+      end
+      h
+    end
+
+    def test_json_body_is_json_encoded_with_correct_content_type
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        JsonPostFixtureClient.new.search_txs(uuids: ["a-uuid", "b-uuid"],
+                                              from_date: Date.new(2026, 1, 1))
+      end
+      assert_equal "POST", captured[:method]
+      assert_equal "application/json;charset=UTF-8",
+                   captured[:headers]["content-type"]
+    end
+
+    def test_json_body_preserves_array_literal
+      # The reason json: exists in the first place: arrays survive
+      # round-trip. form-encoded would collapse this to a stringified
+      # mess the bank's API would reject.
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        JsonPostFixtureClient.new.search_txs(uuids: ["a-uuid", "b-uuid"],
+                                              from_date: Date.new(2026, 1, 1))
+      end
+      body = JSON.parse(captured[:body])
+      assert_equal ["a-uuid", "b-uuid"], body["uuids"]
+    end
+
+    def test_json_body_applies_iso_date_filter
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        JsonPostFixtureClient.new.search_txs(uuids: ["x"],
+                                              from_date: Date.new(2026, 5, 22))
+      end
+      assert_equal "2026-05-22", JSON.parse(captured[:body])["fromDate"]
+    end
+
+    def test_json_body_preserves_literal_integer_and_boolean
+      # Form encoding stringifies everything, so 100 → "100" and
+      # false → "false". The JSON path must preserve the YAML/Ruby
+      # literal types so the server reads them as integer/boolean.
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        JsonPostFixtureClient.new.search_txs(uuids: ["x"], from_date: Date.new(2026, 1, 1))
+      end
+      body = JSON.parse(captured[:body])
+      assert_kind_of Integer, body["limit"]
+      assert_equal  100,      body["limit"]
+      assert_equal  false,    body["withComment"]
+    end
+
+    def test_json_body_pagination_offset_resolves_inside_body
+      captured = { response_bodies: [
+        # Page 1: full batch of 2 → loop continues.
+        '{"transactions":[{"id":1},{"id":2}]}',
+        # Page 2: empty → loop terminates.
+        '{"transactions":[]}'
+      ] }
+      with_net_http_new(fake_http(captured)) do
+        JsonPostFixtureClient.new.paged_search(uuids: ["u"])
+      end
+      # Both pages went out as POSTs; the second carried offset=2 in
+      # the JSON body (not as a query param).
+      assert_equal 2, captured[:calls]
+      last_body = JSON.parse(captured[:body])
+      assert_equal 2, last_body["offset"]
+      assert_equal ["u"], last_body["uuids"]
+    end
+
+    def test_form_post_path_unchanged_by_json_addition
+      # Regression pin: existing form-encoded POST endpoints must keep
+      # behaving identically — same content-type, same body encoding.
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        TemplateClient.new(token: "session-id=x").create_entry(
+          ppp: "1234", entry_date: Date.new(2024, 3, 15)
+        )
+      end
+      assert_equal "POST", captured[:method]
+      assert_equal "application/x-www-form-urlencoded;charset=UTF-8",
+                   captured[:headers]["content-type"]
+      assert_equal "ppp=1234&date=2024%2F03%2F15&flag=0", captured[:body]
     end
   end
 
