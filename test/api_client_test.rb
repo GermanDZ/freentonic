@@ -3,7 +3,8 @@ require_relative "test_helper"
 module Freentonic
   # Minimal concrete subclass that exposes protected/private methods for testing.
   class TestBankApiClient < Freentonic::ApiClient
-    public :paginate_by_offset, :paginate_by_cursor, :handle_response, :parse_json, :auth_headers
+    public :paginate_by_offset, :paginate_by_cursor, :handle_response, :parse_json, :auth_headers,
+           :ep_paginate_by_cursor, :ep_dig_path, :ep_cursor_continue_when?, :ep_extract_cursor_fields
     def pagination_sleep = nil  # skip inter-page delay in tests
   end
 
@@ -46,6 +47,331 @@ module Freentonic
   class BankApiClientTest < Minitest::Test
     def client
       @client ||= TestBankApiClient.new
+    end
+
+    # ── ep_dig_path ─────────────────────────────────────────────────
+
+    def test_ep_dig_path_walks_nested_hash
+      c = client
+      assert_equal "x", c.ep_dig_path({ "a" => { "b" => { "c" => "x" } } }, "a.b.c")
+    end
+
+    def test_ep_dig_path_nil_at_missing_segment
+      c = client
+      assert_nil c.ep_dig_path({ "a" => { "b" => {} } }, "a.b.c")
+    end
+
+    def test_ep_dig_path_handles_non_hash_intermediate
+      c = client
+      assert_nil c.ep_dig_path({ "a" => "scalar" }, "a.b")
+    end
+
+    def test_ep_dig_path_nil_source_or_path
+      c = client
+      assert_nil c.ep_dig_path(nil, "a.b")
+      assert_nil c.ep_dig_path({ "a" => "x" }, nil)
+    end
+
+    # ── ep_cursor_continue_when? ────────────────────────────────────
+
+    def test_cursor_continue_when_equals_match
+      c = client
+      response = { "env" => { "more" => "S" } }
+      spec = { "response_path" => "env.more", "equals" => "S" }
+      assert c.ep_cursor_continue_when?(spec, response)
+    end
+
+    def test_cursor_continue_when_equals_no_match
+      c = client
+      response = { "env" => { "more" => "N" } }
+      spec = { "response_path" => "env.more", "equals" => "S" }
+      refute c.ep_cursor_continue_when?(spec, response)
+    end
+
+    def test_cursor_continue_when_path_missing
+      c = client
+      response = { "other" => {} }
+      spec = { "response_path" => "env.more", "equals" => "S" }
+      refute c.ep_cursor_continue_when?(spec, response)
+    end
+
+    # ── ep_paginate_by_cursor (envelope-cursor flavor) ──────────────
+
+    # Build a dispatch lambda that returns successive canned responses
+    # and records the kwargs each call received. Tests assert against
+    # both the accumulated batch (return value of the loop) AND the
+    # per-call kwargs sequence (to verify initial_kwargs/continue_kwargs
+    # are applied at the right iteration).
+    def stub_dispatch(responses)
+      seen_kwargs = []
+      iter = 0
+      dispatch = lambda do |resolved|
+        seen_kwargs << resolved.dup
+        r = responses[iter] || responses.last
+        iter += 1
+        r
+      end
+      [dispatch, seen_kwargs]
+    end
+
+    def test_cursor_pagination_collects_batches_until_continue_when_false
+      c = client
+      responses = [
+        { "movimientos" => [1, 2, 3], "masMovimientos" => {
+            "indMasMovimientos" => "S",
+            "numUltimoMovimiento" => 100,
+            "ultimoSaldo" => { "cantidad" => 50.0 }
+        }},
+        { "movimientos" => [4, 5], "masMovimientos" => {
+            "indMasMovimientos" => "N",
+            "numUltimoMovimiento" => 200,
+            "ultimoSaldo" => { "cantidad" => 25.0 }
+        }}
+      ]
+      dispatch, seen = stub_dispatch(responses)
+
+      spec = {
+        "kind" => "cursor",
+        "initial_kwargs"  => { "ind_operacion" => "I" },
+        "continue_kwargs" => { "ind_operacion" => "P" },
+        "cursor_from_response" => {
+          "saldo_ult_mov" => "masMovimientos.ultimoSaldo.cantidad",
+          "num_ult_mov"   => "masMovimientos.numUltimoMovimiento"
+        },
+        "continue_when" => { "response_path" => "masMovimientos.indMasMovimientos", "equals" => "S" }
+      }
+
+      result = c.ep_paginate_by_cursor(
+        spec:             spec,
+        kwargs:           { ppp: "123" },
+        request_template: {
+          ppp:           "{ppp}",
+          ind_operacion: "{ind_operacion}",
+          saldo_ult_mov: "{saldo_ult_mov}",
+          num_ult_mov:   "{num_ult_mov}"
+        },
+        dispatch:         dispatch,
+        extract_batch:    ->(d) { d["movimientos"] || [] }
+      )
+
+      assert_equal [1, 2, 3, 4, 5], result
+      assert_equal "I", seen[0][:ind_operacion]
+      assert_equal "P", seen[1][:ind_operacion]
+      assert_equal 50.0, seen[1][:saldo_ult_mov]
+      assert_equal 100,  seen[1][:num_ult_mov]
+      refute seen[0].key?(:saldo_ult_mov)
+      refute seen[0].key?(:num_ult_mov)
+    end
+
+    def test_cursor_pagination_stops_on_empty_batch
+      c = client
+      responses = [
+        { "movimientos" => [], "masMovimientos" => { "indMasMovimientos" => "S" } }
+      ]
+      dispatch, seen = stub_dispatch(responses)
+
+      spec = {
+        "kind" => "cursor",
+        "cursor_from_response" => { "x" => "env.x" },
+        "continue_when" => { "response_path" => "masMovimientos.indMasMovimientos", "equals" => "S" }
+      }
+
+      result = c.ep_paginate_by_cursor(
+        spec: spec, kwargs: {}, request_template: { x: "{x}" },
+        dispatch: dispatch, extract_batch: ->(d) { d["movimientos"] || [] }
+      )
+
+      assert_equal [], result
+      assert_equal 1, seen.size  # one dispatch, then empty batch → stop
+    end
+
+    def test_cursor_pagination_stops_when_required_cursor_field_nil
+      c = client
+      # masMovimientos says continue (S), but numUltimoMovimiento is missing —
+      # the provider's own loop would also stop here, surfacing as
+      # "masMovimientos cursor incomplete; stopping". Verify the framework
+      # does the same.
+      responses = [
+        { "movimientos" => [1], "masMovimientos" => {
+            "indMasMovimientos" => "S",
+            "ultimoSaldo" => { "cantidad" => 1.0 }
+            # numUltimoMovimiento missing
+        }}
+      ]
+      dispatch, _ = stub_dispatch(responses)
+
+      spec = {
+        "kind" => "cursor",
+        "cursor_from_response" => {
+          "saldo_ult_mov" => "masMovimientos.ultimoSaldo.cantidad",
+          "num_ult_mov"   => "masMovimientos.numUltimoMovimiento"
+        },
+        "continue_when" => { "response_path" => "masMovimientos.indMasMovimientos", "equals" => "S" }
+      }
+
+      result = c.ep_paginate_by_cursor(
+        spec: spec, kwargs: {}, request_template: {
+          saldo_ult_mov: "{saldo_ult_mov}", num_ult_mov: "{num_ult_mov}"
+        },
+        dispatch: dispatch, extract_batch: ->(d) { d["movimientos"] || [] }
+      )
+
+      assert_equal [1], result  # got the first page, then stopped
+    end
+
+    def test_cursor_pagination_respects_max
+      c = client
+      # Server says S forever, batch never empties — `max` is the only
+      # backstop against runaway loops.
+      iter = 0
+      dispatch = lambda do |_resolved|
+        iter += 1
+        { "items" => [iter * 10, iter * 10 + 1],
+          "env"   => { "more" => "S", "next" => iter } }
+      end
+
+      spec = {
+        "kind" => "cursor",
+        "max" => 5,
+        "cursor_from_response" => { "next" => "env.next" },
+        "continue_when" => { "response_path" => "env.more", "equals" => "S" }
+      }
+
+      result = c.ep_paginate_by_cursor(
+        spec: spec, kwargs: {}, request_template: { next: "{next}" },
+        dispatch: dispatch, extract_batch: ->(d) { d["items"] }
+      )
+
+      assert_operator result.size, :>=, 5
+      assert_operator iter,        :<=, 5
+    end
+
+    # ── ep_paginate_by_cursor (row-cursor flavor) ───────────────────
+
+    # Mirror of Revolut's pagination: cursor extracted from the LAST
+    # row in the batch, walking backward in time until the cursor
+    # crosses the from_ms boundary. Values use realistic ms-scale
+    # timestamps (>10^12) so parse_timestamp_ms's seconds-vs-ms
+    # heuristic treats them as already-ms passthroughs.
+    MS_2024_03_15 = 1_710_500_000_000
+    MS_2024_03_10 = 1_710_000_000_000
+    MS_2024_03_05 = 1_709_600_000_000
+    MS_2024_03_01 = 1_709_300_000_000   # the from_ms boundary
+
+    def test_cursor_from_last_row_extracts_alias_chain_and_stops_on_lower_bound
+      c = client
+      # Page 1's last row uses `completedDate` (covers the alias chain).
+      # Page 2's last cursor crosses the from_ms boundary → stop.
+      responses = [
+        { "transactions" => [
+            { "id" => 1, "startedDate" => MS_2024_03_15 },
+            { "id" => 2, "startedDate" => MS_2024_03_10 },
+            { "id" => 3, "completedDate" => MS_2024_03_05 }
+        ]},
+        { "transactions" => [
+            { "id" => 4, "startedDate" => MS_2024_03_01 - 100_000 }
+        ]}
+      ]
+      dispatch, seen = stub_dispatch(responses)
+
+      spec = {
+        "kind" => "cursor",
+        "initial_kwargs" => { "to" => "{now_ms}" },
+        "cursor_from_last_row" => {
+          "to" => { "fields" => %w[startedDate completedDate createdDate],
+                    "coerce" => "timestamp_ms" }
+        },
+        "continue_when" => {
+          "cursor_gt" => { "field" => "to", "value" => "{from_ms}" }
+        }
+      }
+
+      result = c.ep_paginate_by_cursor(
+        spec:             spec,
+        kwargs:           { from_ms: MS_2024_03_01 },
+        request_template: { to: "{to}", from_ms: "{from_ms}" },
+        dispatch:         dispatch,
+        extract_batch:    ->(d) { d["transactions"] }
+      )
+
+      # All 4 rows accumulated; loop stops after page 2 because the
+      # new cursor crossed below from_ms.
+      assert_equal [1, 2, 3, 4], result.map { |r| r["id"] }
+      assert_equal 2, seen.size
+
+      # First call carried `to: now_ms` (an Integer roughly = current time).
+      assert_kind_of Integer, seen[0][:to]
+      # Second call carried the cursor read from row 3 via completedDate.
+      assert_equal MS_2024_03_05, seen[1][:to]
+    end
+
+    def test_cursor_from_last_row_stops_on_cycle
+      c = client
+      # Both pages return the same last-row timestamp — cycle stops the
+      # loop after the second iteration.
+      responses = [
+        { "transactions" => [{ "id" => 1, "startedDate" => MS_2024_03_10 }] },
+        { "transactions" => [{ "id" => 2, "startedDate" => MS_2024_03_10 }] },
+        { "transactions" => [{ "id" => 3, "startedDate" => MS_2024_03_10 }] }
+      ]
+      dispatch, seen = stub_dispatch(responses)
+
+      spec = {
+        "kind" => "cursor",
+        "initial_kwargs" => { "to" => "{now_ms}" },
+        "cursor_from_last_row" => {
+          "to" => { "fields" => %w[startedDate], "coerce" => "timestamp_ms" }
+        }
+      }
+
+      c.ep_paginate_by_cursor(
+        spec: spec, kwargs: {}, request_template: { to: "{to}" },
+        dispatch: dispatch, extract_batch: ->(d) { d["transactions"] }
+      )
+
+      # iter 0 (initial to=now), iter 1 (to=MS_2024_03_10) — third call
+      # would re-extract the same cursor → cycle → stop. So 2 dispatches.
+      assert_equal 2, seen.size
+    end
+
+    def test_cursor_from_last_row_iso_string_coerces_to_ms
+      c = client
+      responses = [
+        { "transactions" => [{ "id" => 1, "startedDate" => "2024-03-15T10:00:00.000Z" }] },
+        { "transactions" => [] }   # second page empty → loop stops cleanly
+      ]
+      dispatch, seen = stub_dispatch(responses)
+
+      spec = {
+        "kind" => "cursor",
+        "initial_kwargs" => { "to" => "{now_ms}" },
+        "cursor_from_last_row" => {
+          "to" => { "fields" => %w[startedDate], "coerce" => "timestamp_ms" }
+        }
+      }
+
+      result = c.ep_paginate_by_cursor(
+        spec: spec, kwargs: {}, request_template: { to: "{to}" },
+        dispatch: dispatch, extract_batch: ->(d) { d["transactions"] }
+      )
+
+      assert_equal 1, result.size
+      # The second call's `to` should be the ISO string parsed to ms
+      # (2024-03-15T10:00:00Z = 1710496800000).
+      assert_equal Time.utc(2024, 3, 15, 10).to_i * 1000, seen[1][:to]
+    end
+
+    def test_cursor_continue_when_cursor_gt_stops_when_le
+      c = client
+      response = { "transactions" => [] }   # unused, cursor_gt is purely cursor-based
+      spec = { "cursor_gt" => { "field" => "to", "value" => "{from_ms}" } }
+
+      # new cursor > from_ms → continue
+      assert c.ep_cursor_continue_when?(spec, response, { to: 2000 }, { from_ms: 1500 })
+      # new cursor == from_ms → stop (equality is the boundary)
+      refute c.ep_cursor_continue_when?(spec, response, { to: 1500 }, { from_ms: 1500 })
+      # new cursor < from_ms → stop
+      refute c.ep_cursor_continue_when?(spec, response, { to: 1000 }, { from_ms: 1500 })
     end
 
     # ── paginate_by_offset ──────────────────────────────────────────

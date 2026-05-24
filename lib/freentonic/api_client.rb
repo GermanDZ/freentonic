@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "date"
+require "time"
 require "net/http"
 require "uri"
 require "json"
@@ -283,6 +284,7 @@ module Freentonic
                                  pagination: nil, limit: 100,
                                  response_extract_batch: nil)
         rk = response_extract_batch
+        pagination_kind, pagination_spec = _normalize_pagination(method_name, pagination)
         define_method(method_name) do |**kwargs|
           resolved_url = base || self.class.get_base_url
           raise ArgumentError, "#{self.class}##{method_name}: no base URL configured" unless resolved_url
@@ -302,17 +304,52 @@ module Freentonic
             end
           end
 
-          case pagination&.to_s
-          when "offset"
+          case pagination_kind
+          when :offset
             paginate_by_offset(limit: limit) do |offset|
               resolved = ep_interpolate_hash(request_template, kwargs, offset: offset)
               extract_batch(dispatch.call(resolved))
             end
+          when :cursor
+            ep_paginate_by_cursor(
+              spec:             pagination_spec,
+              kwargs:           kwargs,
+              request_template: request_template,
+              dispatch:         dispatch,
+              extract_batch:    rk ? ->(d) { ep_extract_batch(d, rk) } : method(:extract_batch)
+            )
           else
             resolved = ep_interpolate_hash(request_template, kwargs)
             data = dispatch.call(resolved)
             rk ? ep_extract_batch(data, rk) : data
           end
+        end
+      end
+
+      # Normalize the YAML pagination spec into [kind_sym, spec_hash].
+      # Accepts the legacy String/Symbol forms (`:offset`, `"offset"`) and
+      # the new Hash form (`{ "kind" => "cursor", … }`). Raises a clear
+      # error for unknown shapes at class-definition time so the failure
+      # surfaces at workflow load, not at first call.
+      def _normalize_pagination(method_name, pagination)
+        return [nil, nil] if pagination.nil?
+        case pagination
+        when :offset, "offset"
+          [:offset, nil]
+        when Hash
+          kind = pagination["kind"] || pagination[:kind]
+          case kind.to_s
+          when "offset" then [:offset, pagination]
+          when "cursor" then [:cursor, pagination]
+          else
+            raise ArgumentError,
+                  "#{self}##{method_name}: pagination.kind must be \"offset\" " \
+                  "or \"cursor\" (got #{kind.inspect})"
+          end
+        else
+          raise ArgumentError,
+                "#{self}##{method_name}: pagination must be nil, :offset, " \
+                "or a Hash with kind: (got #{pagination.inspect})"
         end
       end
     end
@@ -686,6 +723,185 @@ module Freentonic
       return nil if raw.nil?
       d = raw.is_a?(Date) ? raw : Date.parse(raw.to_s)
       d.strftime("%Y-%m-%d")
+    end
+
+    # Declarative cursor pagination driven by a YAML spec. Each iteration:
+    #
+    #   1. Merge initial_kwargs (first call only) or continue_kwargs
+    #      (subsequent calls) into the caller's kwargs, plus any cursor
+    #      values extracted from the previous response.
+    #   2. Interpolate the request_template and dispatch.
+    #   3. Extract the batch and accumulate; an empty batch stops the
+    #      loop unconditionally.
+    #   4. Evaluate continue_when against the raw response (envelope
+    #      flavor) or the new cursor value (cursor_gt flavor) — if it
+    #      doesn't hold, stop.
+    #   5. Extract the next cursor field values via dotted paths into
+    #      the response (cursor_from_response) and/or alias chains on
+    #      the last batch row (cursor_from_last_row). Any required
+    #      field coming back nil stops the loop. A cycle (new cursor
+    #      == previous cursor) also stops, matching paginate_by_cursor.
+    #
+    # Safety cap defaults to 10_000 rows; YAML may override via `max:`.
+    def ep_paginate_by_cursor(spec:, kwargs:, request_template:, dispatch:, extract_batch:)
+      cap             = (spec["max"] || spec[:max] || 10_000).to_i
+      initial_kwargs  = ep_symbolize_keys(spec["initial_kwargs"] || spec[:initial_kwargs] || {})
+      cont_kwargs     = ep_symbolize_keys(spec["continue_kwargs"] || spec[:continue_kwargs] || {})
+      env_decls       = spec["cursor_from_response"] || spec[:cursor_from_response] || {}
+      row_decls       = spec["cursor_from_last_row"] || spec[:cursor_from_last_row] || {}
+      cont_when       = spec["continue_when"] || spec[:continue_when]
+      initial_kwargs  = ep_resolve_runtime_tokens(initial_kwargs, kwargs)
+
+      all           = []
+      iteration     = 0
+      cursor_kwargs = {}
+      loop do
+        merged = kwargs.dup
+        merged.merge!(initial_kwargs) if iteration.zero?
+        merged.merge!(cont_kwargs)    if iteration.positive?
+        merged.merge!(cursor_kwargs)
+
+        resolved = ep_interpolate_hash(request_template, merged)
+        response = dispatch.call(resolved)
+        batch    = extract_batch.call(response)
+
+        break if !batch.is_a?(Array) || batch.empty?
+        all.concat(batch)
+        break if all.size >= cap
+
+        next_cursor = {}
+        next_cursor.merge!(ep_extract_cursor_fields(env_decls, response))
+        next_cursor.merge!(ep_extract_cursor_fields_from_row(row_decls, batch.last))
+
+        # Any required cursor field that came back nil → stop. Mirrors
+        # the defensive nil-checks providers were writing by hand
+        # ("masMovimientos cursor incomplete; stopping").
+        break if !next_cursor.empty? && next_cursor.values.any?(&:nil?)
+
+        # Cycle detection: if the cursor didn't move forward, stop.
+        # Catches both server-side bugs (same cursor twice) and
+        # legitimate end-of-feed signals (the timestamp-cursor case
+        # where the last row's timestamp >= the cursor we just sent).
+        break if !next_cursor.empty? && next_cursor == cursor_kwargs
+
+        if cont_when && !ep_cursor_continue_when?(cont_when, response, next_cursor, kwargs)
+          break
+        end
+
+        cursor_kwargs = next_cursor
+        iteration += 1
+        pagination_sleep
+      end
+      all
+    end
+
+    # Evaluate the continue_when block. Two supported shapes:
+    #
+    #   1. Envelope path equality (envelope-cursor flavor):
+    #        { "response_path" => "a.b.c", "equals" => "S" }
+    #      Compared as strings so YAML scalars round-trip cleanly.
+    #
+    #   2. Cursor-value lower bound (row-cursor flavor):
+    #        { "cursor_gt" => { "field" => "to", "value" => "{from_ms}" } }
+    #      Continues as long as the new cursor's value (Numeric) is
+    #      strictly greater than the kwarg value the caller supplied
+    #      (also Numeric). Equality stops — once the cursor would
+    #      walk past the lookback boundary, the loop terminates.
+    def ep_cursor_continue_when?(spec, response, next_cursor = {}, kwargs = {})
+      if (gt = spec["cursor_gt"] || spec[:cursor_gt])
+        field  = gt["field"] || gt[:field]
+        token  = gt["value"] || gt[:value]
+        new_v  = next_cursor[field.to_sym]
+        bound  = ep_interpolate_val(token, kwargs)
+        return true if new_v.nil? || bound.nil?
+        return new_v.to_f > bound.to_f
+      end
+
+      path  = spec["response_path"] || spec[:response_path]
+      value = spec["equals"]        || spec[:equals]
+      return true if path.nil? || value.nil?
+      ep_dig_path(response, path).to_s == value.to_s
+    end
+
+    def ep_extract_cursor_fields(decls, response)
+      decls.each_with_object({}) do |(kwarg_name, source), h|
+        path = case source
+               when Hash then source["from_response"] || source[:from_response]
+               else           source
+               end
+        h[kwarg_name.to_sym] = ep_dig_path(response, path)
+      end
+    end
+
+    # Last-row cursor extraction with an alias chain + coercion. Each
+    # decl looks like:
+    #
+    #   { "fields" => [a, b, c], "coerce" => "timestamp_ms" }
+    #
+    # `fields` is walked in order; the first non-nil value wins.
+    # `coerce` is optional — currently only "timestamp_ms" is
+    # supported (Numeric passthrough, String parsed via
+    # ep_parse_timestamp_ms).
+    def ep_extract_cursor_fields_from_row(decls, last_row)
+      return {} if decls.nil? || decls.empty? || !last_row.is_a?(Hash)
+      decls.each_with_object({}) do |(kwarg_name, source), h|
+        fields = source["fields"] || source[:fields] || []
+        coerce = source["coerce"] || source[:coerce]
+        raw    = Array(fields).lazy.map { |f| last_row[f.to_s] }.find { |v| !v.nil? }
+        h[kwarg_name.to_sym] = case coerce.to_s
+                                when "timestamp_ms" then ep_parse_timestamp_ms(raw)
+                                else                     raw
+                                end
+      end
+    end
+
+    # Parse a value to a Unix millisecond timestamp. Mirrors
+    # Helpers#parse_timestamp_ms — ApiClient doesn't include Helpers
+    # so the logic is duplicated rather than entangled across layers.
+    def ep_parse_timestamp_ms(value)
+      case value
+      when Numeric
+        value > 1_000_000_000_000 ? value.to_i : (value * 1000).to_i
+      when String
+        if value =~ /\A\d+\z/
+          v = value.to_i
+          v > 1_000_000_000_000 ? v : v * 1000
+        else
+          (Time.parse(value).to_f * 1000).to_i
+        end
+      end
+    rescue ArgumentError, TypeError
+      nil
+    end
+
+    # Resolve runtime-only tokens in a kwargs hash. Currently:
+    #   {now_ms} — current Unix time in milliseconds (Integer).
+    # All other token shapes are resolved by the normal interpolation
+    # pipeline (ep_interpolate_val) against the caller's kwargs, so
+    # initial_kwargs: { to: "{from_ms}" } also Just Works when
+    # from_ms is a caller kwarg.
+    def ep_resolve_runtime_tokens(kwargs_hash, caller_kwargs)
+      kwargs_hash.each_with_object({}) do |(k, v), h|
+        h[k] = if v.is_a?(String) && v == "{now_ms}"
+                 (Time.now.to_f * 1000).to_i
+               elsif v.is_a?(String) && v =~ /\A\{[^}]+\}\z/
+                 ep_interpolate_val(v, caller_kwargs)
+               else
+                 v
+               end
+      end
+    end
+
+    def ep_dig_path(source, path)
+      return nil if path.nil? || source.nil?
+      path.to_s.split(".").inject(source) do |acc, key|
+        next nil unless acc.is_a?(Hash)
+        acc[key]
+      end
+    end
+
+    def ep_symbolize_keys(h)
+      h.each_with_object({}) { |(k, v), out| out[k.to_sym] = v }
     end
   end
 
