@@ -44,6 +44,87 @@ class CanonicalBuilderTest < Minitest::Test
     assert_nil Builder.map_status(nil)
   end
 
+  # --- map_status_from ---------------------------------------------------
+
+  def test_map_status_from_canonicalizes_posted
+    map = { "COMPLETED" => "posted", "PENDING" => "pending" }
+    assert_equal "posted",  Builder.map_status_from("COMPLETED", map)
+    assert_equal "pending", Builder.map_status_from("PENDING", map)
+  end
+
+  def test_map_status_from_passes_through_custom_status
+    map = { "DECLINED" => "declined", "REVERTED" => "reverted" }
+    assert_equal "declined", Builder.map_status_from("DECLINED", map)
+    assert_equal "reverted", Builder.map_status_from("REVERTED", map)
+  end
+
+  def test_map_status_from_case_insensitive_raw
+    map = { "completed" => "posted" }
+    assert_equal "posted", Builder.map_status_from("Completed", map)
+    assert_equal "posted", Builder.map_status_from("COMPLETED", map)
+  end
+
+  def test_map_status_from_unknown_raw_returns_nil
+    assert_nil Builder.map_status_from("AUTHORIZED", { "COMPLETED" => "posted" })
+  end
+
+  def test_map_status_from_nil_inputs
+    assert_nil Builder.map_status_from(nil, { "X" => "posted" })
+    assert_nil Builder.map_status_from("", { "X" => "posted" })
+    assert_nil Builder.map_status_from("X", nil)
+  end
+
+  # --- spanish_iban_portable_keys ---------------------------------------
+
+  def test_spanish_iban_portable_keys_returns_ref_and_id
+    ref, pid = Builder.spanish_iban_portable_keys("ES0012345678901234567890", bank_code: "1465")
+    assert_equal "1465:7890", ref
+    assert_equal "bank:1465:7890", pid
+  end
+
+  def test_spanish_iban_portable_keys_rejects_non_spanish
+    assert_equal [nil, nil], Builder.spanish_iban_portable_keys("FR0012345678901234567890", bank_code: "1465")
+  end
+
+  def test_spanish_iban_portable_keys_rejects_short_iban
+    assert_equal [nil, nil], Builder.spanish_iban_portable_keys("ES12", bank_code: "1465")
+  end
+
+  def test_spanish_iban_portable_keys_rejects_nil_iban
+    assert_equal [nil, nil], Builder.spanish_iban_portable_keys(nil, bank_code: "1465")
+  end
+
+  def test_spanish_iban_portable_keys_requires_bank_code
+    assert_equal [nil, nil], Builder.spanish_iban_portable_keys("ES0012345678901234567890", bank_code: nil)
+    assert_equal [nil, nil], Builder.spanish_iban_portable_keys("ES0012345678901234567890", bank_code: "")
+  end
+
+  # --- card_pan_portable_keys -------------------------------------------
+
+  def test_card_pan_portable_keys_full_pan
+    ref, pid = Builder.card_pan_portable_keys("4174804472958619", bank_code: "1465")
+    assert_equal "1465:8619", ref
+    assert_equal "card:1465:8619", pid
+  end
+
+  def test_card_pan_portable_keys_masked_pan
+    ref, pid = Builder.card_pan_portable_keys("**** **** **** 8619", bank_code: "2103")
+    assert_equal "2103:8619", ref
+    assert_equal "card:2103:8619", pid
+  end
+
+  def test_card_pan_portable_keys_rejects_short_pan
+    assert_equal [nil, nil], Builder.card_pan_portable_keys("12", bank_code: "1465")
+  end
+
+  def test_card_pan_portable_keys_rejects_nil
+    assert_equal [nil, nil], Builder.card_pan_portable_keys(nil, bank_code: "1465")
+  end
+
+  def test_card_pan_portable_keys_requires_bank_code
+    assert_equal [nil, nil], Builder.card_pan_portable_keys("4174804472958619", bank_code: nil)
+  end
+
   # --- build_account -----------------------------------------------------
 
   def test_build_account_produces_canonical_entity

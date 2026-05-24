@@ -35,6 +35,80 @@ module Freentonic
         end
       end
 
+      # Resolve a provider-side status code through a declared mapping.
+      # `mapping` is a plain Hash loaded from <provider>/config.yml's
+      # `status_map:` block (auto-bound as STATUS_MAP via Configurable):
+      #
+      #   status_map:
+      #     COMPLETED: posted
+      #     PENDING:   pending
+      #     DECLINED:  declined
+      #
+      # `posted` and `pending` resolve to the canonical constants
+      # (Transaction::POSTED, Transaction::PENDING); any other string
+      # passes through verbatim so providers can declare custom
+      # downstream-only statuses ("declined", "reverted", …).
+      #
+      # Returns nil when raw is nil/blank or the mapping doesn't cover
+      # it — callers decide whether to default to POSTED or leave
+      # unset. Lookup is case-insensitive on the raw key so a provider
+      # whose API mixes "Completed"/"COMPLETED" doesn't need two rows.
+      def map_status_from(raw, mapping)
+        return nil if raw.nil? || mapping.nil?
+        key = raw.to_s
+        return nil if key.empty?
+        canonical =
+          mapping[key] ||
+            mapping[key.upcase] ||
+            mapping[key.downcase] ||
+            mapping.find { |k, _| k.to_s.casecmp(key).zero? }&.last
+        return nil if canonical.nil?
+        case canonical.to_s
+        when "posted"  then Freentonic::Canonical::Transaction::POSTED
+        when "pending" then Freentonic::Canonical::Transaction::PENDING
+        else canonical.to_s
+        end
+      end
+
+      # --- Portable keys ---------------------------------------------------
+
+      # Cross-provider portable key for a Spanish-IBAN-bearing account.
+      # The 4-digit tail of the IBAN identifies the account within a
+      # bank, and a bank_code prefix scopes it across banks — together
+      # they form the "BANKID:LAST4" shape that aggregators (Fintonic)
+      # and direct scrapes (ING, Unicaja, …) can both produce, so
+      # cross-source matching collapses onto the same canonical
+      # Account.id. Returns [nil, nil] for non-Spanish or malformed
+      # IBANs; the caller (or the framework's Canonical.account_id
+      # default) falls back to (institution, source_id) derivation.
+      #
+      #   Builder.spanish_iban_portable_keys("ES0012345678901234567890",
+      #                                      bank_code: "1465")
+      #   #=> ["1465:7890", "bank:1465:7890"]
+      def spanish_iban_portable_keys(iban, bank_code:)
+        return [nil, nil] if bank_code.nil? || bank_code.to_s.empty?
+        return [nil, nil] unless iban.is_a?(String) && iban.length >= 18 && iban.start_with?("ES")
+        ref = "#{bank_code}:#{iban[-4, 4]}"
+        [ref, "bank:#{ref}"]
+      end
+
+      # Cross-provider portable key for a credit-card account. The PAN's
+      # last 4 digits identify the plastic; a bank_code prefix scopes
+      # it across banks. PAN extraction defers to Helpers.pan_last4 so
+      # masked/spaced/dashed PANs all resolve to the same 4-digit tail.
+      # Returns [nil, nil] when the PAN is missing, blank, or has fewer
+      # than 4 digits.
+      #
+      #   Builder.card_pan_portable_keys("**** **** **** 8619", bank_code: "1465")
+      #   #=> ["1465:8619", "card:1465:8619"]
+      def card_pan_portable_keys(pan, bank_code:)
+        return [nil, nil] if bank_code.nil? || bank_code.to_s.empty?
+        last4 = Freentonic::Providers::Helpers.pan_last4(pan)
+        return [nil, nil] unless last4
+        ref = "#{bank_code}:#{last4}"
+        [ref, "card:#{ref}"]
+      end
+
       # --- Entity factories ------------------------------------------------
 
       # Build a Canonical::Account. Computes id via Canonical.account_id.
