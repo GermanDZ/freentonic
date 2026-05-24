@@ -173,6 +173,47 @@ module Freentonic
         nil
       end
 
+      # Resolve a logical field name to its first non-nil value in a
+      # source Hash, walking an alias chain declared in the provider's
+      # config.yml `field_aliases:` block. The mapping auto-binds to
+      # the class constant FIELD_ALIASES via Configurable.
+      #
+      #   # config.yml
+      #   field_aliases:
+      #     iban:    [iban, IBAN]
+      #     date:    [fechaOperacion, fechaoper, fechaValor, fechavalor, fecha]
+      #     balance: [saldo, saldoActual, saldoDisponible, balance]
+      #
+      #   # normalizer.rb
+      #   pick(:iban, account_row)          #=> first non-nil of iban / IBAN
+      #   pick(:date, movement_row)         #=> first non-nil of the 5 keys
+      #
+      # `aliases:` lets callers pass an explicit list when they don't
+      # want to rely on the class constant (mostly useful in tests).
+      # Nil semantics match the `||` chains this helper replaces: only
+      # nil is treated as "missing" — empty strings pass through, so
+      # provider knowledge about empty-string handling stays at the
+      # call site.
+      #
+      # Returns nil when FIELD_ALIASES isn't defined, the logical key
+      # isn't in the map, or no aliased key has a non-nil value.
+      def pick(logical_key, source, aliases: nil)
+        return nil unless source.is_a?(Hash)
+        map = aliases
+        if map.nil?
+          klass = self.class
+          map = klass.const_get(:FIELD_ALIASES, true) if klass.const_defined?(:FIELD_ALIASES, true)
+        end
+        return nil unless map.is_a?(Hash)
+        list = map[logical_key.to_s]
+        return nil if list.nil?
+        Array(list).each do |k|
+          v = source[k.to_s]
+          return v unless v.nil?
+        end
+        nil
+      end
+
       # Extract the last 4 digits of a card number for use in a card-account
       # portable_ref ("BANKID:LAST4"). Tolerates the masking patterns banks
       # actually emit:
@@ -199,6 +240,10 @@ module Freentonic
         return nil if digits.length < 4
         digits[-4, 4]
       end
+      # Also reachable as Freentonic::Providers::Helpers.pan_last4 so the
+      # Builder (a module_function-style namespace) can defer to a single
+      # implementation instead of duplicating the regex.
+      module_function :pan_last4
 
       private
 

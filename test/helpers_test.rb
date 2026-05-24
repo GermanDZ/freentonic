@@ -258,4 +258,53 @@ class HelpersTest < Minitest::Test
     # last-4 case. to_s coercion should handle it without ceremony.
     assert_equal "8619", pan_last4(8619)
   end
+
+  # --- pick (field_aliases lookup) ---
+
+  ALIASES = { "date" => %w[fechaOperacion fechaoper fechaValor], "iban" => %w[iban IBAN] }
+
+  def test_pick_returns_first_non_nil_via_explicit_aliases
+    src = { "fechaoper" => "01/01/2026" }
+    assert_equal "01/01/2026", pick(:date, src, aliases: ALIASES)
+  end
+
+  def test_pick_returns_nil_when_no_alias_matches
+    assert_nil pick(:date, { "other" => "x" }, aliases: ALIASES)
+  end
+
+  def test_pick_accepts_string_or_symbol_logical_key
+    src = { "iban" => "ES00…" }
+    assert_equal "ES00…", pick("iban", src, aliases: ALIASES)
+    assert_equal "ES00…", pick(:iban,  src, aliases: ALIASES)
+  end
+
+  def test_pick_empty_string_is_not_treated_as_missing
+    # Matches `||` semantics so we don't change the behaviour at call sites
+    # that don't currently filter empties.
+    src = { "iban" => "", "IBAN" => "ES00…" }
+    assert_equal "", pick(:iban, src, aliases: ALIASES)
+  end
+
+  def test_pick_returns_nil_for_non_hash_source
+    assert_nil pick(:date, nil, aliases: ALIASES)
+    assert_nil pick(:date, "string", aliases: ALIASES)
+  end
+
+  def test_pick_unknown_logical_key_returns_nil
+    assert_nil pick(:not_declared, { "iban" => "x" }, aliases: ALIASES)
+  end
+
+  def test_pick_resolves_via_class_constant_when_no_aliases_arg
+    klass = Class.new do
+      include Freentonic::Providers::Helpers
+    end
+    klass.const_set(:FIELD_ALIASES, { "date" => %w[a b] })
+    instance = klass.new
+    assert_equal "v", instance.pick(:date, { "b" => "v" })
+  end
+
+  def test_pick_no_class_constant_and_no_aliases_returns_nil
+    klass = Class.new { include Freentonic::Providers::Helpers }
+    assert_nil klass.new.pick(:date, { "a" => "x" })
+  end
 end
