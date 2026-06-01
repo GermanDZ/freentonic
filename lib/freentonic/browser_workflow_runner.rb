@@ -101,6 +101,8 @@ module Freentonic
           @stdout.print "    [yml] wait_url: includes \"#{includes}\" (timeout: #{timeout}s)"
           wait_for_url(includes, timeout: timeout)
           @stdout.puts " ✓"
+        when "await_external_approval"
+          await_external_approval(step)
         when "wait_network_idle"
           seconds = Integer(step.fetch("seconds", 3))
           @stdout.puts "    [yml] wait_network_idle: #{seconds}s"
@@ -534,6 +536,66 @@ module Freentonic
         @stdout.print "      waiting for elevation completion (timeout: #{completion_to}s)"
         matched = wait_for_branches(completion.fetch("branches"), timeout: completion_to)
         @stdout.puts " → #{describe_branch(matched)}"
+      end
+
+      # Wait for an out-of-band approval (e.g. a phone push) that resolves
+      # itself by changing the browser URL. Unlike a silent wait_url, this
+      # surfaces a structured `await` prompt so the operator sees a clear
+      # "waiting on you" card in the admin UI instead of anonymous progress
+      # dots. The card auto-clears the moment the URL flips (the runner
+      # withdraws the request); the operator can also click the fallback
+      # button if the redirect is slow. Local-dev (tty) and headless runs
+      # with no prompt channel fall back to the plain wait_url behavior.
+      def await_external_approval(step)
+        message  = resolved(step.fetch("message"))
+        includes = step.fetch("url_includes")
+        timeout  = Integer(step.fetch("timeout", 300))
+        expected = resolved(includes)
+
+        # Already across (remembered approval / already logged in): nothing
+        # to wait on. Mirrors the login phase's _if_present no-ops.
+        if current_url_value.include?(expected)
+          @stdout.puts "    [yml] await_external_approval: already at #{expected.inspect}, skipping"
+          return
+        end
+
+        @stdout.puts "    ⏳ #{message}"
+
+        store = stdin_is_tty? ? nil : remote_prompt_store
+        unless store
+          # No operator channel (tty dev run, or no FREENTONIC_RUN_DIR): keep
+          # the legacy behavior — note above, then wait silently on the URL.
+          @stdout.print "    [yml] await_external_approval: waiting for #{expected.inspect} (timeout: #{timeout}s)"
+          wait_for_url(includes, timeout: timeout)
+          @stdout.puts " ✓"
+          return
+        end
+
+        begin
+          store.prompt(
+            kind: :await,
+            message: message,
+            mask: false,
+            timeout_seconds: timeout,
+            until_satisfied: -> { current_url_value.include?(expected) }
+          )
+        rescue RemotePromptStore::Timeout
+          # The deadline may have raced the URL settling; check once more
+          # before declaring failure.
+          return if current_url_value.include?(expected)
+          save_timeout_screenshot("await_external_approval #{expected.inspect}")
+          raise UserError, "await_external_approval: timed out after #{timeout}s waiting for #{expected.inspect}"
+        end
+
+        # The prompt resolved either because the URL already flipped (nothing
+        # left to do) or because the operator clicked the fallback before the
+        # redirect landed — in that case give it a short grace wait.
+        unless current_url_value.include?(expected)
+          @stdout.print "    [yml] await_external_approval: confirmed, waiting for redirect to #{expected.inspect}"
+          wait_for_url(includes, timeout: [timeout, 60].min)
+          @stdout.puts " ✓"
+        end
+        @stdout.puts "    [yml] await_external_approval: approved ✓"
       end
 
       # Snapshot localStorage / sessionStorage for the given security

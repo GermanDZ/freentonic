@@ -698,7 +698,7 @@ module Freentonic
 
     # POST /runs/{run_id}/prompts/{prompt_id}
     #
-    # Body: { "value": "..." } for kind=input, or {} for kind=confirm.
+    # Body: { "value": "..." } for kind=input, or {} for kind=confirm/await.
     # 204 on success, 404 if unknown, 409 if already answered, 410 if
     # expired, 400 on shape errors.
     def handle_submit_prompt(req, run_id, prompt_id)
@@ -742,7 +742,11 @@ module Freentonic
           return [400, { "error" => "missing or empty value for input prompt" }]
         end
         response_payload["value"] = value
-      when "confirm"
+      when "confirm", "await"
+        # `await` prompts normally resolve on their own (the runner withdraws
+        # the request when its condition fires); this branch handles the
+        # operator clicking the fallback button before that happens. Same
+        # shape as confirm — no value to carry.
         response_payload["confirmed"] = true
       else
         return [500, { "error" => "unknown prompt kind in stored request" }]

@@ -333,6 +333,17 @@ module Freentonic
         if step.key?("if_present") && ![true, false].include?(step["if_present"])
           raise UserError, "#{loc} if_present: must be true or false"
         end
+      when "await_external_approval"
+        loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: await_external_approval"
+        unless step["message"].is_a?(String) && !step["message"].empty?
+          raise UserError, "#{loc} requires a non-empty message:"
+        end
+        unless step["url_includes"].is_a?(String) && !step["url_includes"].empty?
+          raise UserError, "#{loc} requires a non-empty url_includes:"
+        end
+        if step.key?("timeout") && !(step["timeout"].is_a?(Integer) && step["timeout"] >= 1)
+          raise UserError, "#{loc} timeout: must be a positive integer"
+        end
       end
     end
 

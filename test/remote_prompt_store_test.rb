@@ -159,6 +159,68 @@ module Freentonic
       assert_empty stragglers, "no .tmp files should remain after a successful prompt round-trip"
     end
 
+    def test_until_satisfied_resolves_without_a_response
+      yielded_id = nil
+      satisfied  = false
+      thread = Thread.new do
+        store.prompt(kind: :await, message: "Approve on phone", timeout_seconds: 5,
+                     until_satisfied: -> { satisfied }) { |id, _r| yielded_id = id }
+      end
+
+      wait_for_request(yielded_id_proc: -> { yielded_id }, timeout: 2)
+      request_path = File.join(@prompts_dir, "#{yielded_id}.request.json")
+      assert File.file?(request_path), "request file should exist while waiting"
+
+      # Flip the condition; the prompt resolves on the next throttled check
+      # with no operator response ever written.
+      satisfied = true
+      assert_equal true, thread.value
+
+      refute File.exist?(request_path), "request must be withdrawn once satisfied"
+      response_path = File.join(@prompts_dir, "#{yielded_id}.response.json")
+      refute File.exist?(response_path), "no response file should ever exist"
+      done_path = File.join(@prompts_dir, "#{yielded_id}.done")
+      assert File.file?(done_path), ".done breadcrumb should be left"
+    end
+
+    def test_operator_response_wins_over_until_satisfied
+      # A response already on disk is honored even when a self-resolving
+      # condition is supplied — and `await` returns true like confirm.
+      yielded_id  = nil
+      until_calls = 0
+      thread = Thread.new do
+        store.prompt(kind: :await, message: "x", timeout_seconds: 5,
+                     until_satisfied: -> { until_calls += 1; false }) { |id, _r| yielded_id = id }
+      end
+
+      wait_for_request(yielded_id_proc: -> { yielded_id }, timeout: 2)
+      File.write(File.join(@prompts_dir, "#{yielded_id}.response.json"), JSON.generate({ "confirmed" => true }))
+      assert_equal true, thread.value
+    end
+
+    def test_until_satisfied_is_throttled
+      yielded_id = nil
+      calls      = 0
+      started_at = nil
+      thread = Thread.new do
+        store.prompt(kind: :await, message: "x", timeout_seconds: 10,
+                     until_satisfied: lambda {
+                       calls += 1
+                       started_at ||= Time.now
+                       # Resolve at ~1.4s — reached on the second (throttled)
+                       # check, not the immediate one.
+                       Time.now - started_at >= 1.4
+                     }) { |id, _r| yielded_id = id }
+      end
+
+      wait_for_request(yielded_id_proc: -> { yielded_id }, timeout: 2)
+      assert_equal true, thread.value
+      # Over ~1.5s the condition is polled a handful of times (immediate +
+      # ~one per UNTIL_CHECK_INTERVAL_SECONDS), NOT every POLL_INTERVAL_SECONDS
+      # (which would be ~6 calls).
+      assert calls <= 4, "until_satisfied should be throttled, got #{calls} calls"
+    end
+
     private
 
     def wait_for_request(yielded_id_proc:, timeout:)
