@@ -28,6 +28,11 @@ module Freentonic
   class RemotePromptStore
     POLL_INTERVAL_SECONDS = 0.25
     PROMPT_ID_BYTES       = 12 # 24 hex chars; collision-safe within a run
+    # The response file is polled every POLL_INTERVAL_SECONDS so an operator
+    # click stays snappy, but the until_satisfied condition (a CDP roundtrip
+    # in practice) is throttled to this coarser cadence — checking the URL 4×/s
+    # for a 5-minute wait would be hundreds of needless roundtrips.
+    UNTIL_CHECK_INTERVAL_SECONDS = 1.5
 
     # @param prompts_dir [String] absolute path to <run_dir>/prompts
     # @param announce_to [IO, nil] when non-nil, every prompt() call writes a
@@ -49,17 +54,29 @@ module Freentonic
     # Block until the server posts a value, the timeout elapses, or the
     # request is aborted by the caller.
     #
-    # @param kind [Symbol] :input (returns the submitted string) or
-    #                     :confirm (returns true on POST {})
+    # @param kind [Symbol] :input (returns the submitted string),
+    #                     :confirm (returns true on POST {}), or :await
+    #                     (returns true on POST {} or when until_satisfied
+    #                     fires — see below)
     # @param message [String] human-facing prompt text
     # @param mask [Boolean] hint to clients that the value is sensitive;
     #   advisory only — value is never logged regardless.
     # @param timeout_seconds [Integer]
-    # @return [String, true] the submitted value (input) or true (confirm)
+    # @param until_satisfied [#call, nil] optional self-resolving condition.
+    #   When given, it is polled (throttled — see UNTIL_CHECK_INTERVAL_SECONDS)
+    #   alongside the operator's response file: the moment it returns truthy
+    #   the prompt resolves on its own, the request file is withdrawn (so any
+    #   watching client clears the card), and prompt() returns true without an
+    #   operator action. Used for "waiting on an external event" prompts — e.g.
+    #   a phone push approval that flips the browser URL — where the operator
+    #   click is only a fallback. The callable is the caller's responsibility
+    #   (it's where any CDP/IO happens); the store never inspects it beyond
+    #   truthiness and never logs it.
+    # @return [String, true] the submitted value (input) or true (confirm/await)
     # @raise [Timeout] when no response arrives before the deadline
     class Timeout < StandardError; end
 
-    def prompt(kind:, message:, mask: false, timeout_seconds:)
+    def prompt(kind:, message:, mask: false, timeout_seconds:, until_satisfied: nil)
       ensure_dir
       prompt_id = "p_#{SecureRandom.hex(PROMPT_ID_BYTES)}"
       created_at = @clock.now.utc
@@ -78,14 +95,18 @@ module Freentonic
       announce(prompt_id, request) if @announce_to
       yield prompt_id, request if block_given?
 
-      response = poll_for_response(prompt_id, deadline: expires_at)
-      mark_done(prompt_id, response)
+      response = poll_for_response(prompt_id, deadline: expires_at, until_satisfied: until_satisfied)
+      # :satisfied means the condition fired before any operator response —
+      # there's no response file, just withdraw the request as a `.done`
+      # breadcrumb so watching clients stop rendering the card.
+      mark_done(prompt_id, response == :satisfied ? {} : response)
+      return true if response == :satisfied
 
       case kind
       when :input, "input"
         value = response["value"]
         value.is_a?(String) ? value : ""
-      when :confirm, "confirm"
+      when :confirm, "confirm", :await, "await"
         true
       else
         raise ArgumentError, "unknown prompt kind: #{kind.inspect}"
@@ -138,8 +159,13 @@ module Freentonic
       File.unlink(tmp) if tmp && File.exist?(tmp) && !File.exist?(path)
     end
 
-    def poll_for_response(prompt_id, deadline:)
+    # Returns the parsed operator response, or the :satisfied sentinel when
+    # the optional until_satisfied condition fires first. An operator response
+    # already on disk always wins over the condition (checked first each tick),
+    # so a click that lands in the same tick as the URL flipping is honored.
+    def poll_for_response(prompt_id, deadline:, until_satisfied: nil)
       path = response_path(prompt_id)
+      last_until_check = nil
       loop do
         if File.file?(path)
           raw = File.read(path)
@@ -149,6 +175,13 @@ module Freentonic
             # The server only writes well-formed JSON via write_json_atomic,
             # but if a partially-written file ever shows up, treat it as
             # pending and keep polling.
+          end
+        end
+        if until_satisfied
+          now = @clock.now
+          if last_until_check.nil? || now - last_until_check >= UNTIL_CHECK_INTERVAL_SECONDS
+            last_until_check = now
+            return :satisfied if until_satisfied.call
           end
         end
         if @clock.now > deadline

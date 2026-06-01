@@ -21,6 +21,53 @@ module Freentonic
         })
       end
 
+      def test_workflow_schema_rejects_await_external_approval_without_message
+        err = assert_raises(UserError) do
+          schema_with_phase([{
+            "action" => "await_external_approval",
+            "url_includes" => "app.revolut.com/"
+          }])
+        end
+        assert_includes err.message, "message"
+      end
+
+      def test_workflow_schema_rejects_await_external_approval_without_url_includes
+        err = assert_raises(UserError) do
+          schema_with_phase([{
+            "action" => "await_external_approval",
+            "message" => "Approve on your phone"
+          }])
+        end
+        assert_includes err.message, "url_includes"
+      end
+
+      def test_workflow_schema_rejects_await_external_approval_non_integer_timeout
+        err = assert_raises(UserError) do
+          schema_with_phase([{
+            "action" => "await_external_approval",
+            "message" => "Approve on your phone",
+            "url_includes" => "app.revolut.com/",
+            "timeout" => "five"
+          }])
+        end
+        assert_includes err.message, "timeout"
+      end
+
+      def test_workflow_schema_accepts_valid_await_external_approval
+        schema_with_phase([{
+          "action" => "await_external_approval",
+          "message" => "Approve on your phone",
+          "url_includes" => "app.revolut.com/",
+          "timeout" => 300
+        }])
+        # No exception == valid; timeout is optional (defaults in the runner).
+        schema_with_phase([{
+          "action" => "await_external_approval",
+          "message" => "Approve on your phone",
+          "url_includes" => "app.revolut.com/"
+        }])
+      end
+
       def test_workflow_schema_rejects_prompt_stdin_and_fill_without_timeout
         err = assert_raises(UserError) do
           schema_with_phase([{
