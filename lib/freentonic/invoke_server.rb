@@ -683,6 +683,9 @@ module Freentonic
         rescue StandardError
           next
         end
+        # Drop already-expired cards so dead prompts don't linger in client
+        # UIs (the runner's own deadline has already given up on them).
+        next if prompt_expired?(payload["expires_at"])
         pending << {
           "prompt_id"  => payload["prompt_id"],
           "kind"       => payload["kind"],
@@ -714,6 +717,15 @@ module Freentonic
 
       return [404, { "error" => "prompt not found" }] unless File.file?(request_path)
       return [409, { "error" => "prompt already answered" }] if File.exist?(response_path)
+
+      # Refuse to write a response for a run that is no longer in flight. If the
+      # child crashed after emitting a prompt request, nothing will ever consume
+      # the response — writing an OTP-bearing response.json here would strand a
+      # secret on the host-bind-mounted runs dir until external retention reaps
+      # it. No live child means no legitimate reason to answer.
+      unless in_flight?(run_id)
+        return [409, { "error" => "run is not in flight; prompt can no longer be answered" }]
+      end
 
       begin
         request_payload = JSON.parse(File.read(request_path))
@@ -955,6 +967,20 @@ module Freentonic
 
     def current_in_flight_count
       @in_flight_mutex.synchronize { @in_flight.size }
+    end
+
+    def in_flight?(run_id)
+      @in_flight_mutex.synchronize { @in_flight.key?(run_id) }
+    end
+
+    # True when expires_at is a parseable ISO8601 timestamp in the past. A
+    # missing or malformed timestamp is treated as not-expired so we never
+    # hide a live prompt on a stale-on-disk field.
+    def prompt_expired?(expires_at)
+      return false unless expires_at
+      Time.iso8601(expires_at) < Time.now
+    rescue ArgumentError
+      false
     end
 
     def log(msg)
