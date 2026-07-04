@@ -75,14 +75,17 @@ module Freentonic
 
         case action
         when "note"
-          @stdout.puts "    #{resolved(step.fetch("message"))}"
+          # NB: notes are printed verbatim — secret() is deliberately NOT
+          # resolved here, so a message like "token: secret(FOO)" can't leak a
+          # resolved secret into the (persisted, host-visible) run log.
+          @stdout.puts "    #{step.fetch("message")}"
         when "note_if_selector"
           selector = step.fetch("selector")
           present = runtime_deep_call(<<~JS, selector)
             (selector) => deepQuery(document, selector) !== null
           JS
           if present
-            @stdout.puts "    #{resolved(step.fetch("message"))}"
+            @stdout.puts "    #{step.fetch("message")}" # verbatim; see note above
           end
         when "navigate"
           url = resolved(step.fetch("url"))

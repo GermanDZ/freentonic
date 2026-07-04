@@ -28,7 +28,7 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 | 9 | Close pre-auth slow-drip DoS on invoke server | Done | p1-improvements | `REQUEST_READ_DEADLINE` (30s) — absolute accept→end-of-body budget in `BufferedReader`, enforced per `IO.select` via a monotonic deadline so a 1-byte/29s drip can no longer pin a slot. Direct BufferedReader tests |
 | 10 | Confine server-supplied paths (`credentials.file`, `extract.ruby`/`ext.file`) | Done | p1-improvements | Part 1: `credentials.file` resolved under a secrets root (`--secrets-dir`/`FREENTONIC_SECRETS_DIR`, default `/workspace/secrets`) with re-root + realpath containment — closes the /status content-oracle. Part 2: `PathConfinement.resolve_within!` locks `extract.ruby`/`normalize.ruby`/`api_client.ext.file` to the workflow's directory subtree (rejects `../`, absolute, symlink escapes); enforced at runtime + in `--lint` |
 | 11 | CSV formula-injection guard | Done | p1-improvements | `neutralize_formula` prefixes `'` on cells starting with `= + - @ \t \r`; skips plain numeric literals so negative amounts stay summable. Test asserts both branches |
-| 12 | Refuse/warn on cleartext HTTP export with token; `secret()` in `note`/`navigate` | Not started | | |
+| 12 | Refuse/warn on cleartext HTTP export with token; `secret()` in `note`/`navigate` | Done | p1-improvements | http exporter refuses token over `http://` (warns when no token); `note`/`note_if_selector` print verbatim (no secret resolution) so notes can't leak secrets to the run log. `navigate` still resolves (URLs legitimately carry tokens). Tests + docs updated |
 
 ## P2 — Architecture evolution
 
@@ -52,6 +52,6 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 ## Summary
 
 - Total items: 21
-- Done: 6 (all of P0)
+- Done: 12 (all of P0 + all of P1)
 - In progress: 0
-- Not started: 15
+- Not started: 9 (P2 + P3)

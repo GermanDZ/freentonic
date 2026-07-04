@@ -9,6 +9,16 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### HTTP export over cleartext + `note` secret hygiene
+
+- The http exporter now **refuses** to send a bearer token over a
+  cleartext `http://` URL (the payload and `Authorization` header would
+  otherwise cross the wire unencrypted). Cleartext without a token still
+  works but prints a warning.
+- `note` / `note_if_selector` messages are printed **verbatim** —
+  `secret()` is no longer resolved in them, so a note can't leak a
+  resolved secret into the persisted run log.
+
 ### CSV exporter: neutralize formula injection
 
 Cells whose first character is a spreadsheet formula trigger

@@ -143,13 +143,13 @@ module Freentonic
         original = $stdout
         $stdout = StringIO.new
         begin
-          result = Exporters::Http.new(url: "http://example.test/push", token: "tok-abc").write(sample_payload)
+          result = Exporters::Http.new(url: "https://example.test/push", token: "tok-abc").write(sample_payload)
           assert_equal true, result["ok"]
           assert_equal "Bearer tok-abc", captured[:auth]
           assert_equal "application/json", captured[:ct]
           assert_equal "test", ::JSON.parse(captured[:body])["source_tag"]
           assert_match(
-            %r{POST http://example\.test/push → 200 in \d+ms},
+            %r{POST https://example\.test/push → 200 in \d+ms},
             $stdout.string,
             "expected a one-line success log so the run doesn't look hung"
           )
@@ -171,7 +171,7 @@ module Freentonic
         $stdout = StringIO.new
         begin
           assert_raises(ExportError) do
-            Exporters::Http.new(url: "http://example.test/push", token: "t").write(sample_payload)
+            Exporters::Http.new(url: "https://example.test/push", token: "t").write(sample_payload)
           end
           refute_match(
             /→/,
@@ -193,9 +193,38 @@ module Freentonic
 
       with_net_http_new(fake_http) do
         err = assert_raises(ExportError) do
-          Exporters::Http.new(url: "http://example.test/push").write(sample_payload)
+          Exporters::Http.new(url: "https://example.test/push").write(sample_payload)
         end
         assert_includes err.message, "HTTP 500"
+      end
+    end
+
+    def test_http_exporter_refuses_cleartext_with_token
+      err = assert_raises(UserError) do
+        silence_stdout do
+          Exporters::Http.new(url: "http://example.test/push", token: "tok-abc").write(sample_payload)
+        end
+      end
+      assert_includes err.message, "cleartext"
+      assert_includes err.message, "https://"
+    end
+
+    def test_http_exporter_warns_on_cleartext_without_token
+      fake_http = Object.new
+      fake_http.define_singleton_method(:use_ssl=) { |_| }
+      fake_http.define_singleton_method(:open_timeout=) { |_| }
+      fake_http.define_singleton_method(:read_timeout=) { |_| }
+      fake_http.define_singleton_method(:request) { |_req| FakeResp.new("200", "{}") }
+
+      with_net_http_new(fake_http) do
+        original = $stdout
+        $stdout = StringIO.new
+        begin
+          Exporters::Http.new(url: "http://example.test/push").write(sample_payload)
+          assert_match(/cleartext/, $stdout.string)
+        ensure
+          $stdout = original
+        end
       end
     end
 
@@ -216,7 +245,7 @@ module Freentonic
 
       with_net_http_new(fake_http) do
         err = assert_raises(ExportError) do
-          Exporters::Http.new(url: "http://example.test/push", token: "bad").write(sample_payload)
+          Exporters::Http.new(url: "https://example.test/push", token: "bad").write(sample_payload)
         end
         assert_includes err.message, "unauthorized"
       end
@@ -264,7 +293,7 @@ module Freentonic
       with_net_http_new(fake_http) do
         with_env("FREENTONIC_RUN_ID", "run-abc-123") do
           silence_stdout do
-            Exporters::Http.new(url: "http://example.test/push", token: "tok").write(sample_payload)
+            Exporters::Http.new(url: "https://example.test/push", token: "tok").write(sample_payload)
           end
         end
       end
@@ -280,7 +309,7 @@ module Freentonic
       with_net_http_new(fake_http) do
         with_env("FREENTONIC_RUN_ID", "run-abc-123") do
           silence_stdout do
-            Exporters::Http.new(url: "http://example.test/push", token: "tok").write(payload)
+            Exporters::Http.new(url: "https://example.test/push", token: "tok").write(payload)
           end
         end
       end
@@ -295,7 +324,7 @@ module Freentonic
       with_net_http_new(fake_http) do
         with_env("FREENTONIC_RUN_ID", "run-abc-123") do
           silence_stdout do
-            Exporters::Http.new(url: "http://example.test/push", token: "tok").write(payload)
+            Exporters::Http.new(url: "https://example.test/push", token: "tok").write(payload)
           end
         end
       end
@@ -308,7 +337,7 @@ module Freentonic
       with_net_http_new(fake_http) do
         with_env("FREENTONIC_RUN_ID", nil) do
           silence_stdout do
-            Exporters::Http.new(url: "http://example.test/push", token: "tok").write(sample_payload)
+            Exporters::Http.new(url: "https://example.test/push", token: "tok").write(sample_payload)
           end
         end
       end

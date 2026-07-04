@@ -44,6 +44,20 @@ module Freentonic
                 "#{url.chomp("/")}/your/endpoint/path"
         end
 
+        # Refuse to leak a bearer token over cleartext. The full financial
+        # payload AND the Authorization header would otherwise cross the wire
+        # unencrypted with no warning. Without a token we still warn — the
+        # payload itself is sensitive — but allow it (localhost receivers).
+        if uri.scheme != "https"
+          if resolved_token
+            raise UserError,
+                  "http exporter: refusing to send a bearer token over cleartext #{uri.scheme}:// " \
+                  "(#{url}). Use an https:// URL, or drop the token if the receiver truly needs none."
+          end
+          $stdout.puts "  ⚠ http exporter: POSTing over cleartext #{uri.scheme}:// — " \
+                       "the payload crosses the wire unencrypted."
+        end
+
         http = Net::HTTP.new(uri.host, uri.port)
         http.use_ssl = (uri.scheme == "https")
         http.open_timeout = OPEN_TIMEOUT
