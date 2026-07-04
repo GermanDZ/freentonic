@@ -28,6 +28,7 @@ module Freentonic
       argv = pre_process_requires(argv.dup)
       options = parse(argv)
       validate!(options)
+      return run_lint(options) if options[:lint]
       execute(options)
       0
     rescue UserError => error
@@ -84,7 +85,8 @@ module Freentonic
         purge: false,
         force: false,
         interactive: false,
-        recording: false
+        recording: false,
+        lint: false
       }
 
       parser = OptionParser.new do |opts|
@@ -126,6 +128,8 @@ module Freentonic
           headers[k] = val
         end
 
+        opts.on("--lint", "Statically validate the --workflow (schema, extract/normalize/ext ruby, api_client, credential + secret references) without launching Chrome") { options[:lint] = true }
+
         opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
         opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }
 
@@ -152,6 +156,12 @@ module Freentonic
     end
 
     def validate!(options)
+      if options[:lint]
+        raise UserError, "--lint cannot be combined with --purge" if options[:purge]
+        raise UserError, "--lint requires --workflow PATH" unless options[:workflow]
+        return
+      end
+
       if options[:purge]
         pipeline_flags = %i[workflow from_raw from_normalized only_stage through_stage dump_raw dump_normalized]
         conflict = pipeline_flags.find { |f| options[f] }
@@ -220,6 +230,15 @@ module Freentonic
          options[:dump_raw].nil? && options[:dump_normalized].nil?
         raise UserError, "no exporters configured — pass --export NAME or --dump-raw / --dump-normalized"
       end
+    end
+
+    def run_lint(options)
+      require_relative "linter"
+      Linter.new(
+        workflow_path: File.expand_path(options[:workflow]),
+        stdout: @stdout,
+        stderr: @stderr
+      ).run
     end
 
     def execute(options)

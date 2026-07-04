@@ -9,6 +9,16 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### `freentonic --lint` — offline workflow validation
+
+A dry-run that statically validates a workflow without launching Chrome
+or hitting the bank. Checks the schema, that `extract:`/`normalize:`/ext
+ruby loads and its classes resolve, that `api_client:` builds into a
+client class, that every `credentials.require` key is captured by some
+action's `as:`, and that every `secret(NAME)` has a `secrets:` entry
+(warning). Exit `0` clean, `1` on error. Previously the earliest full
+check of a workflow was a live login.
+
 ### Action registry + exhaustive load-time validation
 
 Every workflow action now lives in a single declarative registry

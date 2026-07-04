@@ -55,3 +55,4 @@ require_relative "freentonic/stages/normalize"
 require_relative "freentonic/stages/export"
 
 require_relative "freentonic/engine"
+require_relative "freentonic/linter"

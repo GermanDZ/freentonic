@@ -24,7 +24,7 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 | # | Item | Status | PR / Commit | Notes |
 | - | --- | --- | --- | --- |
 | 7 | Action registry + exhaustive load-time validation | Done | p1-action-registry | `WorkflowActions` registry: single source of truth for action names + required keys. Load-time unknown-action check + required-key validation for all ~33 actions; drift-guard test locks registry ⇔ runner dispatch. Runner dispatch not yet driven from the table (kept as-is, guarded); doc-generation from the table remains a follow-up |
-| 8 | `freentonic --lint` dry-run | Not started | | Depends on #7 (registry now available) |
+| 8 | `freentonic --lint` dry-run | Done | p1-action-registry | `Linter` + `--lint` flag: schema/action validation, extract/normalize/ext ruby + class resolution, api_client class build, credentials.require ⇔ capture as: cross-ref, secret() ⇔ secrets: cross-ref. No Chrome, no network. Exit 0 clean / 1 on error |
 | 9 | Close pre-auth slow-drip DoS on invoke server | Not started | | |
 | 10 | Confine server-supplied paths (`credentials.file`, `extract.ruby`/`ext.file`) | Not started | | |
 | 11 | CSV formula-injection guard | Not started | | |

@@ -66,6 +66,23 @@ This is the killer feature: you can capture a raw payload once (which
 requires touching the bank's login flow) and then iterate on your
 normalizer code in a tight loop against the dumped JSON.
 
+### Linting a workflow
+
+`freentonic --lint --workflow PATH` statically validates a workflow
+without launching Chrome or touching the bank — moving the cheap failures
+to the front of the loop instead of discovering them after a live login:
+
+- schema, action names, and every action's required keys;
+- `extract:` / `normalize:` ruby files load and their classes resolve and
+  expose `#call`;
+- `api_client:` builds into a client class (endpoints, auth headers,
+  derived credentials, ext module) with no request made;
+- every `credentials.require` key is produced by a capture action's `as:`;
+- every `secret(NAME)` reference has a `secrets:` entry (warning).
+
+Exit code is `0` when clean (warnings allowed) and `1` on any error. Like
+a real run, it `require`s the provider's ruby — only lint what you'd run.
+
 ## Workflow YAML reference
 
 ```yaml

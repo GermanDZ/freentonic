@@ -16,7 +16,7 @@ module Freentonic
       new(path: path, raw: raw)
     end
 
-    attr_reader :path
+    attr_reader :path, :raw
 
     def initialize(path:, raw:)
       @path = path
@@ -61,11 +61,21 @@ module Freentonic
       @raw["normalize"]
     end
 
-    def build_api_client(credentials)
+    # Builds (and memoizes) the ApiClient subclass from the api_client: YAML
+    # without instantiating it. Exposed so `--lint` can validate the
+    # endpoint / auth-header / ext translation offline — building the class
+    # loads the ext file and runs every define_get/define_post macro, so any
+    # malformed api_client config surfaces here. Returns nil when the
+    # workflow declares no api_client:.
+    def api_client_class
       return nil unless @raw["api_client"]
       require_relative "api_client"
       @_api_client_class ||= build_api_client_class(@raw["api_client"])
-      @_api_client_class.new(credentials)
+    end
+
+    def build_api_client(credentials)
+      klass = api_client_class or return nil
+      klass.new(credentials)
     end
 
     private
