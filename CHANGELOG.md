@@ -9,6 +9,17 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Invoke server: confine `credentials.file` to a secrets root
+
+`credentials.file` is now resolved under a configured secrets root
+(`/workspace/secrets`, `--secrets-dir`) with the same expand_path/realpath
+containment `workflow` gets — absolute paths are re-rooted, symlinks
+escaping the root are rejected. Previously any absolute container path was
+accepted, and its content hash leaked through the derived `profile_key` on
+`/status` as a file-content confirmation oracle. **Breaking:**
+`credentials.file` is now a path relative to the secrets root, not an
+arbitrary absolute path.
+
 ### Invoke server: bound pre-auth request reads (slow-drip DoS)
 
 The request reader now enforces a 30s absolute wall-clock deadline from

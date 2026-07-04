@@ -172,6 +172,50 @@ class InvokeRequestTest < Minitest::Test
     assert_equal 422, err.status_code
   end
 
+  def test_credentials_file_resolves_under_secrets_root
+    Dir.mktmpdir("freentonic-test-secrets-") do |secrets_dir|
+      creds = File.join(secrets_dir, "acme.env")
+      File.write(creds, "USER=alice\n")
+      req = Freentonic::InvokeRequest.from_hash(
+        base_body.merge("credentials" => { "file" => "acme.env" }),
+        workflows_dir: @workflows_dir, secrets_dir: secrets_dir
+      )
+      assert_equal File.realpath(creds), req.credentials_file
+    end
+  end
+
+  def test_credentials_file_absolute_path_is_rerooted_and_cannot_escape
+    Dir.mktmpdir("freentonic-test-secrets-") do |secrets_dir|
+      # An absolute path is interpreted relative to the secrets root, so it
+      # can't reach a real /etc file — it maps to <root>/etc/passwd, absent.
+      err = assert_raises(Freentonic::InvokeError) do
+        Freentonic::InvokeRequest.from_hash(
+          base_body.merge("credentials" => { "file" => "/etc/passwd" }),
+          workflows_dir: @workflows_dir, secrets_dir: secrets_dir
+        )
+      end
+      assert_equal 422, err.status_code
+    end
+  end
+
+  def test_credentials_file_symlink_escaping_root_is_rejected
+    Dir.mktmpdir("freentonic-test-secrets-") do |secrets_dir|
+      outside = Tempfile.new("freentonic-outside-creds")
+      outside.write("USER=alice\n"); outside.flush
+      link = File.join(secrets_dir, "escape.env")
+      File.symlink(outside.path, link)
+      err = assert_raises(Freentonic::InvokeError) do
+        Freentonic::InvokeRequest.from_hash(
+          base_body.merge("credentials" => { "file" => "escape.env" }),
+          workflows_dir: @workflows_dir, secrets_dir: secrets_dir
+        )
+      end
+      assert_equal 422, err.status_code
+    ensure
+      outside&.close!
+    end
+  end
+
   # ─── export ───
 
   def test_export_http_requires_url

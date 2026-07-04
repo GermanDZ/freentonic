@@ -502,7 +502,7 @@ module Freentonic
       return [400, { "error" => "invalid or missing JSON body" }] if body.nil?
 
       begin
-        request = InvokeRequest.from_hash(body, workflows_dir: @runner.workflows_dir)
+        request = InvokeRequest.from_hash(body, workflows_dir: @runner.workflows_dir, secrets_dir: @runner.secrets_dir)
       rescue InvokeError => e
         return [e.status_code, { "error" => e.message }]
       end
