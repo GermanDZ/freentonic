@@ -20,6 +20,12 @@ require_relative "display_geometry"
 
 module Freentonic
   module ChromeCdp
+    # Operational CDP / WebSocket failure (timeout, protocol error, unexpected
+    # close). Typed so callers can tell a genuine browser-transport failure
+    # from an arbitrary framework bug — Connect wraps these into a UserError
+    # while letting unexpected exceptions surface as real backtraces.
+    class Error < StandardError; end
+
     CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     # Prefer the actual Chromium ELF over /usr/bin/chromium on Debian —
     # the latter is a wrapper shell script that injects flags like
@@ -380,10 +386,10 @@ module Freentonic
       buffer = String.new
       loop do
         ready = IO.select([socket], nil, nil, timeout)
-        raise "WebSocket read timed out after #{timeout}s" unless ready
+        raise Error, "WebSocket read timed out after #{timeout}s" unless ready
 
         header = socket.read(2)
-        raise "WebSocket closed unexpectedly" unless header && header.bytesize == 2
+        raise Error, "WebSocket closed unexpectedly" unless header && header.bytesize == 2
         b1, b2 = header.bytes
         fin = (b1 & 0x80) != 0
         opcode = b1 & 0x0f
@@ -404,7 +410,7 @@ module Freentonic
 
         case opcode
         when 0x1, 0x0 then buffer << payload
-        when 0x8 then raise "WebSocket closed by server"
+        when 0x8 then raise Error, "WebSocket closed by server"
         when 0x9 then next
         end
 
@@ -437,13 +443,13 @@ module Freentonic
           parsed = JSON.parse(raw)
           if parsed["id"] == id
             if parsed["error"]
-              raise "CDP error on #{method}: #{parsed['error']['message']} (code #{parsed['error']['code']})"
+              raise Error, "CDP error on #{method}: #{parsed['error']['message']} (code #{parsed['error']['code']})"
             end
             return parsed["result"] || {}
           end
           @pending_events << parsed if parsed["method"]
         end
-        raise "No CDP response for #{method} after #{timeout}s"
+        raise Error, "No CDP response for #{method} after #{timeout}s"
       end
 
       def wait_for_event(method, timeout: 30, &filter)
@@ -462,7 +468,7 @@ module Freentonic
           end
           @pending_events << parsed if parsed["method"]
         end
-        raise "Timed out waiting for event #{method}"
+        raise Error, "Timed out waiting for event #{method}"
       end
 
       def close

@@ -92,6 +92,34 @@ class InvokeServerTest < Minitest::Test
     File.binwrite(File.join(dir, "log"), contents)
   end
 
+  # ── graceful shutdown drain ───────────────────────────────
+
+  def test_shutdown_sigterms_in_flight_process_group
+    # Stand in for a live invoke child: a real process in its own group,
+    # registered in the server's in-flight table with its pgid.
+    pid  = Process.spawn("sleep", "30", pgroup: true)
+    pgid = Process.getpgid(pid)
+    reaped = false
+    table = @server.instance_variable_get(:@in_flight)
+    mutex = @server.instance_variable_get(:@in_flight_mutex)
+    mutex.synchronize { table["run-drain"] = { run_id: "run-drain", pgid: pgid } }
+
+    @server.send(:terminate_in_flight_groups)
+
+    _, status = Process.wait2(pid)
+    reaped = true
+    assert status.signaled?, "in-flight child should be terminated by shutdown"
+    assert_equal Signal.list.fetch("TERM"), status.termsig
+  ensure
+    unless reaped
+      begin
+        Process.kill("KILL", pid)
+        Process.wait2(pid)
+      rescue Errno::ESRCH, Errno::ECHILD
+      end
+    end
+  end
+
   # ── /healthz (sanity) ─────────────────────────────────────
 
   def test_healthz_is_open
@@ -516,6 +544,16 @@ class InvokeServerTest < Minitest::Test
     File.write(File.join(dir, "#{prompt_id}.response.json"), JSON.generate(payload))
   end
 
+  # Register a run in the server's in-flight table. Prompt submission now
+  # requires a live run behind it (see handle_submit_prompt) — a crashed
+  # child's stranded prompt must not be answerable. The server runs in-process
+  # in these tests, so we reach into its table directly.
+  def mark_in_flight(run_id)
+    mutex = @server.instance_variable_get(:@in_flight_mutex)
+    table = @server.instance_variable_get(:@in_flight)
+    mutex.synchronize { table[run_id] = { run_id: run_id, started_at: Time.now } }
+  end
+
   def sample_request(prompt_id, kind: "input", message: "Code?", expires_at: (Time.now + 300).utc.iso8601)
     {
       "prompt_id" => prompt_id,
@@ -559,7 +597,19 @@ class InvokeServerTest < Minitest::Test
     assert_equal "First", body["prompts"].first["message"]
   end
 
+  def test_list_prompts_skips_expired
+    write_prompt_request("run-1", "p_11aa11aa", sample_request("p_11aa11aa", message: "Live"))
+    write_prompt_request("run-1", "p_22bb22bb",
+      sample_request("p_22bb22bb", message: "Dead", expires_at: (Time.now - 60).utc.iso8601))
+
+    res = get("/runs/run-1/prompts", auth)
+    assert_equal "200", res.code
+    ids = JSON.parse(res.body)["prompts"].map { |p| p["prompt_id"] }
+    assert_equal ["p_11aa11aa"], ids, "expired cards must not linger in the list"
+  end
+
   def test_submit_prompt_writes_response
+    mark_in_flight("run-1")
     write_prompt_request("run-1", "p_cccc3333", sample_request("p_cccc3333"))
 
     res = post("/runs/run-1/prompts/p_cccc3333", { "value" => "111111" }, auth)
@@ -577,6 +627,7 @@ class InvokeServerTest < Minitest::Test
   end
 
   def test_submit_prompt_409_on_double_submit
+    mark_in_flight("run-1")
     write_prompt_request("run-1", "p_dddd4444", sample_request("p_dddd4444"))
     first = post("/runs/run-1/prompts/p_dddd4444", { "value" => "x" }, auth)
     assert_equal "200", first.code
@@ -586,18 +637,31 @@ class InvokeServerTest < Minitest::Test
   end
 
   def test_submit_prompt_410_when_expired
+    mark_in_flight("run-1")
     write_prompt_request("run-1", "p_eeee5555", sample_request("p_eeee5555", expires_at: (Time.now - 60).utc.iso8601))
     res = post("/runs/run-1/prompts/p_eeee5555", { "value" => "x" }, auth)
     assert_equal "410", res.code
   end
 
+  def test_submit_prompt_409_when_run_not_in_flight
+    # Child crashed after emitting the prompt: request.json on disk, no live
+    # run. Answering would strand the OTP-bearing response.json forever.
+    write_prompt_request("run-1", "p_9999aaaa", sample_request("p_9999aaaa"))
+    res = post("/runs/run-1/prompts/p_9999aaaa", { "value" => "111111" }, auth)
+    assert_equal "409", res.code
+    refute File.exist?(File.join(@runs_dir, "run-1", "prompts", "p_9999aaaa.response.json")),
+      "must not write a response for a dead run"
+  end
+
   def test_submit_prompt_400_when_value_missing
+    mark_in_flight("run-1")
     write_prompt_request("run-1", "p_ffff6666", sample_request("p_ffff6666"))
     res = post("/runs/run-1/prompts/p_ffff6666", {}, auth)
     assert_equal "400", res.code
   end
 
   def test_submit_prompt_confirm_kind_accepts_empty_body
+    mark_in_flight("run-1")
     write_prompt_request("run-1", "p_aabb7777", sample_request("p_aabb7777", kind: "confirm"))
     res = post("/runs/run-1/prompts/p_aabb7777", {}, auth)
     assert_equal "200", res.code

@@ -451,6 +451,13 @@ or finished `run_id` returns 200 with an empty list.
 - `confirm` — the workflow is paused waiting for a manual approval
   (operator pressed the push notification on their phone). Submit an
   empty body.
+- `await` — the workflow is waiting on an out-of-band condition it
+  polls for itself (e.g. `await_external_approval`: the operator
+  approves a PSD2 SCA challenge in the bank's mobile app and the
+  workflow detects it and resumes on its own). The prompt normally
+  withdraws itself once the condition fires; submitting an empty body
+  is the fallback for when the operator wants to signal approval
+  manually. Same submit shape as `confirm`.
 
 `mask: true` is an advisory hint that the value is sensitive and
 should be entered into a masked field on the operator UI; the server
@@ -464,7 +471,7 @@ Authorization: Bearer <token>
 Content-Type: application/json
 
 {"value": "123456"}      # for kind=input
-{}                       # for kind=confirm
+{}                       # for kind=confirm or kind=await
 ```
 
 Returns 200 on success:

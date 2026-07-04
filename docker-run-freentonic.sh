@@ -72,7 +72,7 @@ cmd_server() {
   "${args[@]}"
   echo "listening on http://127.0.0.1:${LISTEN_PORT}"
   if [ "${VNC}" = "1" ]; then
-    echo "noVNC at http://127.0.0.1:6080/vnc.html?host=localhost&port=6080&password=freentonic&autoconnect=true"
+    echo "noVNC at http://127.0.0.1:6080/vnc.html?host=localhost&port=6080 (enter the vnc_password from your /invoke request; VNC is locked when no run is in flight — there is no static password)"
   fi
 }
 

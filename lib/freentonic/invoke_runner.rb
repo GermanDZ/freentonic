@@ -96,6 +96,7 @@ module Freentonic
     # @return [Result]
     def run(request, &on_start)
       run_dir = File.join(@runs_dir, request.run_id)
+      ensure_contained!(run_dir, @runs_dir, "run_id")
       FileUtils.mkdir_p(run_dir, mode: 0o750)
       # Rendezvous directory for out-of-band prompts (2FA / SMS code entry).
       # Pre-created so the server's GET /runs/{run_id}/prompts can return an
@@ -103,6 +104,7 @@ module Freentonic
       FileUtils.mkdir_p(File.join(run_dir, "prompts"), mode: 0o700)
 
       chrome_profile_dir = File.join(@chrome_profile_root, request.profile_key)
+      ensure_contained!(chrome_profile_dir, @chrome_profile_root, "profile_key")
       FileUtils.mkdir_p(chrome_profile_dir, mode: 0o750)
 
       started_at = Time.now
@@ -329,6 +331,19 @@ module Freentonic
       ChromeCdp.kill_chrome_for(profile_dir)
     rescue StandardError => e
       log("chrome cleanup failed for #{profile_dir}: #{e.class}: #{e.message}")
+    end
+
+    # Defense in depth behind InvokeRequest's RUN_ID/PROFILE_KEY patterns:
+    # verify the composed path resolves strictly *under* its root before we
+    # mkdir into it. Catches any future pattern regression that would let a
+    # `.`/`..` segment escape (e.g. run_id=".." truncating the workspace or
+    # globbing every tenant's runs into the response).
+    def ensure_contained!(path, root, label)
+      expanded = File.expand_path(path)
+      root_expanded = File.expand_path(root)
+      unless expanded.start_with?(root_expanded + File::SEPARATOR)
+        raise InvokeError.new(:bad_request, "#{label} escapes its containment root")
+      end
     end
 
     def collect_artifacts(run_dir)

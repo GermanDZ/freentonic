@@ -52,6 +52,14 @@ module Freentonic
           run_dir:             run_dir
         )
         @context
+      rescue ApiClient::SessionExpired => e
+        # The captured session was rejected mid-extraction (401/403). This is
+        # expected and actionable — the credentials need refreshing via a new
+        # connect — so surface it as a UserError instead of letting the bare
+        # SessionExpired escape as a backtrace when the provider doesn't
+        # rescue it itself.
+        raise UserError,
+          "Extract failed: #{e.message}. Re-run connect to capture a fresh session."
       end
 
       private

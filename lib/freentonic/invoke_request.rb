@@ -29,8 +29,13 @@ module Freentonic
   # (rejecting traversal) and derives a deterministic profile_key when the
   # caller doesn't supply one.
   class InvokeRequest
-    RUN_ID_PATTERN      = /\A[A-Za-z0-9_\-:.]{1,64}\z/
-    PROFILE_KEY_PATTERN = /\A[A-Za-z0-9_.\-]{1,128}\z/
+    # Both ids compose filesystem paths (run dir, chrome profile dir), so they
+    # must never be `.` or `..`. Requiring a leading alnum rejects those two
+    # literals (and any leading-dot/dash id) without a special case — the rest
+    # of the charset is unchanged. See InvokeRunner#run for the defense-in-depth
+    # containment check that backs this up.
+    RUN_ID_PATTERN      = /\A[A-Za-z0-9][A-Za-z0-9_\-:.]{0,63}\z/
+    PROFILE_KEY_PATTERN = /\A[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}\z/
     EXPORT_PATH_PATTERN = /\A[A-Za-z0-9_.\-]{1,128}\z/
     HEADER_NAME_PATTERN = /\A[A-Za-z0-9!#$%&'*+\-.^_`|~]{1,64}\z/
     SECRET_KEY_PATTERN  = /\A[A-Za-z_][A-Za-z0-9_.]{0,127}\z/

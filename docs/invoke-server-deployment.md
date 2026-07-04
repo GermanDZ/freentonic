@@ -217,13 +217,29 @@ docker restart freentonic-server
 docker stop freentonic-server
 ```
 
-**Graceful shutdown**: `docker stop` sends SIGTERM. The server stops
-accepting new invokes (responds `503 Service Unavailable` to any new
-`/invoke` during the grace period) and waits for the in-flight invoke
-to finish. Docker's default stop timeout is 10s; if an in-flight
-invoke takes longer, Docker sends SIGKILL. Increase with `docker stop
--t 60 freentonic-server` if your longest workflow is expected to
-exceed 10s during shutdown.
+**Graceful shutdown**: `docker stop` sends SIGTERM. The server closes
+its listener (new connections are refused — the socket is gone, so
+clients see a connection error rather than a `503`), then **SIGTERMs the
+in-flight invoke's Chrome/freentonic process group and waits up to ~20s**
+(`InvokeServer::SHUTDOWN_DRAIN_SECONDS`) for that run to tear down
+cleanly and deliver its response. Terminating the child group is what
+lets Chrome shut down gracefully instead of being SIGKILL'd out from
+under an open profile — the child runs in its own process group, so
+`tini` (even with `-g`) can't reach it; the server does.
+
+Docker's default stop timeout is 10s, which is *shorter* than the drain
+window — Docker would SIGKILL the container mid-drain. **Set `docker stop
+-t` to at least 25s** (drain window + margin), or higher if your longest
+workflow needs more time to unwind on SIGTERM:
+
+```sh
+docker stop -t 30 freentonic-server
+```
+
+A run that is mid-2FA (blocked on an operator prompt) will not finish
+within the drain window; it is terminated and its `/invoke` returns an
+error. Draining only rescues runs that can complete their teardown in
+time — it is not a promise to let an arbitrarily long login finish.
 
 ---
 
@@ -352,12 +368,18 @@ password the `/invoke` caller supplied.
 
 The noVNC HTML client carries the Chrome session of every tenant that
 runs while you're watching — v1 is serialized, so you see them
-sequentially. Keep `-p 127.0.0.1:6080:6080` on loopback only; the
-password is hard-coded to `freentonic`, which is fine for a local
-debug bind but trivial to brute-force over a network. If you need to
-attach from another machine, tunnel through SSH (`ssh -L
-6080:127.0.0.1:6080 host`) rather than publishing to a non-loopback
-interface.
+sequentially. Keep `-p 127.0.0.1:6080:6080` on loopback only.
+
+There is **no static password**. The server writes an unreachable
+random password whenever no invoke is running, and rotates in the
+per-invoke `vnc_password` (from the `/invoke` request) only for the
+duration of that run, relocking on exit. So VNC is attachable only
+while a run you launched with a `vnc_password` is in flight, using that
+value. VNC's DES-based auth truncates the password to its first 8
+chars, so treat `vnc_password` as a low-entropy debug secret, not real
+access control. If you need to attach from another machine, tunnel
+through SSH (`ssh -L 6080:127.0.0.1:6080 host`) rather than publishing
+to a non-loopback interface.
 
 Because v1 is serialized, you only ever see one workflow at a time —
 which is also what makes VNC debugging tractable.

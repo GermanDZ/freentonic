@@ -39,6 +39,24 @@ module Freentonic
       end
     end
 
+    def test_ndjson_written_0600
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "capture.ndjson")
+        DebugRequestWriter.new(path: path, format: "ndjson").write(sample_entries)
+        assert_equal 0o600, File.stat(path).mode & 0o777,
+          "captures hold cookies and response bodies — must be owner-only"
+      end
+    end
+
+    def test_har_written_0600
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "capture.har")
+        DebugRequestWriter.new(path: path, format: "har").write(sample_entries)
+        assert_equal 0o600, File.stat(path).mode & 0o777,
+          "captures hold cookies and response bodies — must be owner-only"
+      end
+    end
+
     def test_ndjson_empty_entries
       Dir.mktmpdir do |dir|
         path = File.join(dir, "empty.ndjson")

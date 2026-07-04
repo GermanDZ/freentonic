@@ -52,7 +52,14 @@ module Freentonic
           @context[:credentials] = extract_credentials
         end
         @context
-      rescue RuntimeError => e
+      rescue Freentonic::ChromeCdp::Error, KeyError => e
+        # ChromeCdp::Error — an operational browser-transport failure (CDP
+        # timeout / protocol error). KeyError — a workflow step missing a
+        # required key (a `step.fetch(...)` in the runner). Both are the
+        # operator's problem, so surface them as a clean UserError instead of
+        # a raw backtrace (which could otherwise land *after* the operator
+        # completed 2FA). Genuine framework bugs raise other exception types
+        # and are deliberately left to propagate.
         raise UserError, "Browser workflow failed: #{e.message}"
       ensure
         @recorder&.close rescue nil

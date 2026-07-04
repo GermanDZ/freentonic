@@ -65,8 +65,13 @@ module Freentonic
       nil
     end
 
+    # 0600: these files hold raw request headers, session cookies, and
+    # response bodies — match the secret-file discipline used for
+    # screenshots, recordings, and prompt files.
+    SECRET_FILE_MODE = File::WRONLY | File::CREAT | File::TRUNC
+
     def write_ndjson(entries)
-      File.open(@path, "w") do |f|
+      File.open(@path, SECRET_FILE_MODE, 0o600) do |f|
         entries.each do |entry|
           f.puts(JSON.generate(entry))
         end
@@ -84,7 +89,9 @@ module Freentonic
           "entries" => entries.map { |e| har_entry(e) }
         }
       }
-      File.write(@path, JSON.pretty_generate(har))
+      File.open(@path, SECRET_FILE_MODE, 0o600) do |f|
+        f.write(JSON.pretty_generate(har))
+      end
     end
 
     def har_entry(entry)
