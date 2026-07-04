@@ -9,6 +9,16 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Confine provider ruby to the workflow's directory subtree
+
+`extract.ruby`, `normalize.ruby`, and `api_client.ext.file` now must
+resolve inside the workflow YAML's own directory subtree (the documented
+"ship code alongside your YAML" layout). An absolute or `../` path — or a
+symlink — that escapes the subtree is rejected with a `UserError` at load
+time (and flagged by `--lint`). Shrinks the residual attack chain where a
+token-holder names an export artifact `foo.rb` in a writable run dir and
+points a ruby reference at it.
+
 ### Invoke server: confine `credentials.file` to a secrets root
 
 `credentials.file` is now resolved under a configured secrets root

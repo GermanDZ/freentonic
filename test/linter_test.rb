@@ -3,6 +3,8 @@
 require_relative "test_helper"
 require "stringio"
 require "tmpdir"
+require "fileutils"
+require "tempfile"
 
 module Freentonic
   class LinterTest < Minitest::Test
@@ -115,6 +117,40 @@ module Freentonic
         assert_equal 0, code, out
         assert_includes out, "UNDECLARED"
         assert_includes out, "warning"
+      end
+    end
+
+    def test_extractor_outside_workflow_subtree_is_rejected
+      Dir.mktmpdir do |root|
+        # extractor lives ABOVE the workflow's own directory → escape.
+        File.write(File.join(root, "shared_extractor.rb"), EXTRACTOR_RB)
+        subdir = File.join(root, "provider")
+        FileUtils.mkdir_p(subdir)
+        File.write(File.join(subdir, "normalizer.rb"), NORMALIZER_RB)
+        yaml = CLEAN.sub("ruby: ./extractor.rb", "ruby: ../shared_extractor.rb")
+        path = File.join(subdir, "workflow.yml")
+        File.write(path, yaml)
+        code, out = lint(path)
+        assert_equal 1, code
+        assert_includes out, "resolves outside"
+      end
+    end
+
+    def test_path_confinement_resolves_sibling_and_rejects_escape
+      Dir.mktmpdir do |dir|
+        inside = File.join(dir, "ok.rb")
+        File.write(inside, "# ok\n")
+        assert_equal File.realpath(inside),
+          PathConfinement.resolve_within!(inside, dir, label: "x")
+
+        outside = Tempfile.new("pc-outside")
+        outside.write("# nope\n"); outside.flush
+        err = assert_raises(UserError) do
+          PathConfinement.resolve_within!(outside.path, dir, label: "x")
+        end
+        assert_includes err.message, "resolves outside"
+      ensure
+        outside&.close!
       end
     end
 

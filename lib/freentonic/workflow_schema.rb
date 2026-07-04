@@ -2,6 +2,7 @@
 
 require "yaml"
 require_relative "workflow_actions"
+require_relative "path_confinement"
 
 module Freentonic
   class WorkflowSchema
@@ -215,6 +216,7 @@ module Freentonic
         raise UserError, "workflow #{@path}: api_client.ext must be a hash with file: and module: keys"
       end
       ext_path = File.expand_path(ext_spec["file"], File.dirname(@path))
+      ext_path = PathConfinement.resolve_within!(ext_path, File.dirname(@path), label: "api_client.ext.file")
       require ext_path
       mod = ext_spec["module"].to_s.split("::").inject(Object) do |ns, name|
         ns.const_get(name, false)

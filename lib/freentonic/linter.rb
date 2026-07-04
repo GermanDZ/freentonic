@@ -67,9 +67,13 @@ module Freentonic
         return error("#{label}: must be a hash with ruby: and class: keys")
       end
 
-      ruby_path = File.expand_path(spec["ruby"], File.dirname(schema.path))
-      unless File.file?(ruby_path)
-        return error("#{label}.ruby: file not found: #{ruby_path}")
+      workflow_dir = File.dirname(schema.path)
+      ruby_path = File.expand_path(spec["ruby"], workflow_dir)
+
+      begin
+        ruby_path = PathConfinement.resolve_within!(ruby_path, workflow_dir, label: "#{label}.ruby")
+      rescue UserError => e
+        return error(e.message)
       end
 
       begin

@@ -14,6 +14,7 @@ require_relative "freentonic/errors"
 
 require_relative "freentonic/chrome_cdp"
 require_relative "freentonic/source_helpers"
+require_relative "freentonic/path_confinement"
 require_relative "freentonic/workflow_schema"
 require_relative "freentonic/remote_prompt_store"
 require_relative "freentonic/recorder"
