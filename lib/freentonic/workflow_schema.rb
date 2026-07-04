@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "yaml"
+require_relative "workflow_actions"
 
 module Freentonic
   class WorkflowSchema
@@ -273,6 +274,12 @@ module Freentonic
         raise UserError, "workflow #{@path} phase #{phase_name.inspect} step #{index}: must be a hash with an action: key"
       end
 
+      action = step["action"]
+      unless WorkflowActions.known?(action)
+        raise UserError, "workflow #{@path} phase #{phase_name.inspect} step #{index}: " \
+                         "unknown action #{action.inspect} (known actions: #{WorkflowActions.names.sort.join(", ")})"
+      end
+
       validate_when_context!(phase_name, step, index) if step.key?("when_context")
 
       case step["action"]
@@ -345,6 +352,21 @@ module Freentonic
           raise UserError, "#{loc} timeout: must be a positive integer"
         end
       end
+
+      validate_required_keys!(phase_name, step, index)
+    end
+
+    # Load-time presence check for every action's required keys, driven by the
+    # WorkflowActions registry. Runs after the per-action `case` so bespoke
+    # validators (which give richer type-level messages) win when they cover a
+    # key; this backstops the ~20 actions that have no bespoke validator.
+    def validate_required_keys!(phase_name, step, index)
+      action  = step["action"]
+      missing = WorkflowActions.required_keys(action).reject { |k| step.key?(k) }
+      return if missing.empty?
+
+      raise UserError, "workflow #{@path} phase #{phase_name.inspect} step #{index}: " \
+                       "#{action} requires #{missing.map { |k| "#{k}:" }.join(", ")}"
     end
 
     MAX_ENTRIES_CAP    = 10_000

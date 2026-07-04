@@ -9,6 +9,23 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Action registry + exhaustive load-time validation
+
+Every workflow action now lives in a single declarative registry
+(`WorkflowActions`) that lists its required and optional keys. Schema
+validation is driven from it, closing two long-standing gaps:
+
+- **Unknown actions fail at load, not mid-run.** A typo like
+  `navigat` previously passed validation and only died at the runner's
+  dispatch `else` branch — possibly *after* the operator completed 2FA.
+  It now raises a `UserError` at load time listing the known actions.
+- **Required keys are checked for all ~33 actions**, not just the ~13
+  that had bespoke validators. Provider authors get a precise
+  `<action> requires <key>:` error in milliseconds.
+
+A drift-guard test keeps the registry and the runner's dispatch in
+lockstep — neither can list an action the other omits.
+
 ### `await_external_approval` prompt kind
 
 A third SCA pattern alongside `input` and `confirm`: the workflow polls
