@@ -9,6 +9,14 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Invoke server: bound pre-auth request reads (slow-drip DoS)
+
+The request reader now enforces a 30s absolute wall-clock deadline from
+accept to end-of-body, independent of the per-select idle timeout.
+Previously a client trickling one byte per 29s reset the idle window
+forever and pinned a connection slot without authenticating; enough such
+sockets could 503 every endpoint including `/healthz`.
+
 ### `freentonic --lint` — offline workflow validation
 
 A dry-run that statically validates a workflow without launching Chrome
