@@ -368,12 +368,18 @@ password the `/invoke` caller supplied.
 
 The noVNC HTML client carries the Chrome session of every tenant that
 runs while you're watching — v1 is serialized, so you see them
-sequentially. Keep `-p 127.0.0.1:6080:6080` on loopback only; the
-password is hard-coded to `freentonic`, which is fine for a local
-debug bind but trivial to brute-force over a network. If you need to
-attach from another machine, tunnel through SSH (`ssh -L
-6080:127.0.0.1:6080 host`) rather than publishing to a non-loopback
-interface.
+sequentially. Keep `-p 127.0.0.1:6080:6080` on loopback only.
+
+There is **no static password**. The server writes an unreachable
+random password whenever no invoke is running, and rotates in the
+per-invoke `vnc_password` (from the `/invoke` request) only for the
+duration of that run, relocking on exit. So VNC is attachable only
+while a run you launched with a `vnc_password` is in flight, using that
+value. VNC's DES-based auth truncates the password to its first 8
+chars, so treat `vnc_password` as a low-entropy debug secret, not real
+access control. If you need to attach from another machine, tunnel
+through SSH (`ssh -L 6080:127.0.0.1:6080 host`) rather than publishing
+to a non-loopback interface.
 
 Because v1 is serialized, you only ever see one workflow at a time —
 which is also what makes VNC debugging tractable.

@@ -2,7 +2,125 @@
 
 All notable changes to freentonic are documented here.
 
-## Unreleased — Server-mode interactive prompts (2FA / SMS)
+With providers living in a separate repo, the workflow YAML dialect and
+the invoke-server API **are** freentonic's public contract — this
+changelog is their version signal. Every release below corresponds to a
+`version.rb` bump and a matching `vX.Y.Z` git tag.
+
+## Unreleased
+
+### `await_external_approval` prompt kind
+
+A third SCA pattern alongside `input` and `confirm`: the workflow polls
+for an out-of-band condition — e.g. the operator approving a PSD2
+challenge in the bank's mobile app — and resumes on its own when it
+fires. The prompt withdraws itself once satisfied; the operator can also
+submit an empty body as a manual fallback. Surfaces as `kind: "await"`
+on `GET /runs/{run_id}/prompts` (same submit shape as `confirm`).
+
+### Hardening (invoke server + pipeline)
+
+- Reject `run_id` / `profile_key` equal to `.` or `..` — a path
+  containment escape on the write path. `InvokeRunner#run` gains a
+  defense-in-depth containment check.
+- `dump_requests` capture files (raw headers, cookies, response bodies)
+  are written `0600` instead of world-readable.
+- Graceful shutdown actually drains: on SIGTERM the server SIGTERMs the
+  in-flight child's process group and joins the handler for up to 20s,
+  so Chrome tears down cleanly instead of by container SIGKILL. The
+  deployment doc no longer overstates the old (no-op) behavior.
+- Reject prompt submissions for a run that is no longer in flight (a
+  crashed child can no longer strand an OTP on disk); skip expired
+  prompts in `GET /runs/{run_id}/prompts`.
+- Three uncaught-exception holes now become clean `UserError`s instead
+  of raw backtraces (sometimes after the operator completed 2FA):
+  workflow `step.fetch` `KeyError`s, malformed
+  `--from-raw`/`--from-normalized` JSON, and `ApiClient::SessionExpired`
+  escaping Extract. Introduces a typed `ChromeCdp::Error`.
+
+## 0.12.0 — Declarative cursor pagination
+
+Any endpoint can declare `pagination: { kind: cursor, … }` in
+`workflow.yml` and let the framework walk the loop, replacing the
+imperative cursor-pagination Ruby every provider was carrying. Two
+flavors share one engine (`ApiClient#ep_paginate_by_cursor`):
+
+- **Envelope cursor** — extract the next cursor from a response path
+  (`cursor_from_response`), continue while a `response_path` equals a
+  value (Unicaja's `masMovimientos` pattern).
+- **Row cursor** — derive the cursor from the last row via a field
+  alias chain with optional `timestamp_ms` coercion
+  (`cursor_from_last_row`), continue while `cursor_gt` a bound
+  (Revolut's backward-in-time pattern).
+
+The shared loop handles initial-vs-continuation kwargs, cursor
+extraction, cycle detection, nil-cursor stop, and a configurable safety
+cap. New runtime token `{now_ms}` resolves to the current time in ms,
+usable from `initial_kwargs`.
+
+## 0.11.0 — Declarative `status_map`, `bank_code`, `field_aliases`
+
+Three additive `config.yml`-driven knobs that lift orchestration
+patterns out of per-provider Ruby:
+
+- `Builder.map_status_from(raw, mapping)` — resolve a provider status
+  code through a declared map; `posted`/`pending` canonicalize to the
+  `Canonical::Transaction` constants, anything else passes through.
+- `Builder.spanish_iban_portable_keys(iban, bank_code:)` and
+  `Builder.card_pan_portable_keys(pan, bank_code:)` — own the
+  `BANK:LAST4` portable-key shape so Spanish-bank providers only declare
+  `bank_code` in `config.yml`. `Helpers.pan_last4` is now reachable as a
+  module function so the Builder defers to one implementation.
+- `Helpers#pick(logical_key, source)` — walk the `FIELD_ALIASES` alias
+  chain auto-bound from `config.yml`'s `field_aliases:` block (`||`
+  semantics; only `nil` counts as missing), replacing per-normalizer
+  inline alias chains.
+
+## 0.10.1 — Bare `application/json` on `json_post`
+
+`json_post` now sends `Content-Type: application/json` without the
+`;charset=UTF-8` suffix. ING's `/v2/products/transactions/search`
+returns HTTP 200 with an empty `transactions: []` body — silently — when
+the charset suffix is present; without it the same request succeeds.
+`application/json` is implicitly UTF-8 per RFC 8259 §11, so the suffix
+was never spec-correct. Now matches `raw_request`, which always used the
+bare media type.
+
+## 0.10.0 — `define_post` supports `json:` bodies
+
+`define_post` gains a `json:` keyword (mutually exclusive with `form:`)
+that serializes the body via `JSON.generate` with
+`Content-Type: application/json`, for APIs whose payloads carry array or
+nested fields that `URI.encode_www_form` would stringify lossily (e.g.
+ING's search needs `uuids: [...]`). Templates (`{name}`, `{name|date}`,
+`{name|iso}`, `{offset}`) interpolate identically in either shape, and
+the pagination engine resolves `{offset}` inside JSON bodies the same
+way it does for query params. Wired through workflow YAML with a `json:`
+key on POST endpoints, validated mutually exclusive with `form:` at
+schema-load time.
+
+## 0.9.0 — Inline credentials over an fd, not a tmpfs dotenv
+
+The `/invoke` inline-credentials path no longer materializes a tmpfs
+dotenv consumed through the `plain_file` backend (which emitted an
+INSECURE banner that bubbled up to the caller's UI with no operator
+action available). A new `inline_fd` secret backend reads the dotenv
+from an inherited fd (3) and never touches disk. Removes the tmpfs
+scaffolding entirely (`@tmpfs_dir`, `cleanup_tmpfs`, the `/dev/shm`
+sweep on server start, `FREENTONIC_TMPFS_DIR`, `--tmpfs-dir`). The
+`plain_file` + `--secrets-file` path and its banner are unchanged.
+
+## 0.8.0 — Configurable Xvfb / Chrome display geometry
+
+The container's virtual-display geometry is configurable via
+`FREENTONIC_XVFB_GEOMETRY` (default `1280x800x24`) instead of a
+hard-coded resolution, with `DisplayGeometry` as the single source of
+truth shared by the entrypoint's `Xvfb` launch and Chrome's window
+sizing — so the VNC-observable viewport can match the operator's screen.
+
+## 0.7.0 — Server-mode interactive prompts + per-host auth headers
+
+### Server-mode interactive prompts (2FA / SMS)
 
 Workflows that previously required a controlling TTY for 2FA — both
 `prompt_stdin_and_fill` (SMS / OTP entry) and `pause` (manual approval
@@ -27,13 +145,13 @@ so humans tailing `/runs/{run_id}/log` see why the run paused.
 
 See `docs/invoke-server-api.md` for full API reference.
 
-## 0.7.0 — Per-host auth headers + `|iso` date filter + `derived_credentials` Hash pluck
+### Per-host auth headers + `|iso` date filter + `derived_credentials` Hash-pluck
 
 Three additive features unblock fully-declarative YAML for providers that
 talk to two hosts with different auth scopes (e.g. ING's legacy
 cookie host + the v2 Bearer host on `api.ing.ingdirect.es`).
 
-### `derived_credentials` Hash-pluck (`key:`) form
+#### `derived_credentials` Hash-pluck (`key:`) form
 
 `derived_credentials:` gains a second extraction mode alongside the
 existing `regex:` + `capture:`. The new `key:` form plucks a single
@@ -61,7 +179,7 @@ was previously implicit (regex matching on a non-String would have
 raised).
 
 
-### Per-host `auth_header`
+#### Per-host `auth_header`
 
 `auth_header` and `update_auth_headers!` gain a `host:` kwarg. A
 declaration scoped to a host only attaches to requests whose URL has
@@ -101,7 +219,7 @@ request URL via the new `auth_headers_for(url)` instance method;
 `auth_headers` is preserved as a back-compat alias that returns
 unscoped declarations + unscoped overrides.
 
-### `{name|iso}` interpolation filter
+#### `{name|iso}` interpolation filter
 
 `ep_interpolate_val` gains an `|iso` branch that formats `Date`,
 `DateTime`, or `String` values as `yyyy-mm-dd`, regardless of the
