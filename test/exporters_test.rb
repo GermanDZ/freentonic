@@ -77,6 +77,32 @@ module Freentonic
       end
     end
 
+    def test_csv_exporter_neutralizes_formula_injection_but_keeps_numbers
+      payload = Canonical::CanonicalPayload.new(
+        accounts: [
+          Canonical::Account.new(id: "a", institution: "x",
+                                 name: '=HYPERLINK("http://evil")', currency: "EUR")
+        ],
+        transactions: [
+          Canonical::Transaction.new(id: "t1", account_id: "a", amount: "-5.00",
+                                     currency: "EUR", description: "=cmd|' /C calc'!A1"),
+          Canonical::Transaction.new(id: "t2", account_id: "a", amount: "10.00",
+                                     currency: "EUR", description: "@SUM(A1:A9)")
+        ],
+        summary: nil
+      )
+      Tempfile.open(["freentonic-csv", ".csv"]) do |tmp|
+        Exporters::Csv.new(path: tmp.path).write(payload)
+        rows = ::CSV.read(tmp.path, headers: true)
+        # Attacker-influenceable text starting with a formula trigger is quoted.
+        assert_equal "'=cmd|' /C calc'!A1", rows[0]["description"]
+        assert_equal "'@SUM(A1:A9)", rows[1]["description"]
+        assert_equal '\'=HYPERLINK("http://evil")', rows[0]["account_name"]
+        # Negative amounts stay numeric — not mangled into text.
+        assert_equal "-5.0", rows[0]["amount"]
+      end
+    end
+
     def test_csv_exporter_rejects_non_canonical_payload
       err = assert_raises(UserError) do
         Tempfile.open(["freentonic-csv", ".csv"]) do |tmp|

@@ -9,6 +9,15 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### CSV exporter: neutralize formula injection
+
+Cells whose first character is a spreadsheet formula trigger
+(`= + - @ \t \r`) are now prefixed with a leading apostrophe so Excel /
+Sheets treat them as text — merchant names and transfer memos are
+attacker-influenceable bank text, so `=HYPERLINK(...)` / `@SUM(...)` would
+otherwise execute on open. Plain numeric literals (including negative
+amounts) are left untouched so financial columns stay summable.
+
 ### Confine provider ruby to the workflow's directory subtree
 
 `extract.ruby`, `normalize.ruby`, and `api_client.ext.file` now must

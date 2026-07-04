@@ -27,7 +27,7 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 | 8 | `freentonic --lint` dry-run | Done | p1-action-registry | `Linter` + `--lint` flag: schema/action validation, extract/normalize/ext ruby + class resolution, api_client class build, credentials.require ⇔ capture as: cross-ref, secret() ⇔ secrets: cross-ref. No Chrome, no network. Exit 0 clean / 1 on error |
 | 9 | Close pre-auth slow-drip DoS on invoke server | Done | p1-improvements | `REQUEST_READ_DEADLINE` (30s) — absolute accept→end-of-body budget in `BufferedReader`, enforced per `IO.select` via a monotonic deadline so a 1-byte/29s drip can no longer pin a slot. Direct BufferedReader tests |
 | 10 | Confine server-supplied paths (`credentials.file`, `extract.ruby`/`ext.file`) | Done | p1-improvements | Part 1: `credentials.file` resolved under a secrets root (`--secrets-dir`/`FREENTONIC_SECRETS_DIR`, default `/workspace/secrets`) with re-root + realpath containment — closes the /status content-oracle. Part 2: `PathConfinement.resolve_within!` locks `extract.ruby`/`normalize.ruby`/`api_client.ext.file` to the workflow's directory subtree (rejects `../`, absolute, symlink escapes); enforced at runtime + in `--lint` |
-| 11 | CSV formula-injection guard | Not started | | |
+| 11 | CSV formula-injection guard | Done | p1-improvements | `neutralize_formula` prefixes `'` on cells starting with `= + - @ \t \r`; skips plain numeric literals so negative amounts stay summable. Test asserts both branches |
 | 12 | Refuse/warn on cleartext HTTP export with token; `secret()` in `note`/`navigate` | Not started | | |
 
 ## P2 — Architecture evolution
