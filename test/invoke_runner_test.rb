@@ -146,6 +146,20 @@ class InvokeRunnerTest < Minitest::Test
       "token value must not appear on argv"
   end
 
+  # Defense in depth: even if a malformed run_id slipped past InvokeRequest's
+  # pattern (which now rejects "."/".."), the runner must refuse to mkdir
+  # outside @runs_dir rather than truncate the workspace or glob other tenants.
+  def test_run_rejects_run_id_escaping_runs_dir
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    request = build_request
+    request.define_singleton_method(:run_id) { ".." }
+    err = assert_raises(Freentonic::InvokeError) { runner.run(request) }
+    assert_equal 400, err.status_code
+    refute Dir.exist?(File.join(@runs_dir, "prompts")),
+      "escaping run_id must not create dirs at the runs-dir root"
+  end
+
   def test_export_token_passed_via_child_env
     stub = write_stub("exit 0")
     runner = build_runner(stub)

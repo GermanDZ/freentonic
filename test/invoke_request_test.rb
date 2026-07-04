@@ -47,6 +47,16 @@ class InvokeRequestTest < Minitest::Test
     assert_equal "2026-04-21T12-34-56Z.abc_123", req.run_id
   end
 
+  def test_rejects_dot_run_id
+    err = assert_raises(Freentonic::InvokeError) { parse(base_body.merge("run_id" => ".")) }
+    assert_equal 400, err.status_code
+  end
+
+  def test_rejects_dotdot_run_id
+    err = assert_raises(Freentonic::InvokeError) { parse(base_body.merge("run_id" => "..")) }
+    assert_equal 400, err.status_code
+  end
+
   # ─── workflow resolution ───
 
   def test_resolves_workflow_under_root
@@ -102,6 +112,16 @@ class InvokeRequestTest < Minitest::Test
 
   def test_rejects_profile_key_with_slash
     err = assert_raises(Freentonic::InvokeError) { parse(base_body.merge("profile_key" => "bad/key")) }
+    assert_equal 400, err.status_code
+  end
+
+  def test_rejects_dot_profile_key
+    err = assert_raises(Freentonic::InvokeError) { parse(base_body.merge("profile_key" => ".")) }
+    assert_equal 400, err.status_code
+  end
+
+  def test_rejects_dotdot_profile_key
+    err = assert_raises(Freentonic::InvokeError) { parse(base_body.merge("profile_key" => "..")) }
     assert_equal 400, err.status_code
   end
 
