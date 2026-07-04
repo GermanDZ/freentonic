@@ -56,6 +56,14 @@ module Freentonic
     PROMPT_ID_PATTERN  = /\Ap_[A-Fa-f0-9]{4,64}\z/.freeze
     LOG_CHUNK_BYTES    = 64 * 1024
 
+    # On shutdown, how long to wait for the in-flight invoke's handler thread
+    # to drain after we SIGTERM its child process group. Sized to comfortably
+    # cover the runner's own SIGTERM→SIGKILL grace plus Chrome cleanup, so a
+    # `docker stop -t` honoring this window lets the run tear down cleanly
+    # instead of dying by container SIGKILL mid-Process.wait2 (which risks
+    # Chrome-profile corruption and drops the blocked /invoke response).
+    SHUTDOWN_DRAIN_SECONDS = 20
+
     def initialize(
       runner:,
       invoke_token: nil,
@@ -78,6 +86,9 @@ module Freentonic
       @connection_mutex    = Mutex.new
       @active_connections  = 0
       @max_connections     = max_concurrent_connections
+      # Live handler threads, guarded by @connection_mutex. Tracked so shutdown
+      # can join in-flight work instead of abandoning it when start() returns.
+      @handler_threads     = []
     end
 
     def start
@@ -103,12 +114,18 @@ module Freentonic
         end
 
         if admitted
-          Thread.new(client) do |c|
+          thread = Thread.new(client) do |c|
             begin
               handle_connection(c)
             ensure
               @connection_mutex.synchronize { @active_connections -= 1 }
             end
+          end
+          @connection_mutex.synchronize do
+            # Prune completed threads so the list can't grow unbounded over the
+            # server's lifetime, then track the newcomer.
+            @handler_threads.select!(&:alive?)
+            @handler_threads << thread
           end
         else
           refuse_over_capacity(client)
@@ -116,6 +133,7 @@ module Freentonic
       end
     ensure
       @server_socket&.close rescue nil
+      drain_handlers
     end
 
     # Safe to call from a signal handler.
@@ -123,6 +141,42 @@ module Freentonic
       @shutting_down = true
       # Closing the server socket wakes accept() with an error.
       @server_socket&.close rescue nil
+    end
+
+    # Graceful drain, run from start()'s ensure once the accept loop exits.
+    # SIGTERM any in-flight child process group (the runner spawns children in
+    # their own group via pgroup: true, so tini/-g in the container can't reach
+    # them — the server must), then wait a bounded window for the handler
+    # threads to finish: the runner's wait loop reaps the terminated child,
+    # cleans up Chrome, and delivers the /invoke response before returning.
+    # Threads that don't drain in time (e.g. slow-drip readers) are abandoned;
+    # process teardown reaps them.
+    def drain_handlers
+      terminate_in_flight_groups
+
+      deadline = Time.now + SHUTDOWN_DRAIN_SECONDS
+      threads = @connection_mutex.synchronize { @handler_threads.dup }
+      threads.each do |t|
+        remaining = deadline - Time.now
+        break if remaining <= 0
+        t.join(remaining)
+      end
+    end
+
+    def terminate_in_flight_groups
+      pgids = @in_flight_mutex.synchronize do
+        @in_flight.values.map { |e| e[:pgid] }.compact
+      end
+      pgids.each do |pgid|
+        begin
+          Process.kill("-TERM", pgid)
+          log "shutdown: sent SIGTERM to in-flight process group #{pgid}"
+        rescue Errno::ESRCH
+          # already gone
+        rescue StandardError => e
+          log "shutdown: failed to signal process group #{pgid}: #{e.class}: #{e.message}"
+        end
+      end
     end
 
     def shutting_down?

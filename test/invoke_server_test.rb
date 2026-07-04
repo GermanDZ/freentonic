@@ -92,6 +92,34 @@ class InvokeServerTest < Minitest::Test
     File.binwrite(File.join(dir, "log"), contents)
   end
 
+  # ── graceful shutdown drain ───────────────────────────────
+
+  def test_shutdown_sigterms_in_flight_process_group
+    # Stand in for a live invoke child: a real process in its own group,
+    # registered in the server's in-flight table with its pgid.
+    pid  = Process.spawn("sleep", "30", pgroup: true)
+    pgid = Process.getpgid(pid)
+    reaped = false
+    table = @server.instance_variable_get(:@in_flight)
+    mutex = @server.instance_variable_get(:@in_flight_mutex)
+    mutex.synchronize { table["run-drain"] = { run_id: "run-drain", pgid: pgid } }
+
+    @server.send(:terminate_in_flight_groups)
+
+    _, status = Process.wait2(pid)
+    reaped = true
+    assert status.signaled?, "in-flight child should be terminated by shutdown"
+    assert_equal Signal.list.fetch("TERM"), status.termsig
+  ensure
+    unless reaped
+      begin
+        Process.kill("KILL", pid)
+        Process.wait2(pid)
+      rescue Errno::ESRCH, Errno::ECHILD
+      end
+    end
+  end
+
   # ── /healthz (sanity) ─────────────────────────────────────
 
   def test_healthz_is_open

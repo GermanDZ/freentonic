@@ -217,13 +217,29 @@ docker restart freentonic-server
 docker stop freentonic-server
 ```
 
-**Graceful shutdown**: `docker stop` sends SIGTERM. The server stops
-accepting new invokes (responds `503 Service Unavailable` to any new
-`/invoke` during the grace period) and waits for the in-flight invoke
-to finish. Docker's default stop timeout is 10s; if an in-flight
-invoke takes longer, Docker sends SIGKILL. Increase with `docker stop
--t 60 freentonic-server` if your longest workflow is expected to
-exceed 10s during shutdown.
+**Graceful shutdown**: `docker stop` sends SIGTERM. The server closes
+its listener (new connections are refused — the socket is gone, so
+clients see a connection error rather than a `503`), then **SIGTERMs the
+in-flight invoke's Chrome/freentonic process group and waits up to ~20s**
+(`InvokeServer::SHUTDOWN_DRAIN_SECONDS`) for that run to tear down
+cleanly and deliver its response. Terminating the child group is what
+lets Chrome shut down gracefully instead of being SIGKILL'd out from
+under an open profile — the child runs in its own process group, so
+`tini` (even with `-g`) can't reach it; the server does.
+
+Docker's default stop timeout is 10s, which is *shorter* than the drain
+window — Docker would SIGKILL the container mid-drain. **Set `docker stop
+-t` to at least 25s** (drain window + margin), or higher if your longest
+workflow needs more time to unwind on SIGTERM:
+
+```sh
+docker stop -t 30 freentonic-server
+```
+
+A run that is mid-2FA (blocked on an operator prompt) will not finish
+within the drain window; it is terminated and its `/invoke` returns an
+error. Draining only rescues runs that can complete their teardown in
+time — it is not a promise to let an arbitrarily long login finish.
 
 ---
 
