@@ -164,6 +164,18 @@ module Freentonic
           assert ex.received.key?(k), "expected greedy extractor to receive #{k.inspect}"
         end
       end
+
+      # ── SessionExpired surfaces as an actionable UserError ──────────────
+
+      class ExpiredSessionExtractor
+        def call(**); raise ApiClient::SessionExpired, "session expired (HTTP 401)"; end
+      end
+
+      def test_session_expired_becomes_actionable_user_error
+        err = assert_raises(UserError) { run_stage(ExpiredSessionExtractor.new) }
+        assert_includes err.message, "session expired (HTTP 401)"
+        assert_includes err.message, "Re-run connect"
+      end
     end
   end
 end

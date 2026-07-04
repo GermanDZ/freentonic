@@ -75,10 +75,22 @@ module Freentonic
 
     def load_serialized_inputs!
       if (path = @context[:from_normalized])
-        @context[:normalized] = ::JSON.parse(File.read(path))
+        @context[:normalized] = parse_serialized_input(path, "--from-normalized")
       elsif (path = @context[:from_raw])
-        @context[:raw] = ::JSON.parse(File.read(path))
+        @context[:raw] = parse_serialized_input(path, "--from-raw")
       end
+    end
+
+    # Reads and JSON-parses an offline replay input. A missing file or
+    # malformed JSON is operator error (a bad path or a truncated dump), not
+    # a framework bug — surface it as a UserError the CLI renders cleanly
+    # instead of an uncaught Errno / JSON::ParserError backtrace.
+    def parse_serialized_input(path, flag)
+      ::JSON.parse(File.read(path))
+    rescue Errno::ENOENT
+      raise UserError, "#{flag}: file not found: #{path}"
+    rescue ::JSON::ParserError => e
+      raise UserError, "#{flag}: #{path} is not valid JSON (#{e.message})"
     end
 
     # Explicit allowlist: only :raw and :normalized are ever serialized.
