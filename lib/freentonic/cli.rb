@@ -259,6 +259,7 @@ module Freentonic
         source: source,
         stdout: @stdout,
         stderr: @stderr,
+        reporter: Reporter.build(stdout: @stdout),
         secret_resolver: secret_resolver,
         lookback_days: options[:lookback_days] || source&.default_lookback_days || 14,
         isolated: options[:isolated],

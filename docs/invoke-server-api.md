@@ -11,7 +11,8 @@ For deployment and container setup, see
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/healthz` | Liveness probe. Always unauthenticated. |
-| `GET` | `/status` | List in-flight (queued + running) invokes. Auth required if token is set. |
+| `GET` | `/status` | List in-flight invokes, each tagged `queued` or `running`. Auth required if token is set. |
+| `GET` | `/metrics` | Cumulative run counters (total, duration, by status / error_kind). Auth required if token is set. |
 | `POST` | `/invoke` | Accept one workflow for async execution. Returns `202` + `run_id`. |
 | `GET` | `/runs/{run_id}` | Poll a run's lifecycle + result (`queued`/`running`/`done`/`error`/`cancelled`). |
 | `POST` | `/cancel/{run_id}` | Best-effort cancel of a queued or running invoke. |
@@ -266,20 +267,72 @@ Response (HTTP 200):
 {
   "in_flight": [
     {
-      "run_id":      "2026-04-21T12-34-56Z-abc123",
-      "profile_key": "acme__tenant42",
-      "started_at":  "2026-04-21T12:34:56+00:00",
-      "elapsed_ms":  4812
+      "run_id":       "2026-04-21T12-34-56Z-abc123",
+      "profile_key":  "acme__tenant42",
+      "status":       "running",
+      "submitted_at": "2026-04-21T12:34:55+00:00",
+      "queued_ms":    120,
+      "started_at":   "2026-04-21T12:34:56+00:00",
+      "elapsed_ms":   4812
+    },
+    {
+      "run_id":       "2026-04-21T12-35-01Z-def456",
+      "profile_key":  "acme__tenant7",
+      "status":       "queued",
+      "submitted_at": "2026-04-21T12:35:01+00:00",
+      "queued_ms":    900
     }
   ]
 }
 ```
 
-The array is empty when the server is idle. `started_at`/`elapsed_ms` are
-measured from **acceptance**, so for a still-queued run `elapsed_ms`
-includes queue wait. (A dedicated `queued` vs `running` split in `/status`
-is a planned follow-up; use `GET /runs/{run_id}` for the precise state
-today.)
+The array is empty when the server is idle. Each entry distinguishes
+`status: "queued"` from `status: "running"`:
+
+- `queued_ms` — time spent waiting in the queue. It keeps climbing while
+  queued and **freezes** the moment the run starts, so it always reflects
+  pure queue wait.
+- `started_at` / `elapsed_ms` — present only once the run is **running**;
+  `elapsed_ms` is child run-time measured from start (never inflated by
+  queue wait). Both fields are absent for a still-queued run.
+
+`GET /runs/{run_id}` reports the same queued/running split for a single run.
+
+---
+
+## `GET /metrics`
+
+Cumulative, process-lifetime run counters. **Auth required** (if a token is
+set). Aggregate only — no per-run detail, no bodies, nothing sensitive.
+
+```sh
+curl -sS -H "Authorization: Bearer $FREENTONIC_INVOKE_TOKEN" \
+  http://127.0.0.1:7878/metrics
+```
+
+Response (HTTP 200):
+
+```json
+{
+  "runs_total":        42,
+  "in_flight":         1,
+  "duration_ms_total": 512340,
+  "duration_ms_avg":   12198,
+  "by_status":     { "done": 39, "error": 2, "cancelled": 1 },
+  "by_error_kind": { "ok": 37, "user_error": 2, "timeout": 1, "error": 2, "cancelled": 1 }
+}
+```
+
+- `runs_total` — runs that reached a terminal state since the process
+  started (counters reset on restart; they are in-memory, not persisted).
+- `duration_ms_avg` — `duration_ms_total / runs_total`, or `0` before any
+  run finishes.
+- `by_status` — terminal state buckets: `done`, `error` (server/containment
+  failure), `cancelled`.
+- `by_error_kind` — a completed child's `error_kind` (`ok` for a clean
+  exit, else `user_error` / `export_error` / `timeout` / `signal` /
+  `unknown`), or the terminal status for server-side failures (`error`) and
+  cancellations (`cancelled`).
 
 ---
 

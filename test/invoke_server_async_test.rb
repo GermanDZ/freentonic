@@ -122,13 +122,32 @@ class InvokeServerAsyncTest < Minitest::Test
 
   # ── harness ───────────────────────────────────────────────
 
-  def boot(max_queued_runs: 128, max_retained_runs: 256)
+  # Thread-safe line capture standing in for the server's $stdout logger, so
+  # the access-log tests can read back what was logged without racing threads.
+  class LogCapture
+    def initialize
+      @mutex = Mutex.new
+      @lines = []
+    end
+
+    def puts(msg)
+      @mutex.synchronize { @lines.concat(msg.to_s.split("\n")) }
+    end
+
+    def flush; end
+
+    def lines
+      @mutex.synchronize { @lines.dup }
+    end
+  end
+
+  def boot(max_queued_runs: 128, max_retained_runs: 256, logger: nil)
     @server = Freentonic::InvokeServer.new(
       runner:            @runner,
       invoke_tokens:     [@token],
       listen_addr:       "127.0.0.1",
       listen_port:       @port,
-      logger:            nil,
+      logger:            logger,
       max_queued_runs:   max_queued_runs,
       max_retained_runs: max_retained_runs
     )
@@ -446,5 +465,117 @@ class InvokeServerAsyncTest < Minitest::Test
       # socket already closed — acceptable
     end
     @server = nil
+  end
+
+  # ── /status: queued vs running ────────────────────────────
+
+  def json(res)
+    JSON.parse(res.body)
+  end
+
+  def test_status_distinguishes_queued_from_running
+    boot
+    @runner.gate!
+    submit("st-run")
+    @runner.wait_started        # st-run is inside run(), registered as running
+    submit("st-queued")         # sits in the queue
+
+    body = json(get("/status", auth))
+    by_id = body["in_flight"].each_with_object({}) { |e, h| h[e["run_id"]] = e }
+
+    running = by_id.fetch("st-run")
+    assert_equal "running", running["status"]
+    assert running["started_at"]
+    assert_operator running["elapsed_ms"], :>=, 0
+    assert_operator running["queued_ms"], :>=, 0
+
+    queued = by_id.fetch("st-queued")
+    assert_equal "queued", queued["status"]
+    refute queued.key?("started_at"), "a queued run has not started"
+    refute queued.key?("elapsed_ms"), "run-time is meaningless before start"
+    assert_operator queued["queued_ms"], :>=, 0
+
+    @runner.release!; wait_for_status("st-run", "done")
+    @runner.release!; wait_for_status("st-queued", "done")
+  end
+
+  def test_status_requires_auth
+    boot
+    assert_equal "401", get("/status").code
+  end
+
+  # ── /metrics ──────────────────────────────────────────────
+
+  def test_metrics_requires_auth
+    boot
+    assert_equal "401", get("/metrics").code
+  end
+
+  def test_metrics_empty_before_any_run
+    boot
+    m = json(get("/metrics", auth))
+    assert_equal 0, m["runs_total"]
+    assert_equal 0, m["duration_ms_avg"]
+    assert_equal({}, m["by_status"])
+    assert_equal({}, m["by_error_kind"])
+  end
+
+  def test_metrics_tally_by_status_and_error_kind
+    boot
+    # Three runs that complete on their own (not gated), one per outcome.
+    @runner.behavior("m-ok",    :ok)
+    @runner.behavior("m-user",  :user_exit)
+    @runner.behavior("m-crash", :invoke_error)
+    submit("m-ok");    wait_for_status("m-ok",    "done")
+    submit("m-user");  wait_for_status("m-user",  "done")
+    submit("m-crash"); wait_for_status("m-crash", "error")
+
+    # Plus a run cancelled while queued behind a gated one.
+    @runner.gate!
+    submit("m-block")
+    @runner.wait_started
+    submit("m-cancel")
+    assert_equal "202", post("/cancel/m-cancel", {}, auth).code
+    wait_for_status("m-cancel", "cancelled")
+    @runner.release!; wait_for_status("m-block", "done")
+
+    m = json(get("/metrics", auth))
+    assert_equal 5, m["runs_total"]
+    assert_equal 3, m["by_status"]["done"]      # m-ok, m-user, m-block
+    assert_equal 1, m["by_status"]["error"]     # m-crash
+    assert_equal 1, m["by_status"]["cancelled"] # m-cancel
+    assert_equal 2, m["by_error_kind"]["ok"]        # m-ok, m-block exited clean
+    assert_equal 1, m["by_error_kind"]["user_error"] # m-user
+    assert_equal 1, m["by_error_kind"]["error"]      # m-crash (server-side)
+    assert_equal 1, m["by_error_kind"]["cancelled"]  # m-cancel
+    assert_operator m["duration_ms_total"], :>=, 0
+    assert_kind_of Integer, m["duration_ms_avg"]
+  end
+
+  # ── access log ────────────────────────────────────────────
+
+  def test_access_log_one_line_per_request
+    log = LogCapture.new
+    boot(logger: log)
+    get("/healthz")
+    submit("al-1"); wait_for_status("al-1", "done")
+
+    lines = log.lines
+    assert(lines.any? { |l| l.include?("GET /healthz 200") }, "expected healthz access line, got: #{lines.inspect}")
+    assert(lines.any? { |l| l.include?("POST /invoke 202") }, "expected invoke access line")
+    # No secret material in access lines: never the bearer token, never a body.
+    refute(lines.any? { |l| l.include?(@token) }, "access log must not contain the bearer token")
+    # Every access line carries a millisecond timing.
+    access = lines.select { |l| l =~ %r{\b(GET|POST) /} }
+    assert(access.all? { |l| l =~ /\d+ms\z/ }, "each access line ends with Nms: #{access.inspect}")
+  end
+
+  def test_access_log_records_status_of_streaming_log_route
+    log = LogCapture.new
+    boot(logger: log)
+    # No such run → 404 from the streaming log route (which bypasses dispatch).
+    assert_equal "404", get("/runs/nope/log", auth).code
+    assert(log.lines.any? { |l| l.include?("GET /runs/nope/log 404") },
+           "streaming route status must reach the access log: #{log.lines.inspect}")
   end
 end

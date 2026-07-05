@@ -31,14 +31,21 @@ module Freentonic
 
     def run
       load_serialized_inputs!
-      stages_to_run.each do |name|
-        run_stage(name)
+      planned = stages_to_run
+      reporter.event("pipeline.start", stages: planned.map(&:to_s))
+      planned.each do |name|
+        reporter.stage(name) { run_stage(name) }
         persist_stage_output(name)
       end
+      reporter.event("pipeline.finish", ok: true)
       @context
     end
 
     private
+
+    def reporter
+      @context[:reporter] || Reporter.null
+    end
 
     def stages_to_run
       only = @context[:only_stage]
