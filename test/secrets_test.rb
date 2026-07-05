@@ -61,6 +61,34 @@ module Freentonic
       assert_raises(UserError) { Secrets.build(:does_not_exist) }
     end
 
+    # #19: build(name, options = {}) routes options through the registry so
+    # a backend needing configuration (like plain_file's path:) can be
+    # constructed via Secrets.build rather than the CLI reaching for the
+    # class directly.
+    def test_secrets_build_routes_options_to_backend
+      Tempfile.open("freentonic-secrets") do |tmp|
+        tmp.write("ing.PIN=1234\n")
+        tmp.flush
+        File.chmod(0o600, tmp.path)
+
+        backend = Secrets.build(:plain_file, path: tmp.path)
+        assert_instance_of Secrets::PlainFile, backend
+        assert_equal "1234", backend.fetch(source_key: "ing", secret_name: "PIN")
+      end
+    end
+
+    # A third-party backend registered under a custom name receives its
+    # options through the same path — the unification's whole point.
+    def test_secrets_build_passes_options_to_custom_backend
+      captured = nil
+      custom = Class.new do
+        define_method(:initialize) { |**opts| captured = opts }
+      end
+      Secrets.register(:custom_opts_backend, custom)
+      Secrets.build(:custom_opts_backend, foo: "bar", n: 3)
+      assert_equal({ foo: "bar", n: 3 }, captured)
+    end
+
     def test_inline_fd_reads_dotenv_payload_and_closes_fd
       read_io, write_io = IO.pipe
       write_io.write("ing.PIN=1234\nOTHER=xyz\n# comment\n\n")

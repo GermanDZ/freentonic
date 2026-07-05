@@ -41,11 +41,14 @@ class TimestampMsTest < Minitest::Test
   # after the dedupe — pin it so a future divergence is caught.
   def test_helpers_mixin_delegates_identically
     helper = Class.new { include Freentonic::Providers::Helpers }.new
-    ["2024-03-15T10:00:00.000Z", "1710504000000", 1_710_504_000].each do |v|
-      assert_equal T.parse(v), helper.parse_timestamp_ms(v), "mismatch for #{v.inspect}"
-    end
-    [nil, "junk"].each do |v|
-      assert_nil helper.parse_timestamp_ms(v), "expected nil for #{v.inspect}"
+    ["2024-03-15T10:00:00.000Z", "1710504000000", 1_710_504_000, nil, "!!! unparseable"].each do |v|
+      expected = T.parse(v)
+      actual   = helper.parse_timestamp_ms(v)
+      if expected.nil?
+        assert_nil actual, "expected nil for #{v.inspect}"
+      else
+        assert_equal expected, actual, "mismatch for #{v.inspect}"
+      end
     end
   end
 end
