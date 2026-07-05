@@ -9,6 +9,51 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Async `/invoke` (202 + poll) — **breaking API change**
+
+`POST /invoke` no longer blocks for the whole run. It now validates the
+request synchronously (charset / containment / export errors still come
+back as `4xx` on the POST), then returns **`202 Accepted`** with
+`{"run_id": ..., "status": "queued"}` and runs the workflow in the
+background. Poll the new **`GET /runs/{run_id}`** for lifecycle and result:
+
+- `queued` → `{status, submitted_at}`
+- `running` → `{status, started_at, elapsed_ms}`
+- `done` → `{status, exit_code, error_kind, duration_ms, artifacts,
+  log_path, warnings, finished_at}` (a non-zero `exit_code` is still a
+  `done` under `200` — the run ran, something inside it failed)
+- `error` → `{status, error, finished_at}` (server/containment failure)
+- `cancelled` → `{status, finished_at}`
+- unknown / evicted `run_id` → `404`
+
+Why: a synchronous call that can block up to two hours forces huge client
+read-timeouts, is fragile through proxies, and couples the DoS surface to
+run duration. Worse, a client that disconnected mid-run did **not** cancel
+it — the bank login proceeded for nobody. The lifecycle is now decoupled
+from the HTTP connection.
+
+Preserved and new behavior:
+
+- **Serialization is unchanged.** A single worker thread runs one invoke
+  at a time under the same `@invoke_mutex`; `/profiles/prune` still queues
+  behind a live invoke. Concurrency is still v1-strict.
+- **Bounded backlog.** Accepted-but-unfinished runs are capped
+  (`max_queued_runs`, default 128); over the cap `/invoke` returns `503`
+  with `retry_after`. Finished runs are retained in memory
+  (`max_retained_runs`, default 256) and FIFO-evicted; a caller that polls
+  after eviction falls back to reading artifacts off the runs dir.
+- **`/cancel/{run_id}` now also cancels a still-queued run** (previously
+  only running ones), atomically, before any Chrome child is spawned.
+- **Shutdown** drains the worker within the existing grace window and
+  aborts anything still queued.
+- Inline credentials are scrubbed from the retained run record as soon as
+  the run finalizes — a completed run kept for polling holds no secret.
+
+**Migration:** clients that read the result from the `/invoke` response
+must switch to polling `GET /runs/{run_id}`. Drop the oversized
+`read_timeout` (only needs to cover request validation now). `/healthz`
+`in_flight` and `/status` continue to count queued+running work.
+
 ### HTTP export over cleartext + `note` secret hygiene
 
 - The http exporter now **refuses** to send a bearer token over a

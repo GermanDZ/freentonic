@@ -34,7 +34,7 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 
 | # | Item | Status | PR / Commit | Notes |
 | - | --- | --- | --- | --- |
-| 13 | Async `/invoke` (202 + poll) | Not started | | |
+| 13 | Async `/invoke` (202 + poll) | Done | p2-async-invoke | `/invoke` now validates synchronously then returns `202 {run_id, status:"queued"}`; a single worker thread runs invokes serially under `@invoke_mutex` (v1 serialization preserved) and `GET /runs/:id` reports `queued`/`running`/`done`/`error`/`cancelled` + the result. Client disconnect no longer wastes a run. Bounded queue (`max_queued_runs`→503) + FIFO-evicted retention (`max_retained_runs`); inline creds scrubbed from the record at finalize. Cancel now also works on still-queued runs; shutdown drains the worker and aborts the backlog |
 | 14 | Structured run events + minimal observability | Not started | | |
 | 15 | Container hardening + token lifecycle | Not started | | |
 | 16 | Retire cheapest untested risk (engine, connect, export fan-out, etc.) | Not started | | |
@@ -52,6 +52,6 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 ## Summary
 
 - Total items: 21
-- Done: 12 (all of P0 + all of P1)
+- Done: 13 (all of P0 + all of P1 + P2 #13)
 - In progress: 0
-- Not started: 9 (P2 + P3)
+- Not started: 8 (rest of P2 + P3)
