@@ -103,9 +103,17 @@ module Freentonic
       # In params values: {name} → kwargs[:name], {name|date} → format_date(kwargs[:name]),
       # {offset} → current pagination offset (injected by the loop).
       # response_extract_batch: array of JSON keys tried in order to unwrap the response body.
+      #
+      # headers: request headers attached to this endpoint's calls. Values
+      # are templated identically to params ({name} → kwargs[:name],
+      # {name|date}, {name|iso}); static values pass through. They are
+      # applied AFTER the client's auth_headers, so an endpoint header
+      # overrides an auth header on a name collision — the same precedence
+      # raw_request uses. A templated header requires the parameterized
+      # form, so declaring headers routes even a param-less GET through it.
       def define_get(method_name, path_template, base: nil, params: {}, pagination: nil,
-                     limit: 100, response_extract_batch: nil)
-        if params.empty? && pagination.nil?
+                     limit: 100, response_extract_batch: nil, headers: nil)
+        if params.empty? && pagination.nil? && (headers.nil? || headers.empty?)
           rk = response_extract_batch
           define_method(method_name) do
             url = base || self.class.get_base_url
@@ -115,7 +123,8 @@ module Freentonic
           end
         else
           _define_parameterized(method_name, :get, path_template, base: base,
-                                 request_template: params, pagination: pagination, limit: limit,
+                                 request_template: params, headers: headers,
+                                 pagination: pagination, limit: limit,
                                  response_extract_batch: response_extract_batch)
         end
       end
@@ -147,8 +156,10 @@ module Freentonic
       # correctly in the json case.
       #
       # response_extract_batch: same as define_get.
+      # headers: same as define_get — templated request headers, applied
+      # after auth_headers (endpoint header wins on collision).
       def define_post(method_name, path_template, base: nil, form: nil, json: nil,
-                      pagination: nil, limit: 100, response_extract_batch: nil)
+                      pagination: nil, limit: 100, response_extract_batch: nil, headers: nil)
         if form && json
           raise ArgumentError,
                 "define_post(#{method_name.inspect}): pass form: OR json:, not both"
@@ -157,7 +168,28 @@ module Freentonic
         template    = json || form || {}
         _define_parameterized(method_name, :post, path_template, base: base,
                                request_template: template, body_format: body_format,
-                               pagination: pagination, limit: limit,
+                               headers: headers, pagination: pagination, limit: limit,
+                               response_extract_batch: response_extract_batch)
+      end
+
+      # Generate a public PUT method. Same body/headers/template semantics
+      # as define_post (form: OR json:, {templates} interpolated). Exists
+      # for idempotent writes that live outside the normal fetch loop — the
+      # canonical case is ING's PSD2 SCA commit
+      # (PUT /genoma_api/rest/sca/documentation with a per-call
+      # x-ing-securityprocessid header), which was the last caller of
+      # raw_request. Pagination is not meaningful for PUT.
+      def define_put(method_name, path_template, base: nil, form: nil, json: nil,
+                     limit: 100, response_extract_batch: nil, headers: nil)
+        if form && json
+          raise ArgumentError,
+                "define_put(#{method_name.inspect}): pass form: OR json:, not both"
+        end
+        body_format = json ? :json : :form
+        template    = json || form || {}
+        _define_parameterized(method_name, :put, path_template, base: base,
+                               request_template: template, body_format: body_format,
+                               headers: headers, limit: limit,
                                response_extract_batch: response_extract_batch)
       end
 
@@ -288,25 +320,27 @@ module Freentonic
 
       def _define_parameterized(method_name, http_method, path_template, base:,
                                  request_template: {}, body_format: :form,
-                                 pagination: nil, limit: 100,
+                                 headers: nil, pagination: nil, limit: 100,
                                  response_extract_batch: nil)
         rk = response_extract_batch
+        header_template = headers
         pagination_kind, pagination_spec = _normalize_pagination(method_name, pagination)
         define_method(method_name) do |**kwargs|
           resolved_url = base || self.class.get_base_url
           raise ArgumentError, "#{self.class}##{method_name}: no base URL configured" unless resolved_url
           path      = ep_interpolate_path(path_template, kwargs)
           full_path = "#{self.class.get_api_root}#{path}"
+          req_headers = ep_interpolate_headers(header_template, kwargs)
 
           dispatch = lambda do |resolved|
             case http_method
             when :get
-              get(resolved_url, full_path, params: resolved)
-            when :post
+              get(resolved_url, full_path, params: resolved, headers: req_headers)
+            when :post, :put
               if body_format == :json
-                json_post(resolved_url, full_path, json: resolved)
+                json_write(http_method, resolved_url, full_path, json: resolved, headers: req_headers)
               else
-                post(resolved_url, full_path, form: resolved)
+                form_write(http_method, resolved_url, full_path, form: resolved, headers: req_headers)
               end
             end
           end
@@ -476,14 +510,15 @@ module Freentonic
 
     protected
 
-    # Issue a GET request. Returns parsed JSON.
-    def get(base_url, path, params: {})
-      request(:get, base_url, path, params: params)
+    # Issue a GET request. Returns parsed JSON. `headers:` are per-request
+    # headers merged over the client's auth_headers.
+    def get(base_url, path, params: {}, headers: {})
+      request(:get, base_url, path, params: params, headers: headers)
     end
 
     # Issue a POST request with form-encoded body. Returns parsed JSON.
-    def post(base_url, path, form: {})
-      request(:post, base_url, path, form: form)
+    def post(base_url, path, form: {}, headers: {})
+      request(:post, base_url, path, form: form, headers: headers)
     end
 
     # Issue a POST request with a JSON body. Returns parsed JSON. The
@@ -491,8 +526,19 @@ module Freentonic
     # nested Hashes / booleans survive round-trip unchanged — which the
     # form-encoded path can't promise (URI.encode_www_form stringifies
     # everything).
-    def json_post(base_url, path, json: {})
-      request(:post, base_url, path, json: json)
+    def json_post(base_url, path, json: {}, headers: {})
+      request(:post, base_url, path, json: json, headers: headers)
+    end
+
+    # Issue a :post or :put with a JSON body. Backs the declared POST/PUT
+    # endpoint dispatch so both verbs share one JSON body path.
+    def json_write(http_method, base_url, path, json: {}, headers: {})
+      request(http_method, base_url, path, json: json, headers: headers)
+    end
+
+    # Issue a :post or :put with a form-encoded body.
+    def form_write(http_method, base_url, path, form: {}, headers: {})
+      request(http_method, base_url, path, form: form, headers: headers)
     end
 
     # Convenience: GET using the class-level base_url + api_root.
@@ -562,7 +608,7 @@ module Freentonic
 
     private
 
-    def request(method, base_url, path, params: {}, form: {}, json: nil)
+    def request(method, base_url, path, params: {}, form: {}, json: nil, headers: {})
       uri = URI("#{base_url}#{path}")
       uri.query = URI.encode_www_form(params) if params.any?
 
@@ -574,14 +620,19 @@ module Freentonic
       req = case method
             when :get  then Net::HTTP::Get.new(uri)
             when :post then Net::HTTP::Post.new(uri)
+            when :put  then Net::HTTP::Put.new(uri)
             end
 
       req["User-Agent"]      = DEFAULT_UA
       req["Accept"]          = "application/json"
       req["Accept-Language"] = "es-ES"
       auth_headers_for(base_url).each { |name, value| req[name] = value.to_s if value }
+      # Endpoint headers applied last: they override an auth header on a
+      # name collision, matching raw_request's precedence.
+      headers.each { |name, value| req[name] = value.to_s if value }
 
-      if method == :post && !json.nil?
+      has_body = method == :post || method == :put
+      if has_body && !json.nil?
         # No charset suffix. application/json is implicitly UTF-8 per
         # RFC 8259, but more importantly ING's API edge silently
         # rejects requests whose Content-Type carries `;charset=…`,
@@ -590,7 +641,7 @@ module Freentonic
         # the bare media type; keep json_post consistent.
         req["Content-Type"] = "application/json"
         req.body = JSON.generate(json)
-      elsif method == :post && form.any?
+      elsif has_body && form.any?
         req["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8"
         req.body = URI.encode_www_form(form)
       end

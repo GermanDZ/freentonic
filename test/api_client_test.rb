@@ -1023,6 +1023,106 @@ module Freentonic
     end
   end
 
+  # ── Declared-endpoint request headers (define_get/post/put headers:) ──
+
+  # Endpoints that carry request headers — the capability that lets ING's
+  # SCA handshake move from raw_request into declared endpoints.
+  class EndpointHeaderClient < Freentonic::ApiClient
+    base_url "https://ing.ingdirect.es"
+    auth_header "X-Auth", "auth-val"
+
+    # Param-less GET with a static header: routes through the
+    # parameterized path purely because headers: is present.
+    define_get :sca_challenge, "/genoma_api/rest/sca/documentation",
+               headers: { "x-ing-reset-validations" => "1" }
+
+    # GET whose header collides with an auth header by name.
+    define_get :collide, "/collide",
+               headers: { "X-Auth" => "endpoint-wins" }
+
+    # GET with a header templated from a kwarg that may be absent.
+    define_get :optional_header, "/opt",
+               headers: { "X-Optional" => "{maybe}" }
+
+    # POST with a templated header + JSON body.
+    define_post :search, "/v2/products/transactions/search",
+                json: { "uuids" => "{uuids}" },
+                headers: { "x-trace" => "{trace}" }
+
+    # PUT with a per-call templated header + JSON body — the SCA commit.
+    define_put :sca_commit, "/genoma_api/rest/sca/documentation",
+               json: { "processId" => "{process_id}" },
+               headers: { "x-ing-securityprocessid" => "{process_id}" }
+
+    def pagination_sleep = nil
+  end
+
+  class EndpointHeaderTest < Minitest::Test
+    def fake_http(captured)
+      h = Object.new
+      h.define_singleton_method(:use_ssl=)      { |_| }
+      h.define_singleton_method(:open_timeout=) { |_| }
+      h.define_singleton_method(:read_timeout=) { |_| }
+      h.define_singleton_method(:request) do |req|
+        captured[:method]  = req.method
+        captured[:path]    = req.path
+        captured[:body]    = req.body
+        captured[:headers] = req.each_header.to_h
+        RawFakeResp.new("200", '{"ok":true}', { "content-type" => "application/json" })
+      end
+      h
+    end
+
+    def test_get_endpoint_sends_static_header
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        EndpointHeaderClient.new.sca_challenge
+      end
+      assert_equal "GET", captured[:method]
+      assert_equal "1",   captured[:headers]["x-ing-reset-validations"]
+      # auth headers still ride along
+      assert_equal "auth-val", captured[:headers]["x-auth"]
+    end
+
+    def test_endpoint_header_overrides_auth_header_on_collision
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        EndpointHeaderClient.new.collide
+      end
+      assert_equal "endpoint-wins", captured[:headers]["x-auth"]
+    end
+
+    def test_templated_header_resolved_from_kwargs
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        EndpointHeaderClient.new.search(uuids: %w[a b], trace: "trace-42")
+      end
+      assert_equal "POST", captured[:method]
+      assert_equal "trace-42", captured[:headers]["x-trace"]
+      assert_equal({ "uuids" => %w[a b] }, ::JSON.parse(captured[:body]))
+      assert_equal "application/json", captured[:headers]["content-type"]
+    end
+
+    def test_header_templated_from_absent_kwarg_is_dropped
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        EndpointHeaderClient.new.optional_header
+      end
+      refute captured[:headers].key?("x-optional")
+    end
+
+    def test_put_endpoint_sends_put_with_json_body_and_per_call_header
+      captured = {}
+      with_net_http_new(fake_http(captured)) do
+        EndpointHeaderClient.new.sca_commit(process_id: "abc-123")
+      end
+      assert_equal "PUT", captured[:method]
+      assert_equal "abc-123", captured[:headers]["x-ing-securityprocessid"]
+      assert_equal({ "processId" => "abc-123" }, ::JSON.parse(captured[:body]))
+      assert_equal "application/json", captured[:headers]["content-type"]
+    end
+  end
+
   # ── Per-host auth_header scoping ─────────────────────────────────────
 
   class PerHostHeaderClient < Freentonic::ApiClient

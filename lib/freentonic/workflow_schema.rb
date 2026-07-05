@@ -138,11 +138,12 @@ module Freentonic
         limit      = ep["limit"] || 100
         rk         = Array(ep.dig("response", "extract_batch")).map(&:to_s)
         rk         = nil if rk.empty?
+        headers    = ep["headers"]
 
         case method
         when "GET"
           params = ep["params"] || {}
-          klass.define_get(name, path, base: base, params: params,
+          klass.define_get(name, path, base: base, params: params, headers: headers,
                            pagination: pagination, limit: limit,
                            response_extract_batch: rk)
         when "POST"
@@ -154,9 +155,24 @@ module Freentonic
                   "form: and json: — pick one (form: → application/x-www-form-urlencoded, " \
                   "json: → application/json with Array/Hash literals preserved)."
           end
-          klass.define_post(name, path, base: base, form: form, json: json,
+          klass.define_post(name, path, base: base, form: form, json: json, headers: headers,
                             pagination: pagination, limit: limit,
                             response_extract_batch: rk)
+        when "PUT"
+          form = ep["form"]
+          json = ep["json"]
+          if form && json
+            raise UserError,
+                  "workflow #{@path} api_client.endpoints[#{name}] declares both " \
+                  "form: and json: — pick one (form: → application/x-www-form-urlencoded, " \
+                  "json: → application/json with Array/Hash literals preserved)."
+          end
+          klass.define_put(name, path, base: base, form: form, json: json, headers: headers,
+                           limit: limit, response_extract_batch: rk)
+        else
+          raise UserError,
+                "workflow #{@path} api_client.endpoints[#{name}] has unsupported " \
+                "method #{ep["method"].inspect} (expected GET, POST, or PUT)."
         end
       end
 

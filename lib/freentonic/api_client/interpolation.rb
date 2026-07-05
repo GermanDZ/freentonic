@@ -36,6 +36,20 @@ module Freentonic
         end
       end
 
+      # Resolve a request-headers hash. Unlike ep_interpolate_hash, header
+      # NAMES are preserved as-is (String keys, never symbolized) since
+      # they become HTTP header names; only the values are interpolated
+      # ({name} / {name|date} / {name|iso}). A value that resolves to nil
+      # (e.g. a template naming an absent kwarg) drops the header rather
+      # than sending an empty one.
+      def ep_interpolate_headers(template_hash, kwargs)
+        return {} if template_hash.nil? || template_hash.empty?
+        template_hash.each_with_object({}) do |(k, v), h|
+          resolved = ep_interpolate_val(v, kwargs)
+          h[k.to_s] = resolved unless resolved.nil?
+        end
+      end
+
       # Resolve a single template value. See the module doc for the grammar.
       def ep_interpolate_val(val, kwargs, offset: nil)
         return val unless val.is_a?(String) && val.match?(/\A\{[^}]+\}\z/)

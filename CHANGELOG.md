@@ -64,6 +64,28 @@ genuinely imperative provider — keeps an `extractor.rb`.
   and `--lint` (source binding resolution, one-`let`-source-only, known
   operators + operand types). No `version:` bump.
 
+### Declarative endpoint request headers + `PUT`
+
+The `api_client.endpoints` block gained request headers and a third verb,
+so endpoints that previously forced a provider to reach for
+`raw_request` — the PSD2 SCA handshake calls being the last holdouts —
+can now be declared statically.
+
+- **`headers:` on any endpoint.** A name→value map whose values are
+  interpolated with the same grammar as `params:`/`form:`/`json:`
+  (`{name}`, `{name|date}`, `{name|iso}`); static values pass through. A
+  header naming an absent kwarg resolves to nil and is dropped rather than
+  sent empty. Headers apply *after* the client's `auth_headers`, so an
+  endpoint header overrides an auth header on a name collision — the same
+  precedence `raw_request` already uses.
+- **`method: PUT`.** Joins `GET`/`POST` with `form:`/`json:` body and
+  `headers:` support (no pagination — `PUT` is for idempotent writes like
+  the SCA commit). A previously-silent gap is also closed: an endpoint
+  with an unsupported `method:` now raises at workflow load instead of
+  defining nothing.
+- **Additive.** No `version:` bump; endpoints without `headers:` are
+  unchanged.
+
 ### Structured run events + minimal observability
 
 A structured channel for run telemetry, plus request-level and aggregate

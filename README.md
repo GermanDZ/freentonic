@@ -167,6 +167,16 @@ api_client:
       path: /accounts/{id}/movements
       params:
         from: "{from_date|date}"
+    # Endpoints may carry request headers (static or {templated}, applied
+    # over the auth_headers above), and PUT joins GET/POST — enough to
+    # declare handshakes that used to require raw_request.
+    - name: sca_commit
+      method: PUT
+      path: /rest/sca/documentation
+      headers:
+        x-ing-securityprocessid: "{process_id}"
+      json:
+        processId: "{process_id}"
 
 # The Extract stage loads this Ruby file relative to the YAML directory
 # and instantiates the named class, then calls #call(client:, credentials:,
