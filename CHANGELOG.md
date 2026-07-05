@@ -12,6 +12,32 @@ one-release dual-accept window before `version: 2`) is spelled out in
 
 ## Unreleased
 
+### Declarative extractor plans (`extract: plan:`)
+
+A provider whose extractor is pure orchestration — call an endpoint, loop
+over the rows, call another endpoint per row, assemble a hash — can now
+express it declaratively instead of shipping an `extractor.rb`.
+
+- **New `extract: plan:` form.** A small, closed grammar
+  (`fetch` → `select` → `for_each`/`yield` → `output`) over the
+  workflow's existing declarative `api_client` endpoints. `from_date`,
+  `from_ms`, and `now_ms` are pre-seeded bindings; `{name}` /
+  `{name.dotted.path}` templates thread values between steps; `safe:` +
+  `default:` tolerate non-critical fetch failures (a `SessionExpired`
+  still propagates). Mutually exclusive with the `{ruby:, class:}` escape
+  hatch, which is unchanged and still the right tool for imperative
+  extractors (SCA handshakes, `raw_request`, mid-flow header rotation).
+  See [docs/extract-plan.md](docs/extract-plan.md).
+- **Fully statically validated.** Workflow load and `--lint` check
+  (offline) that `fetch:` names a declared endpoint, every `{token}`
+  resolves to a binding, each `for_each` yields, and exactly one extract
+  form is declared — so a typo'd endpoint or dangling reference fails
+  before login. The interpreter dispatches on a fixed verb set and
+  `fetch:` resolves only against declared endpoint names: a plan can
+  never reach an arbitrary client method.
+- **Additive.** No `version:` bump — existing `{ruby:, class:}` workflows
+  are untouched.
+
 ### Structured run events + minimal observability
 
 A structured channel for run telemetry, plus request-level and aggregate

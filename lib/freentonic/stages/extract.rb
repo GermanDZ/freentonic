@@ -94,8 +94,20 @@ module Freentonic
 
       def load_extractor
         spec = source.extract_spec
+
+        # Declarative form: extract: plan: — a framework interpreter,
+        # duck-typed like a Ruby extractor. The `fetch:` whitelist is the
+        # workflow's own declared endpoint names.
+        if spec.is_a?(Hash) && spec["plan"]
+          return Freentonic::ExtractPlan::PlanExtractor.new(
+            spec["plan"],
+            endpoint_names: source.workflow.api_client_endpoint_names
+          )
+        end
+
         unless spec.is_a?(Hash) && spec["ruby"] && spec["class"]
-          raise UserError, "workflow #{source.workflow.path}: extract: must be a hash with ruby: and class: keys"
+          raise UserError, "workflow #{source.workflow.path}: extract: must be a hash with " \
+                           "ruby: and class: keys, or a plan: block"
         end
 
         workflow_dir = File.dirname(source.workflow.path)

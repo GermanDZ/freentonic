@@ -171,5 +171,59 @@ module Freentonic
         assert_includes out, "form"
       end
     end
+
+    # ── extract: plan: (declarative form) ───────────────────────────────
+
+    # Same as CLEAN but the extract: block is a plan over a declared
+    # endpoint — no sibling extractor.rb needed.
+    PLAN_WORKFLOW = <<~YAML
+      version: 1
+      config: { key: test, default_lookback_days: 30 }
+      secrets: { USER_PIN: {} }
+      credentials:
+        require: [cookie]
+        map:
+          - { from: cookie, as: cookie }
+      phases:
+        login:
+          - { action: navigate, url: "https://bank.example/login" }
+          - { action: fill, selector: "#pin", value: "secret(USER_PIN)" }
+          - { action: capture_cookie_header, host: bank.example, path: /, as: cookie }
+      pipeline: [login]
+      api_client:
+        base_url: https://api.bank.example
+        endpoints:
+          - name: fetch_accounts
+            method: GET
+            path: /accounts
+      extract:
+        plan:
+          steps:
+            - fetch: fetch_accounts
+              as: accounts
+          output:
+            accounts: "{accounts}"
+      normalize:
+        ruby: ./normalizer.rb
+        class: LintTestNormalizer
+    YAML
+
+    def test_plan_workflow_lints_clean_without_extractor_ruby
+      with_workflow(PLAN_WORKFLOW, extractor: nil) do |path|
+        code, out = lint(path)
+        assert_equal 0, code, out
+        assert_includes out, "lints clean"
+      end
+    end
+
+    def test_plan_fetch_unknown_endpoint_fails_lint
+      yaml = PLAN_WORKFLOW.sub("fetch: fetch_accounts", "fetch: fetch_missing")
+      with_workflow(yaml, extractor: nil) do |path|
+        code, out = lint(path)
+        assert_equal 1, code
+        assert_includes out, "fetch_missing"
+        assert_includes out, "not a declared api_client endpoint"
+      end
+    end
   end
 end

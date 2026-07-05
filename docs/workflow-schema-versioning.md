@@ -22,7 +22,9 @@ stays at `1`:
   workflow actions, new `api_client:` / `normalize:` / `credentials:`
   sub-keys, and new accepted values for an existing key are all backward
   compatible: a workflow written against an earlier `1` release keeps
-  loading and running unchanged. New capabilities are opt-in.
+  loading and running unchanged. New capabilities are opt-in. (The
+  `extract: plan:` form is an example — it is a new accepted shape for an
+  existing key; every `extract: { ruby:, class: }` workflow is untouched.)
 - **Defaults don't shift under you.** If a key is absent, its behavior is
   the same across `1.x` releases. A new key may *introduce* a default for
   behavior that previously required no key, but it won't change the meaning

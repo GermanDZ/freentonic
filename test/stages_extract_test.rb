@@ -53,6 +53,63 @@ module Freentonic
         previous&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
       end
 
+      # ── declarative extract: plan: routes through the real stage ────────
+
+      # A workflow double that reports declared endpoints and hands back a
+      # fake client — the two surfaces the plan path reads.
+      PlanWorkflowDouble = Struct.new(:api_client, :endpoint_names, :path) do
+        def build_api_client(_credentials); api_client; end
+        def api_client_endpoint_names; endpoint_names; end
+      end
+
+      class PlanFakeClient
+        def fetch_accounts
+          [{ "ref" => "a1", "alias" => "Checking" }, { "ref" => "a2" }]
+        end
+
+        def fetch_movements(id:, from_date:)
+          { "a1" => [{ "amt" => 10 }], "a2" => [{ "amt" => 20 }] }.fetch(id, [])
+        end
+      end
+
+      def test_extract_plan_runs_through_the_stage
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_accounts", "as" => "accounts" },
+            {
+              "for_each" => { "source" => "accounts" },
+              "as_item" => "account", "as" => "movements",
+              "collect" => "map", "key" => "{account.ref}",
+              "do" => [
+                { "fetch" => "fetch_movements",
+                  "args" => { "id" => "{account.ref}", "from_date" => "{from_date}" },
+                  "as" => "rows" },
+                { "yield" => "{rows}" }
+              ]
+            }
+          ],
+          "output" => { "accounts" => "{accounts}", "movements" => "{movements}" }
+        }
+        workflow = PlanWorkflowDouble.new(PlanFakeClient.new,
+                                          %w[fetch_accounts fetch_movements],
+                                          "/tmp/fake/workflow.yml")
+        ctx = {
+          source:        SourceDouble.new(workflow, { "plan" => plan }),
+          credentials:   {},
+          lookback_days: 30,
+          stdout:        StringIO.new,
+          stderr:        StringIO.new
+        }
+        Extract.new(context: ctx).call
+        assert_equal(
+          {
+            "accounts" => [{ "ref" => "a1", "alias" => "Checking" }, { "ref" => "a2" }],
+            "movements" => { "a1" => [{ "amt" => 10 }], "a2" => [{ "amt" => 20 }] }
+          },
+          ctx[:raw]
+        )
+      end
+
       # ── back-compat: legacy extractors keep working ─────────────────────
 
       class LegacyExtractor
