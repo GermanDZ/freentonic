@@ -315,7 +315,12 @@ module Freentonic
       validate_extract_plan!(ext["plan"]) if has_plan
     end
 
-    PLAN_STEP_VERBS = %w[fetch select for_each].freeze
+    PLAN_STEP_VERBS = %w[fetch select for_each let concat dedup_by].freeze
+
+    # Bindings the interpreter pre-seeds before the first step (see
+    # ExtractPlan::PlanExtractor#call). Static validation starts from this
+    # set so a plan may reference them without an explicit binding step.
+    PLAN_SEED_BINDINGS = %w[from_date from_ms now_ms today lookback_days].freeze
 
     # Walk the plan linearly, tracking which names are bound so far, and
     # fail loud on: a fetch to an undeclared endpoint, a reference to an
@@ -336,7 +341,7 @@ module Freentonic
       end
 
       endpoints = api_client_endpoint_names
-      bound     = %w[from_date from_ms now_ms]
+      bound     = PLAN_SEED_BINDINGS.dup
 
       steps.each_with_index do |step, i|
         validate_plan_step!(step, "#{loc}.steps[#{i}]", endpoints, bound, allow_yield: false)
@@ -360,11 +365,113 @@ module Freentonic
         raise UserError, "#{loc}: a step must declare exactly one verb, found #{verbs.inspect}"
       end
 
+      # A `when:` gate may accompany any verb. Its keys reference bindings
+      # visible at this point; its operators are the when_context set.
+      validate_plan_when!(step["when"], "#{loc}.when", bound) if step.key?("when")
+
       case verbs.first
       when "fetch"    then validate_plan_fetch!(step, loc, endpoints, bound)
       when "select"   then validate_plan_select!(step, loc, bound)
       when "for_each" then validate_plan_for_each!(step, loc, endpoints, bound)
+      when "let"      then validate_plan_let!(step, loc, bound)
+      when "concat"   then validate_plan_concat!(step, loc, bound)
+      when "dedup_by" then validate_plan_dedup_by!(step, loc, bound)
       when "yield"    then validate_plan_yield!(step, loc, bound)
+      end
+    end
+
+    # let: <name> — exactly one of value: / coalesce: / days_ago:. Binds
+    # <name>. `value:`/`coalesce:` templates must reference bound names;
+    # `days_ago:` must be a non-negative integer.
+    def validate_plan_let!(step, loc, bound)
+      name = step["let"]
+      unless name.is_a?(String) && !name.empty?
+        raise UserError, "#{loc}.let: must be a non-empty binding name"
+      end
+      sources = %w[value coalesce days_ago].select { |k| step.key?(k) }
+      unless sources.size == 1
+        raise UserError, "#{loc}.let: must declare exactly one of value:, coalesce:, days_ago: " \
+                         "(found #{sources.empty? ? "none" : sources.inspect})"
+      end
+      case sources.first
+      when "value"
+        validate_plan_refs!(step["value"], "#{loc}.value", bound)
+      when "coalesce"
+        list = step["coalesce"]
+        unless list.is_a?(Array) && !list.empty?
+          raise UserError, "#{loc}.coalesce: must be a non-empty array"
+        end
+        list.each { |v| validate_plan_refs!(v, "#{loc}.coalesce", bound) }
+      when "days_ago"
+        n = step["days_ago"]
+        unless n.is_a?(Integer) && n >= 0
+          raise UserError, "#{loc}.days_ago: must be a non-negative integer (got #{n.inspect})"
+        end
+      end
+      bound << name
+    end
+
+    # concat: [name, …] — every name must be bound; binds `as:`.
+    def validate_plan_concat!(step, loc, bound)
+      names = step["concat"]
+      unless names.is_a?(Array) && !names.empty? && names.all? { |n| n.is_a?(String) && !n.empty? }
+        raise UserError, "#{loc}.concat: must be a non-empty array of binding names"
+      end
+      names.each do |n|
+        unless bound.include?(n)
+          raise UserError, "#{loc}.concat: #{n.inspect} is not bound by an earlier step " \
+                           "(bound: #{bound.join(", ")})"
+        end
+      end
+      unless step["as"].is_a?(String) && !step["as"].empty?
+        raise UserError, "#{loc}.concat: requires a non-empty as: to bind the result"
+      end
+      bound << step["as"]
+    end
+
+    # dedup_by: key | [key, …] — from: must be bound; binds `as:`.
+    def validate_plan_dedup_by!(step, loc, bound)
+      keys = step["dedup_by"]
+      ok = (keys.is_a?(String) && !keys.empty?) ||
+           (keys.is_a?(Array) && !keys.empty? && keys.all? { |k| k.is_a?(String) && !k.empty? })
+      unless ok
+        raise UserError, "#{loc}.dedup_by: must be a non-empty field name or array of field names"
+      end
+      unless bound.include?(step["from"].to_s)
+        raise UserError, "#{loc}.dedup_by.from: #{step["from"].inspect} is not bound by an earlier step " \
+                         "(bound: #{bound.join(", ")})"
+      end
+      unless step["as"].is_a?(String) && !step["as"].empty?
+        raise UserError, "#{loc}.dedup_by: requires a non-empty as: to bind the result"
+      end
+      bound << step["as"]
+    end
+
+    # when: { binding: { op: operand } } — reuses the when_context
+    # operator set. Every key must be a bound name; operators and operand
+    # types are checked exactly as validate_when_context! does for phases.
+    def validate_plan_when!(gate, loc, bound)
+      unless gate.is_a?(Hash) && !gate.empty?
+        raise UserError, "#{loc}: must be a non-empty hash of { binding: { op: operand } }"
+      end
+      gate.each do |key, ops|
+        unless bound.include?(key.to_s)
+          raise UserError, "#{loc}: #{key.inspect} is not a bound name (bound: #{bound.join(", ")})"
+        end
+        unless ops.is_a?(Hash) && !ops.empty?
+          raise UserError, "#{loc} key #{key.inspect} must map to a non-empty hash of operators"
+        end
+        ops.each do |op, operand|
+          unless WHEN_CONTEXT_OPS.include?(op)
+            raise UserError, "#{loc} key #{key.inspect}: unknown operator #{op.inspect} (allowed: #{WHEN_CONTEXT_OPS.join(", ")})"
+          end
+          if WHEN_CONTEXT_NUMERIC_OPS.include?(op) && !operand.is_a?(Numeric)
+            raise UserError, "#{loc} key #{key.inspect}: operator #{op.inspect} requires a numeric operand, got #{operand.inspect}"
+          end
+          if WHEN_CONTEXT_PRESENCE_OPS.include?(op) && ![true, false].include?(operand)
+            raise UserError, "#{loc} key #{key.inspect}: operator #{op.inspect} requires a boolean operand, got #{operand.inspect}"
+          end
+        end
       end
     end
 

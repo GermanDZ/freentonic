@@ -38,6 +38,32 @@ express it declaratively instead of shipping an `extractor.rb`.
 - **Additive.** No `version:` bump — existing `{ruby:, class:}` workflows
   are untouched.
 
+#### Phase 2 — data-shaping + conditional verbs
+
+The grammar grew the verbs that take the remaining orchestration-only
+providers (Fintonic, Unicaja) to zero extractor Ruby. Only ING — the
+genuinely imperative provider — keeps an `extractor.rb`.
+
+- **Data-shaping.** `let: <name>` binds a value from `value:`,
+  `coalesce:` (first non-nil of an ordered list — the declarative
+  `a || b || "lit"`), or `days_ago: N` (`today - N`). `concat: [a, b]`
+  merges bound arrays (each `Array()`-coerced). `dedup_by: key | [keys]`
+  dedupes an array first-wins, with a fallback-key list for
+  cross-endpoint field spellings and **nil-key passthrough** (a row
+  missing the key is always kept, never collapsed).
+- **Conditionals.** Any step may carry a `when: { binding: { op: operand } }`
+  gate reusing the browser-phase `when_context` operator set (`gt`/`gte`/
+  `lt`/`lte`, `eq`/`neq`, `present`/`absent`). A false gate makes the step
+  a no-op — a downstream `concat:`/reference to its `as:` reads `[]`/nil.
+  It is deliberately not an expression language (no string predicates); a
+  classify-and-drop that needs string matching belongs in the normalizer.
+- **Two more seed bindings.** `today` (a `Date`) and `lookback_days`
+  (`today - from_date`) join `from_date`/`from_ms`/`now_ms`, so a `when:`
+  gate can toggle an extended-history fetch on long runs.
+- **Statically validated + additive.** The new verbs are checked at load
+  and `--lint` (source binding resolution, one-`let`-source-only, known
+  operators + operand types). No `version:` bump.
+
 ### Structured run events + minimal observability
 
 A structured channel for run telemetry, plus request-level and aggregate

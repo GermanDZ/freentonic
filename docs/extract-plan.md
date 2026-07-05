@@ -20,6 +20,12 @@ Use `plan:` when the extractor would only:
 - pick sub-values out of responses (dig / fallback chain),
 - assemble the results into the raw hash.
 
+A plan can also shape the fetched data: coalesce a value from several
+sources (`let:` + `coalesce:`), merge arrays (`concat:`), dedupe by a key
+or key-fallback chain (`dedup_by:`), and gate a step on a numeric or
+presence condition (`when:`). That covers a conditional extended-history
+fetch and a cross-endpoint merge/dedup without any Ruby.
+
 Keep the `{ruby:, class:}` escape hatch when the extractor needs anything
 imperative — a plan **cannot** express these by design:
 
@@ -27,7 +33,12 @@ imperative — a plan **cannot** express these by design:
 - `client.update_auth_headers!(...)` mid-extraction (e.g. rotating a
   Bearer after an SCA elevation),
 - operator-prompt-gated control flow (`remote_prompt_store`),
-- per-row coercion, arithmetic, or arbitrary conditionals.
+- per-row coercion, string predicates, or arbitrary arithmetic. A `when:`
+  gate speaks only the fixed `when_context` operator set (numeric
+  comparisons, equality, presence) over a single binding — not an
+  expression language. A classify-and-drop decision that needs string
+  matching (Unicaja's credit-vs-debit card split) belongs in the
+  normalizer, not the plan.
 
 ING is the canonical escape-hatch provider; Revolut is the canonical
 plan provider. If you're unsure, start with Ruby — moving to a plan
@@ -122,16 +133,22 @@ arrays in `args:`, `yield:`, and `output:` are resolved recursively.
 segment). This is the same whole-token rule the `api_client` param DSL
 uses, plus the dotted path.
 
-Three bindings are pre-seeded before the first step:
+Five bindings are pre-seeded before the first step:
 
 | Binding | Value |
 | --- | --- |
 | `from_date` | the resolved lookback start (`Date`) |
 | `from_ms` | `from_date` as epoch milliseconds |
 | `now_ms` | now, epoch milliseconds |
+| `today` | today (`Date`) — for `days_ago:` arithmetic and end-of-range defaults |
+| `lookback_days` | `today - from_date` in days — the figure `when:` gates a `>N` extended-history fetch on |
 
 Every `as:` adds a binding. Loop variables (`as_item:`) are visible only
 inside that `for_each`'s `do:` block.
+
+Date formatting stays on the endpoint: pass a `Date` binding as an `arg:`
+and let the endpoint's `{name|iso}` / `{name|date}` param filter format it
+(see the `api_client` DSL). The plan doesn't re-implement date filters.
 
 ### Steps
 
@@ -177,6 +194,66 @@ Each iteration's `yield:` is what gets collected. Ordinary `fetch:` /
 for this iteration. `skip_if_nil: <binding>` drops the iteration when that
 binding is nil.
 
+### Data-shaping verbs
+
+**`let: <name>`** — bind `<name>` to a computed value. Exactly one source:
+
+| Source | Meaning |
+| --- | --- |
+| `value:` | a resolved template (`{token}`, literal, number, nested hash/array) |
+| `coalesce:` | an ordered list of templates — first whose value is non-nil wins (the declarative `a \|\| b \|\| "literal"`) |
+| `days_ago:` | an integer `N` → `today - N` (a `Date`), for lookback-window arithmetic |
+
+```yaml
+- let: begin_date
+  coalesce: ["{from_date}", "{date_range.olderTransactionUserDate}", "2015-01-01"]
+- let: recent_from
+  days_ago: 30
+```
+
+**`concat: [name, …]`** — bind `as:` to the concatenation of the named
+bound collections. Each name is `Array()`-coerced, so an unbound name — a
+fetch whose `when:` gate skipped it — contributes `[]`. This is the
+structured `a + b` / `txs.concat(more)`.
+
+```yaml
+- concat: [old_movements, recent_movements]
+  as: merged
+```
+
+**`dedup_by: key | [key, …]`** — bind `as:` to `from:` with duplicate rows
+removed, keeping the **first** occurrence of each key. A single field, or
+a fallback list (first non-nil field value is the key). A row whose key
+resolves to **nil is always kept** — never deduped — so a record missing
+the sequence field passes through instead of collapsing rows together.
+
+```yaml
+- dedup_by: [numMovimiento, nummov]   # cross-endpoint field spellings
+  from: merged
+  as: movements
+```
+
+### `when:` — gating a step
+
+Any step may carry a `when:` gate. When the condition is false the step is
+a no-op: it neither fetches nor binds, so a later `concat:`/reference to
+its `as:` reads `[]`/nil. The grammar is the workflow's `when_context`
+operator set, over a single binding:
+
+```yaml
+- fetch: fetch_extended_account_movements
+  args: { ppp: "{ppp}", fecha_desde: "{from_date}", fecha_hasta: "{recent_from}" }
+  as: old
+  safe: true
+  when: { lookback_days: { gt: 30 } }   # only fetch older history on long runs
+```
+
+Operators: `gt` / `gte` / `lt` / `lte` (numeric operand), `eq` / `neq`,
+`present` / `absent` (boolean operand) — identical to browser-phase
+`when_context:`. A gate over a non-numeric binding with a numeric operator
+raises. It is **not** an expression language: no string matching, no
+arithmetic, one binding per key.
+
 ### `output`
 
 A hash mapping raw-payload keys to templates, assembled after all steps
@@ -189,10 +266,13 @@ load) verifies, with no Chrome and no network:
 
 - exactly one of `plan:` / (`ruby:` + `class:`),
 - every `fetch:` names a declared endpoint,
-- every `{token}` root and every `select.from` / `for_each.source`
-  references a name bound earlier (loop variables scoped to their `do:`),
+- every `{token}` root and every `select.from` / `for_each.source` /
+  `concat:` name / `dedup_by.from` / `when:` key references a name bound
+  earlier (loop variables scoped to their `do:`),
 - step shapes are well-formed and every verb is known,
-- each `for_each` contains a `yield:`.
+- each `for_each` contains a `yield:`,
+- each `let:` declares exactly one of `value:` / `coalesce:` / `days_ago:`,
+- each `when:` uses only known operators with correctly-typed operands.
 
 A typo'd endpoint or a dangling binding fails before login, not after.
 
