@@ -5,7 +5,10 @@ All notable changes to freentonic are documented here.
 With providers living in a separate repo, the workflow YAML dialect and
 the invoke-server API **are** freentonic's public contract — this
 changelog is their version signal. Every release below corresponds to a
-`version.rb` bump and a matching `vX.Y.Z` git tag.
+`version.rb` bump and a matching `vX.Y.Z` git tag. What the workflow
+`version: 1` line promises (additive keys never bump; renames get a
+one-release dual-accept window before `version: 2`) is spelled out in
+[docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
 ## Unreleased
 

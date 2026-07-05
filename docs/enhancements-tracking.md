@@ -43,15 +43,15 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 
 | # | Item | Status | PR / Commit | Notes |
 | - | --- | --- | --- | --- |
-| 17 | Declarative extractor plan (`extract: plan:`) | Not started | | |
-| 18 | Export resilience (retry, aggregate errors, stream injection) | Not started | | |
-| 19 | Plugin/registry unification (Exporters vs Secrets `build` signatures) | Not started | | |
-| 20 | Internal `api_client.rb` split (mechanical) | Not started | | |
-| 21 | Workflow schema versioning policy | Not started | | Pairs with #6 changelog backfill |
+| 17 | Declarative extractor plan (`extract: plan:`) | Not started | | The one remaining large item; flagship for the zero-provider-Ruby priority |
+| 18 | Export resilience (retry, aggregate errors, stream injection) | Done | p3-sweep | Http exporter retries connection-refused/timeout/5xx with exponential backoff (`retries:`/`retry_base_delay:` opts; DNS + 4xx stay permanent); Export stage aggregates multiple failures into one error naming every failed exporter (single failure still verbatim); `Exporters::Base#io` accessor, stage injects the engine stream, http progress/retry/success lines use it not `$stdout` |
+| 19 | Plugin/registry unification (Exporters vs Secrets `build` signatures) | Done | p3-sweep | `Secrets.build(name, options = {})` now matches `Exporters.build`; CLI `plain_file`/`inline_fd` construct via `Secrets.build` (registry-honoring) so third-party backends receive options uniformly; writing-plugins.md documents the options path |
+| 20 | Internal `api_client.rb` split (mechanical) | Done | p3-sweep | Extracted `ApiClient::Interpolation` + `ApiClient::CursorPagination` (included instance-method modules); `TimestampMs.parse` is the single source of truth (ApiClient + `Providers::Helpers#parse_timestamp_ms` were byte-identical dups); `source.rb` uses `workflow.raw` instead of `instance_variable_get`; extract-spec lookup de-duplicated to `source.extract_spec`. No behavior change |
+| 21 | Workflow schema versioning policy | Done | p3-sweep | New `docs/workflow-schema-versioning.md`: what `version: 1` guarantees (additive keys never bump; renames → one-release dual-accept window → `version: 2`) and how it maps to the changelog; version-mismatch error + README + CHANGELOG intro link it. Pairs with #6 |
 
 ## Summary
 
 - Total items: 21
-- Done: 16 (all of P0 + all of P1 + all of P2)
+- Done: 20 (all of P0 + P1 + P2; P3 #18–#21)
 - In progress: 0
-- Not started: 5 (all of P3: #17–#21)
+- Not started: 1 (P3 #17 — declarative extractor plan, the one large item left)

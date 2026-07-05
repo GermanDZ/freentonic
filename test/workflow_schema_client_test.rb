@@ -21,6 +21,19 @@ module Freentonic
         })
       end
 
+      def test_workflow_schema_rejects_wrong_version_and_points_at_the_policy
+        err = assert_raises(UserError) do
+          WorkflowSchema.new(path: "/fake/providers/test.yml", raw: {
+            "version"  => 2,
+            "config"   => { "key" => "test" },
+            "pipeline" => [],
+            "phases"   => {}
+          })
+        end
+        assert_includes err.message, "version: 1"
+        assert_includes err.message, "workflow-schema-versioning"
+      end
+
       def test_workflow_schema_rejects_await_external_approval_without_message
         err = assert_raises(UserError) do
           schema_with_phase([{

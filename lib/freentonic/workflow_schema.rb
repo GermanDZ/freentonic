@@ -226,7 +226,11 @@ module Freentonic
 
     def validate!
       version = @raw["version"]
-      raise UserError, "workflow #{@path} must declare version: 1" unless version == 1
+      unless version == 1
+        raise UserError,
+              "workflow #{@path} must declare version: 1 " \
+              "(the only dialect version; see docs/workflow-schema-versioning.md)"
+      end
 
       unless phases.is_a?(Hash)
         raise UserError, "workflow #{@path} phases must be a hash"
