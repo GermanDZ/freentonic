@@ -18,15 +18,19 @@ A single container that:
 - Serializes all invokes under a global mutex (one workflow at a time).
 - Reuses a Chrome profile per `(workflow, credential-set)` pair so
   device-trust and cookies persist across runs.
-- Writes per-run artifacts (screenshots, logs) under `/workspace/runs/<run_id>/`,
-  which you bind-mount to a host directory. The web app reads files
-  directly from that host directory.
+- Writes per-run artifacts (screenshots, logs, a structured
+  `events.ndjson` event stream) under `/workspace/runs/<run_id>/`, which
+  you bind-mount to a host directory. The web app reads files directly
+  from that host directory.
+- Emits one access-log line per HTTP request (`method path status ms`,
+  no bodies or tokens) and exposes cumulative run counters at
+  `GET /metrics`.
 - Passes credentials in-process through an inherited pipe (the
   child's `inline_fd` secret backend) and the API token through a
   child-only environment variable — neither touches disk and neither
   appears in `ps` output or argv.
 
-Non-goals for v1: parallelism across tenants, log streaming, metrics.
+Non-goals for v1: parallelism across tenants, log streaming.
 See the plan file for the full follow-up list.
 
 ---
@@ -175,7 +179,8 @@ host:
 
   ~/freentonic/runs/               (read-write mount → /workspace/runs)
     <run_id_A>/
-      log
+      log                                    ← human-readable stdout/stderr
+      events.ndjson                          ← structured event stream (0600)
       evidence-timeout-20260421-123457-412.png
     <run_id_B>/
       log
@@ -264,6 +269,22 @@ docker logs -f freentonic-server
 docker restart freentonic-server
 docker stop freentonic-server
 ```
+
+**Observability**: the server writes one access-log line per request to
+its stdout (captured by `docker logs`):
+
+```
+[invoke-server] POST /invoke 202 3ms
+[invoke-server] GET /runs/<id> 200 1ms
+```
+
+Lines carry only method, path, status, and wall time — never a request
+body or the bearer token. For aggregate health, poll `GET /metrics`
+(run counts, average duration, `by_status` / `by_error_kind` buckets;
+see `docs/invoke-server-api.md`). Per-run structured events land in
+`runs/<run_id>/events.ndjson` (one JSON object per line: stage/phase/step
+boundaries with `elapsed_ms`), a machine-readable companion to the
+human-readable `log`.
 
 **Graceful shutdown**: `docker stop` sends SIGTERM. The server closes
 its listener (new connections are refused — the socket is gone, so

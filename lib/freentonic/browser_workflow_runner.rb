@@ -55,13 +55,18 @@ module Freentonic
         return @context if steps.empty?
 
         @stdout.puts "  Running #{name} phase..."
-        steps.each do |step|
-          execute_step(step)
+        @current_phase = name
+        reporter.phase(name) do
+          steps.each { |step| execute_step(step) }
         end
         @context
       end
 
       private
+
+      def reporter
+        @context[:reporter] || Reporter.null
+      end
 
       def execute_step(step)
         drain_network_events if @recording_installed
@@ -70,8 +75,11 @@ module Freentonic
 
         unless step_condition_met?(step)
           @stdout.puts "    [yml] skipped (when_context): #{action}"
+          reporter.step(action, phase: @current_phase, skipped: true)
           return
         end
+
+        reporter.step(action, phase: @current_phase)
 
         case action
         when "note"

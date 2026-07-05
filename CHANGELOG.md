@@ -9,6 +9,32 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Structured run events + minimal observability
+
+A structured channel for run telemetry, plus request-level and aggregate
+visibility on the invoke server.
+
+- **`Reporter` event stream.** Pipeline runs now emit typed events
+  (`pipeline.start`, `stage.start` / `stage.finish` / `stage.error`,
+  `phase.start` / `phase.finish`, `step`), each carrying `elapsed_ms` and,
+  for stages/phases, a `duration_ms`. Two sinks: a concise human
+  stage-timing summary on stdout (the CLI default), and NDJSON to
+  `<run_dir>/events.ndjson` (0600) when `FREENTONIC_RUN_DIR` is set (i.e.
+  under the invoke server). `step` events record only the YAML action name
+  and phase — never a resolved value, so no secret or URL argument is
+  logged. A broken sink can never fail a run.
+- **Server access log.** One line per HTTP request to the server's logger —
+  `method path status ms` — with no bodies, no query string, and never the
+  bearer token. Covers every route, including the streaming `/log` and
+  `/recording` endpoints.
+- **`GET /metrics`.** New authenticated endpoint exposing cumulative,
+  process-lifetime counters: `runs_total`, `duration_ms_total` /
+  `duration_ms_avg`, and `by_status` / `by_error_kind` buckets.
+- **`queued` vs `running` in `/status`.** Each in-flight entry is now tagged
+  `queued` or `running`. `queued_ms` measures pure queue wait (it freezes
+  once the run starts); `started_at` / `elapsed_ms` appear only once running
+  and measure child run-time — no longer inflated by queue wait.
+
 ### Container hardening + token lifecycle
 
 Defense-in-depth for the invoke-server container, and a token model that

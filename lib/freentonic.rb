@@ -11,6 +11,7 @@ end
 
 require_relative "freentonic/version"
 require_relative "freentonic/errors"
+require_relative "freentonic/reporter"
 
 require_relative "freentonic/chrome_cdp"
 require_relative "freentonic/source_helpers"

@@ -114,5 +114,41 @@ module Freentonic
       # yielding an empty run rather than re-running a stage from_raw excludes.
       assert_equal [], stages(only_stage: :extract, from_raw: "/tmp/raw.json")
     end
+
+    # ─── reporter integration ───
+    #
+    # Pin that Engine frames the run and each stage with structured events. We
+    # stub run_stage so no real stage machinery is needed — the point is the
+    # event envelope, not the stage bodies.
+
+    class RecordingSink
+      attr_reader :events
+      def initialize = @events = []
+      def write(payload) = @events << payload
+    end
+
+    def run_with_recorder(context)
+      sink = RecordingSink.new
+      engine = Engine.new(context: context.merge(reporter: Reporter.new(sink)))
+      ran = []
+      engine.define_singleton_method(:run_stage) { |name| ran << name }
+      engine.run
+      [sink.events, ran]
+    end
+
+    def test_engine_frames_run_and_stages_with_events
+      events, ran = run_with_recorder(only_stage: :extract)
+      assert_equal [:extract], ran
+      names = events.map { |e| e["event"] }
+      assert_equal %w[pipeline.start stage.start stage.finish pipeline.finish], names
+      assert_equal "extract", events[1]["stage"]
+      assert_equal true, events[2]["ok"]
+      assert_kind_of Integer, events[2]["duration_ms"]
+    end
+
+    def test_pipeline_start_lists_planned_stages
+      events, = run_with_recorder(through_stage: :normalize)
+      assert_equal %w[connect extract normalize], events.first["stages"]
+    end
   end
 end

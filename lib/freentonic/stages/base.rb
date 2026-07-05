@@ -30,6 +30,10 @@ module Freentonic
         @context[:stderr] || $stderr
       end
 
+      def reporter
+        @context[:reporter] || Reporter.null
+      end
+
       def source
         @context.fetch(:source)
       end

@@ -152,6 +152,17 @@ module Freentonic
       @runs_mutex          = Mutex.new
       @runs                = {}
       @completed_order     = []
+      # Cumulative, process-lifetime run counters exposed at GET /metrics. Guarded
+      # by its own mutex so the hot finalize path never contends with @runs_mutex
+      # readers. error_kind buckets mirror InvokeRunner::ERROR_KINDS plus the
+      # server-side terminal states (error/cancelled) a runner never reports.
+      @metrics_mutex       = Mutex.new
+      @metrics             = {
+        runs_total:       0,
+        duration_ms_total: 0,
+        by_error_kind:    Hash.new(0),
+        by_status:        Hash.new(0)
+      }
       @run_queue           = Thread::Queue.new
       @worker              = nil
       @shutting_down       = false
@@ -328,72 +339,82 @@ module Freentonic
 
     def handle_connection(client)
       client.sync = true
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      method  = "-"
+      path    = "-"
+      status  = nil
       begin
         request = read_request(client)
       rescue RequestTooLarge
-        write_response(client, 413, { "error" => "payload too large" })
+        status = write_response(client, 413, { "error" => "payload too large" })
         return
       rescue RequestMalformed => e
-        write_response(client, 400, { "error" => "malformed request: #{e.message}" })
+        status = write_response(client, 400, { "error" => "malformed request: #{e.message}" })
         return
       rescue IOError, Errno::EPIPE, Errno::ECONNRESET, Errno::ETIMEDOUT
         return
       end
+      # A clean EOF with no request line (nil) means the peer opened and closed
+      # without speaking — nothing to serve and nothing worth an access line.
       return unless request
 
-      # The log route streams bytes directly to the socket (logs can be large
-      # and we support Range requests), so it can't use the [status, hash]
-      # dispatcher like the JSON endpoints. Handle it here before dispatch.
-      path = request.path.split("?", 2).first
-      if (match = path.match(%r{\A/runs/([^/]+)/log\z}))
-        if request.method == "GET"
-          handle_log(client, request, match[1])
-        else
-          write_response(client, 405, { "error" => "method not allowed" })
-        end
-        return
-      end
-
-      if (match = path.match(%r{\A/runs/([^/]+)/recording\z}))
-        if request.method == "GET"
-          handle_recording(client, request, match[1])
-        else
-          write_response(client, 405, { "error" => "method not allowed" })
-        end
-        return
-      end
-
-      if (match = path.match(%r{\A/runs/([^/]+)/prompts\z}))
-        if request.method == "GET"
-          status, body = handle_list_prompts(request, match[1])
-          write_response(client, status, body)
-        else
-          write_response(client, 405, { "error" => "method not allowed" })
-        end
-        return
-      end
-
-      if (match = path.match(%r{\A/runs/([^/]+)/prompts/([^/]+)\z}))
-        if request.method == "POST"
-          status, body = handle_submit_prompt(request, match[1], match[2])
-          write_response(client, status, body)
-        else
-          write_response(client, 405, { "error" => "method not allowed" })
-        end
-        return
-      end
-
-      status, body = dispatch(request)
-      write_response(client, status, body)
+      method = request.method
+      path   = request.path.split("?", 2).first
+      status = serve(client, request)
     rescue StandardError => e
       log_exception("connection", e)
+      status = 500
       begin
         write_response(client, 500, { "error" => "internal server error" })
       rescue StandardError
         nil
       end
     ensure
+      log_access(method, path, status, started) if status
       client.close rescue nil
+    end
+
+    # Route one request to its handler and return the numeric HTTP status that
+    # was written (for the access log). The log/recording routes stream bytes
+    # directly to the socket (large bodies + Range support), so they can't ride
+    # the [status, hash] JSON dispatcher and are matched here first.
+    def serve(client, request)
+      path = request.path.split("?", 2).first
+
+      if (match = path.match(%r{\A/runs/([^/]+)/log\z}))
+        return request.method == "GET" ? handle_log(client, request, match[1]) : write_method_not_allowed(client)
+      end
+
+      if (match = path.match(%r{\A/runs/([^/]+)/recording\z}))
+        return request.method == "GET" ? handle_recording(client, request, match[1]) : write_method_not_allowed(client)
+      end
+
+      if (match = path.match(%r{\A/runs/([^/]+)/prompts\z}))
+        return write_method_not_allowed(client) unless request.method == "GET"
+        status, body = handle_list_prompts(request, match[1])
+        return write_response(client, status, body)
+      end
+
+      if (match = path.match(%r{\A/runs/([^/]+)/prompts/([^/]+)\z}))
+        return write_method_not_allowed(client) unless request.method == "POST"
+        status, body = handle_submit_prompt(request, match[1], match[2])
+        return write_response(client, status, body)
+      end
+
+      status, body = dispatch(request)
+      write_response(client, status, body)
+    end
+
+    def write_method_not_allowed(client)
+      write_response(client, 405, { "error" => "method not allowed" })
+    end
+
+    # One line per served request: method, path, status, wall time. No headers,
+    # no bodies, no query string — just enough to see traffic and latency
+    # without ever logging a token or credential.
+    def log_access(method, path, status, started_mono)
+      ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_mono) * 1000).to_i
+      log("#{method} #{path} #{status} #{ms}ms")
     end
 
     class RequestMalformed < StandardError; end
@@ -513,6 +534,10 @@ module Freentonic
       raw.strip.to_i
     end
 
+    # Returns `status` (the code it wrote) so callers — and the streaming
+    # handlers that `return write_response(...)` — can propagate it to the
+    # access log. The return value is the status even when the client hung up
+    # mid-write: that's still what this request resolved to.
     def write_response(client, status, body_hash)
       body = JSON.generate(body_hash)
       reason = STATUS_REASONS[status] || "Status"
@@ -524,8 +549,10 @@ module Freentonic
         "\r\n" \
         "#{body}"
       )
+      status
     rescue Errno::EPIPE, Errno::ECONNRESET
       # Client gave up before we finished. Not our problem.
+      status
     end
 
     # ─── routing ───
@@ -540,6 +567,8 @@ module Freentonic
         handle_healthz(request)
       when method == "GET" && path == "/status"
         handle_status(request)
+      when method == "GET" && path == "/metrics"
+        handle_metrics(request)
       when method == "POST" && path == "/invoke"
         handle_invoke(request)
       when method == "POST" && path == "/profiles/prune"
@@ -550,7 +579,7 @@ module Freentonic
       when path.start_with?("/cancel/")
         return method_not_allowed unless method == "POST"
         handle_cancel(request, path[("/cancel/".length)..])
-      when path == "/healthz" || path == "/status" || path == "/invoke" || path == "/profiles/prune" || path.start_with?("/cancel/")
+      when path == "/healthz" || path == "/status" || path == "/metrics" || path == "/invoke" || path == "/profiles/prune" || path.start_with?("/cancel/")
         method_not_allowed
       else
         [404, { "error" => "not found" }]
@@ -565,19 +594,61 @@ module Freentonic
       }]
     end
 
+    # GET /status — live view of queued + running work.
+    #
+    # Each entry distinguishes queued from running: a run is "queued" until the
+    # worker dequeues it, "running" once its child spawns. `queued_ms` is time
+    # spent waiting in the queue (it stops climbing once the run starts);
+    # `elapsed_ms` is child run-time and is absent while still queued. Splitting
+    # them keeps run-time from being inflated by queue wait.
     def handle_status(req)
       return unauthorized unless authenticated?(req)
+      now = Time.now
       entries = @in_flight_mutex.synchronize do
         @in_flight.values.map do |e|
-          {
-            "run_id"      => e[:run_id],
-            "profile_key" => e[:profile_key],
-            "started_at"  => e[:started_at].iso8601,
-            "elapsed_ms"  => ((Time.now - e[:started_at]) * 1000).to_i
+          running   = !e[:started_at].nil?
+          queued_to = running ? e[:started_at] : now
+          entry = {
+            "run_id"       => e[:run_id],
+            "profile_key"  => e[:profile_key],
+            "status"       => running ? "running" : "queued",
+            "submitted_at" => e[:submitted_at].iso8601,
+            "queued_ms"    => ((queued_to - e[:submitted_at]) * 1000).to_i
           }
+          if running
+            entry["started_at"] = e[:started_at].iso8601
+            entry["elapsed_ms"] = ((now - e[:started_at]) * 1000).to_i
+          end
+          entry
         end
       end
       [200, { "in_flight" => entries }]
+    end
+
+    # GET /metrics — cumulative, process-lifetime counters. Aggregate only: no
+    # per-run detail, no bodies, nothing sensitive. `duration_ms_avg` is derived
+    # (0 before any run finishes). Buckets: by_status (done/error/cancelled) and
+    # by_error_kind (a runner's error_kind, "ok" for a clean exit, or the
+    # terminal status for server-side failures/cancels).
+    def handle_metrics(req)
+      return unauthorized unless authenticated?(req)
+      snap = @metrics_mutex.synchronize do
+        {
+          runs_total:        @metrics[:runs_total],
+          duration_ms_total: @metrics[:duration_ms_total],
+          by_error_kind:     @metrics[:by_error_kind].dup,
+          by_status:         @metrics[:by_status].dup
+        }
+      end
+      avg = snap[:runs_total].zero? ? 0 : (snap[:duration_ms_total] / snap[:runs_total])
+      [200, {
+        "runs_total"        => snap[:runs_total],
+        "in_flight"         => current_in_flight_count,
+        "duration_ms_total" => snap[:duration_ms_total],
+        "duration_ms_avg"   => avg,
+        "by_status"         => snap[:by_status],
+        "by_error_kind"     => snap[:by_error_kind]
+      }]
     end
 
     # GET /runs/{run_id} — lifecycle + result of one async invoke.
@@ -669,11 +740,14 @@ module Freentonic
       registered = @in_flight_mutex.synchronize do
         next false if @in_flight.key?(request.run_id)
         @in_flight[request.run_id] = {
-          run_id:      request.run_id,
-          profile_key: request.profile_key,
-          started_at:  submitted_at,
-          pid:         nil,
-          pgid:        nil
+          run_id:       request.run_id,
+          profile_key:  request.profile_key,
+          submitted_at: submitted_at,
+          # nil until the worker dequeues and spawns; /status reads its presence
+          # to tell "queued" from "running" and to split queue-wait from run-time.
+          started_at:   nil,
+          pid:          nil,
+          pgid:         nil
         }
         true
       end
@@ -731,12 +805,19 @@ module Freentonic
       end
 
       request = record[:request]
+      started_at = Time.now
       @runs_mutex.synchronize do
         # Re-check under the lock: a cancel could have landed between the read
         # above and here.
         return unless record[:status] == "queued"
         record[:status]     = "running"
-        record[:started_at] = Time.now
+        record[:started_at] = started_at
+      end
+      # Mirror the start into the in-flight entry so /status can flip this run
+      # from queued → running and stop its queued_ms from climbing.
+      @in_flight_mutex.synchronize do
+        entry = @in_flight[run_id]
+        entry[:started_at] = started_at if entry
       end
 
       result = nil
@@ -791,10 +872,40 @@ module Freentonic
     # Append a just-finished run to the eviction index and drop the oldest
     # terminal records past the retention cap. Caller must hold @runs_mutex.
     def retain_terminal(run_id)
+      record_run_metrics(@runs[run_id])
       @completed_order << run_id
       while @completed_order.size > @max_retained_runs
         oldest = @completed_order.shift
         @runs.delete(oldest)
+      end
+    end
+
+    # Fold one just-finished run into the cumulative /metrics counters. Called
+    # from retain_terminal — the single point every terminal run passes through
+    # (done/error via finalize_run, cancelled via handle_cancel) — so each run
+    # is counted exactly once. Caller holds @runs_mutex; @metrics_mutex nests
+    # under it (never the reverse), so no lock-order cycle.
+    def record_run_metrics(record)
+      return unless record
+      status = record[:status]
+      result = record[:result]
+      duration_ms =
+        if result
+          result.duration_ms.to_i
+        elsif record[:finished_at]
+          base = record[:started_at] || record[:submitted_at]
+          base ? ((record[:finished_at] - base) * 1000).to_i : 0
+        else
+          0
+        end
+      # error_kind: the runner's classification for a completed child ("ok" when
+      # it exited clean), else the server-side terminal status (error/cancelled).
+      kind = result&.error_kind || (status == "done" ? "ok" : status)
+      @metrics_mutex.synchronize do
+        @metrics[:runs_total]        += 1
+        @metrics[:duration_ms_total] += duration_ms
+        @metrics[:by_status][status] += 1
+        @metrics[:by_error_kind][kind] += 1
       end
     end
 
@@ -885,6 +996,7 @@ module Freentonic
       ]
       client.write(headers.join("\r\n") + "\r\n\r\n")
       client.write(body) unless body.empty?
+      200
     rescue Errno::EPIPE, Errno::ECONNRESET
       # Client went away. Not our problem.
     end
@@ -942,7 +1054,7 @@ module Freentonic
       headers << "Content-Range: bytes #{first}-#{last}/#{size}" if partial
 
       client.write(headers.join("\r\n") + "\r\n\r\n")
-      return if length.zero?
+      return status if length.zero?
 
       File.open(path, "rb") do |f|
         f.seek(first) if first.positive?
@@ -954,6 +1066,7 @@ module Freentonic
           remaining -= chunk.bytesize
         end
       end
+      status
     end
 
     def write_range_not_satisfiable(client, size)
@@ -967,6 +1080,7 @@ module Freentonic
         "\r\n" \
         "#{body}"
       )
+      416
     end
 
     # GET /runs/{run_id}/prompts
