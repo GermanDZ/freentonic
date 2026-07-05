@@ -372,6 +372,167 @@ module Freentonic
         assert_equal({ "wallet" => { "x" => 1 }, "source" => "revolut", "count" => 42, "flag" => true },
                      run_plan(plan, client: client))
       end
+
+      # ── Phase-2: let / coalesce ─────────────────────────────────────────
+
+      def test_let_coalesce_picks_first_non_nil
+        client = FakeClient.new(responses: { fetch_wallet: { "meta" => { "a" => nil, "b" => "hit" } } })
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_wallet", "as" => "wallet" },
+            { "let" => "picked",
+              "coalesce" => ["{wallet.meta.a}", "{wallet.meta.b}", "fallback"] }
+          ],
+          "output" => { "picked" => "{picked}" }
+        }
+        assert_equal({ "picked" => "hit" }, run_plan(plan, client: client))
+      end
+
+      def test_let_coalesce_falls_through_to_literal
+        client = FakeClient.new(responses: { fetch_wallet: {} })
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_wallet", "as" => "wallet" },
+            { "let" => "picked", "coalesce" => ["{wallet.nope}", "2015-01-01"] }
+          ],
+          "output" => { "picked" => "{picked}" }
+        }
+        assert_equal({ "picked" => "2015-01-01" }, run_plan(plan, client: client))
+      end
+
+      def test_let_value_and_days_ago
+        client = FakeClient.new(responses: { fetch_wallet: {} })
+        from_date = Date.new(2026, 6, 1)
+        plan = {
+          "steps" => [
+            { "let" => "start", "value" => "{from_date}" },
+            { "let" => "cutoff", "days_ago" => 30 }
+          ],
+          "output" => { "start" => "{start}", "cutoff" => "{cutoff}" }
+        }
+        result = run_plan(plan, client: client, from_date: from_date)
+        assert_equal from_date, result["start"]
+        assert_equal Date.today - 30, result["cutoff"]
+      end
+
+      # ── Phase-2: concat (incl. Array-coercing an unbound/when-skipped) ───
+
+      def test_concat_merges_bound_arrays
+        client = FakeClient.new(responses: {})
+        plan = {
+          "steps" => [
+            { "let" => "a", "value" => [1, 2] },
+            { "let" => "b", "value" => [3] },
+            { "concat" => %w[a b], "as" => "all" }
+          ],
+          "output" => { "all" => "{all}" }
+        }
+        assert_equal({ "all" => [1, 2, 3] }, run_plan(plan, client: client))
+      end
+
+      # ── Phase-2: dedup_by (first-wins, fallback keys, nil passthrough) ──
+
+      def test_dedup_by_single_key_keeps_first
+        client = FakeClient.new(responses: {})
+        rows = [{ "id" => "a", "n" => 1 }, { "id" => "b" }, { "id" => "a", "n" => 2 }]
+        plan = {
+          "steps" => [
+            { "let" => "rows", "value" => rows },
+            { "dedup_by" => "id", "from" => "rows", "as" => "out" }
+          ],
+          "output" => { "out" => "{out}" }
+        }
+        assert_equal([{ "id" => "a", "n" => 1 }, { "id" => "b" }],
+                     run_plan(plan, client: client)["out"])
+      end
+
+      def test_dedup_by_fallback_keys_and_nil_passthrough
+        client = FakeClient.new(responses: {})
+        # numMovimiento wins when present; nummov is the fallback; a row
+        # with neither passes through unconditionally (kept twice).
+        rows = [
+          { "numMovimiento" => "375", "src" => "ext" },
+          { "nummov" => "375", "src" => "std" },          # same logical key → dropped
+          { "src" => "keyless-1" },                        # nil key → kept
+          { "src" => "keyless-2" }                         # nil key → kept
+        ]
+        plan = {
+          "steps" => [
+            { "let" => "rows", "value" => rows },
+            { "dedup_by" => %w[numMovimiento nummov], "from" => "rows", "as" => "out" }
+          ],
+          "output" => { "out" => "{out}" }
+        }
+        out = run_plan(plan, client: client)["out"]
+        assert_equal ["ext", "keyless-1", "keyless-2"], out.map { |r| r["src"] }
+      end
+
+      # ── Phase-2: when: gate (present + numeric), incl. skipped-fetch ────
+
+      def test_when_gate_skips_fetch_and_downstream_reads_empty
+        # lookback_days for from_date = today-10 is 10, so gt:30 is false:
+        # the extended fetch is skipped, `old` stays unbound, and concat
+        # Array-coerces it to [] → merged == recent.
+        client = FakeClient.new(
+          responses: { fetch_wallet: { "recent" => true } },
+          raise_on:  { fetch_cards: ApiClient::ApiError.new(500, "should not be called") }
+        )
+        plan = {
+          "steps" => [
+            { "let" => "recent", "value" => [{ "r" => 1 }] },
+            { "fetch" => "fetch_cards", "as" => "old",
+              "when" => { "lookback_days" => { "gt" => 30 } } },
+            { "concat" => %w[old recent], "as" => "merged" }
+          ],
+          "output" => { "merged" => "{merged}" }
+        }
+        result = run_plan(plan, client: client, from_date: Date.today - 10)
+        assert_equal({ "merged" => [{ "r" => 1 }] }, result)
+        assert_empty client.calls   # fetch_cards never invoked
+      end
+
+      def test_when_gate_runs_fetch_when_condition_holds
+        client = FakeClient.new(responses: { fetch_cards: [{ "c" => 1 }] })
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_cards", "as" => "cards",
+              "when" => { "lookback_days" => { "gt" => 30 } } }
+          ],
+          "output" => { "cards" => "{cards}" }
+        }
+        result = run_plan(plan, client: client, from_date: Date.today - 90)
+        assert_equal({ "cards" => [{ "c" => 1 }] }, result)
+        refute_empty client.calls
+      end
+
+      def test_when_present_gate_inside_for_each
+        # ppp present → fetch; absent → skip via when, yield still runs.
+        client = FakeClient.new(responses: {
+          fetch_wallet: { "rows" => [{ "ppp" => "A" }, { "other" => "x" }] },
+          fetch_bank_details: { "A" => { "iban" => "A1" } }
+        })
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_wallet", "as" => "wallet" },
+            { "select" => { "from" => "wallet", "path" => "rows" }, "as" => "rows" },
+            {
+              "for_each" => { "source" => "rows" },
+              "as_item" => "row", "as" => "details",
+              "do" => [
+                { "select" => { "from" => "row", "path" => "ppp" }, "as" => "ppp" },
+                { "fetch" => "fetch_bank_details", "args" => { "currency" => "{ppp}" },
+                  "as" => "detail", "when" => { "ppp" => { "present" => true } } },
+                { "yield" => "{detail}" }
+              ]
+            }
+          ],
+          "output" => { "details" => "{details}" }
+        }
+        result = run_plan(plan, client: client)
+        # Row A fetches its detail; the keyless row skips the fetch → nil.
+        assert_equal [{ "iban" => "A1" }, nil], result["details"]
+        assert_equal 1, client.calls.count { |(n, _)| n == :fetch_bank_details }
+      end
     end
   end
 end
