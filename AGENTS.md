@@ -429,11 +429,15 @@ key under an existing block (`api_client`, `phases`, …).
 ### 7. New `extract: plan:` verb
 
 The declarative extractor grammar (`lib/freentonic/extract_plan/`) is a
-closed verb set — `fetch` / `select` / `for_each` / `yield` — interpreted
-by `Interpreter#execute`. Phase 1 shipped only what takes Revolut to zero
-Ruby; a new verb (`when:`, `dedup_by:`, …) is justified only when a real
-provider needs it (Fintonic → `when` + `dedup_by`, Unicaja → same). ING
-is **not** a candidate — it stays the `{ruby:, class:}` escape hatch.
+closed verb set — `fetch` / `select` / `for_each` / `yield` (Phase 1) plus
+`let` / `concat` / `dedup_by` and the `when:` gate (Phase 2) — interpreted
+by `Interpreter#execute`. A new verb is justified only when a real
+provider needs it: Phase 1 took Revolut to zero Ruby, Phase 2 did the same
+for Fintonic (`let`+`coalesce`, `concat`, `dedup_by`) and Unicaja (`when:`
+extended-history gate + `dedup_by` cross-field merge). ING is **not** a
+candidate — it stays the `{ruby:, class:}` escape hatch. Resist growing
+`when:` into a string-predicate expression language: a classify-and-drop
+decision needing string matching belongs in the normalizer.
 
 **Implementation:**
 - Add the verb to `Interpreter#execute`'s dispatch and a

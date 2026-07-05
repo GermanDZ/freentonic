@@ -56,7 +56,13 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 - In progress: 0
 - Not started: 0
 
-P3 #17 shipped only the Phase-1 MVP grammar (enough to take Revolut to
-zero extractor Ruby). Conditional (`when:`) and dedup (`dedup_by:`) verbs
-— which Fintonic and Unicaja would need — are a deferred follow-up, not
-part of #17.
+P3 #17 shipped in two phases. Phase 1 was the MVP grammar (`fetch` /
+`select` / `for_each` / `yield`), enough to take Revolut to zero extractor
+Ruby. Phase 2 added the data-shaping verbs (`let`+`coalesce`, `concat`,
+`dedup_by` with fallback-key + nil-passthrough) and the `when:` conditional
+gate (reusing the `when_context` operator set) plus `today` /
+`lookback_days` seed bindings — which took Fintonic and Unicaja to zero
+extractor Ruby as well. Only ING keeps an `extractor.rb`, by design (SCA /
+`raw_request` / Bearer rotation). Unicaja's credit-vs-debit string filter
+moved into its normalizer rather than growing `when:` into a
+string-predicate DSL.

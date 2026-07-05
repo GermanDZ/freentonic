@@ -213,6 +213,143 @@ module Freentonic
       assert_includes err, "item"
     end
 
+    # ── Phase-2 verbs: valid shapes load clean ─────────────────────────
+
+    def test_valid_phase2_plan_loads
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - let: begin_date
+                coalesce: ["{from_date}", "2015-01-01"]
+              - let: cutoff
+                days_ago: 30
+              - let: cutoff2
+                value: "{today}"
+                when: { lookback_days: { gt: 30 } }
+              - fetch: fetch_wallet
+                as: wallet
+              - select: { from: wallet, path: a }
+                as: a
+              - select: { from: wallet, path: b }
+                as: b
+              - concat: [a, b]
+                as: merged
+              - dedup_by: [numMovimiento, nummov]
+                from: merged
+                as: deduped
+            output:
+              begin_date: "{begin_date}"
+              deduped: "{deduped}"
+      YAML
+      assert_nil err
+    end
+
+    def test_seed_bindings_today_and_lookback_days_available
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - let: c
+                value: "{today}"
+                when: { lookback_days: { gte: 0 } }
+            output: { c: "{c}" }
+      YAML
+      assert_nil err
+    end
+
+    def test_let_requires_exactly_one_source
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - let: x
+                value: "{from_date}"
+                days_ago: 30
+            output: { x: "{x}" }
+      YAML
+      assert_includes err, "exactly one of value:, coalesce:, days_ago:"
+    end
+
+    def test_let_coalesce_unbound_ref_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - let: x
+                coalesce: ["{nope}"]
+            output: { x: "{x}" }
+      YAML
+      assert_includes err, "unbound name"
+    end
+
+    def test_concat_unbound_name_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - concat: [wallet, missing]
+                as: out
+            output: { out: "{out}" }
+      YAML
+      assert_includes err, "not bound by an earlier step"
+      assert_includes err, "missing"
+    end
+
+    def test_dedup_by_unbound_from_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - dedup_by: id
+                from: nope
+                as: out
+            output: { out: "{out}" }
+      YAML
+      assert_includes err, "not bound by an earlier step"
+    end
+
+    def test_when_unknown_operator_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+                when: { lookback_days: { between: 30 } }
+            output: { wallet: "{wallet}" }
+      YAML
+      assert_includes err, "unknown operator"
+    end
+
+    def test_when_non_numeric_operand_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+                when: { lookback_days: { gt: "many" } }
+            output: { wallet: "{wallet}" }
+      YAML
+      assert_includes err, "requires a numeric operand"
+    end
+
+    def test_when_unbound_key_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+                when: { nope: { gt: 30 } }
+            output: { wallet: "{wallet}" }
+      YAML
+      assert_includes err, "is not a bound name"
+    end
+
     # The escape-hatch form is untouched — a plain ruby:/class: still loads.
     def test_ruby_form_still_valid
       err = load_error(<<~YAML)
