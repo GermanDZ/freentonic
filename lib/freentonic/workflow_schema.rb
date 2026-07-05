@@ -3,6 +3,7 @@
 require "yaml"
 require_relative "workflow_actions"
 require_relative "path_confinement"
+require_relative "fn"
 
 module Freentonic
   class WorkflowSchema
@@ -339,7 +340,7 @@ module Freentonic
     end
 
     PLAN_STEP_VERBS =
-      %w[fetch select for_each let concat dedup_by index_by lookup note warn abort].freeze
+      %w[fetch select for_each let concat dedup_by index_by lookup apply note warn abort].freeze
 
     # Bindings the interpreter pre-seeds before the first step (see
     # ExtractPlan::PlanExtractor#call / ExtractPlan.seed_scope). Static
@@ -517,6 +518,7 @@ module Freentonic
       when "dedup_by"  then validate_plan_dedup_by!(step, loc, bound)
       when "index_by"  then validate_plan_index_by!(step, loc, bound)
       when "lookup"    then validate_plan_lookup!(step, loc, bound)
+      when "apply"     then validate_plan_apply!(step, loc, bound)
       when "note", "warn", "abort" then validate_plan_message!(step, verbs.first, loc, bound)
       when "skip_when" then validate_plan_when!(step["skip_when"], "#{loc}.skip_when", bound)
       when "yield"     then validate_plan_yield!(step, loc, bound)
@@ -552,6 +554,44 @@ module Freentonic
       if spec.key?("where") && !spec["where"].is_a?(Hash)
         raise UserError, "#{loc}.where: must be a hash of field => value matchers"
       end
+    end
+
+    # apply: <function> — invoke a registered Fn with args:, binding `as:`.
+    # The Fn registry is the whitelist — exactly the declared-endpoint
+    # pattern fetch: uses. Statically checkable because args: is a literal
+    # YAML hash: unknown/missing parameter names fail at load, not mid-sync.
+    def validate_plan_apply!(step, loc, bound)
+      name = step["apply"]
+      unless name.is_a?(String) && !name.empty?
+        raise UserError, "#{loc}.apply: must be a non-empty function name"
+      end
+      unless Freentonic::Fn.registered?(name)
+        raise UserError, "#{loc}.apply: #{name.inspect} is not a registered function " \
+                         "(known: #{Freentonic::Fn.names.join(", ")})"
+      end
+      defn = Freentonic::Fn.fetch(name)
+
+      args = step["args"]
+      if step.key?("args") && !args.is_a?(Hash)
+        raise UserError, "#{loc}.args: must be a hash"
+      end
+      args ||= {}
+
+      unknown = args.keys.map(&:to_s) - defn.param_names
+      unless unknown.empty?
+        raise UserError, "#{loc}.args: unknown parameter(s) #{unknown.join(", ")} for #{name} " \
+                         "(params: #{defn.param_names.join(", ")})"
+      end
+      missing = defn.required_param_names - args.keys.map(&:to_s)
+      unless missing.empty?
+        raise UserError, "#{loc}.args: missing required parameter(s) #{missing.join(", ")} for #{name}"
+      end
+      validate_plan_refs!(args, "#{loc}.args", bound)
+
+      unless step["as"].is_a?(String) && !step["as"].empty?
+        raise UserError, "#{loc}.apply: requires a non-empty as: to bind the result"
+      end
+      bound << step["as"]
     end
 
     # lookup: { from:, key:, default? } — read a bound map with a

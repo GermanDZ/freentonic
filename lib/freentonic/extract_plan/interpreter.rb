@@ -56,6 +56,7 @@ module Freentonic
         elsif step.key?("dedup_by")  then do_dedup_by(step, scope)
         elsif step.key?("index_by")  then do_index_by(step, scope)
         elsif step.key?("lookup")    then do_lookup(step, scope)
+        elsif step.key?("apply")     then do_apply(step, scope)
         elsif step.key?("note")      then do_message(step, "note", scope)
         elsif step.key?("warn")      then do_message(step, "warn", scope)
         elsif step.key?("abort")     then do_message(step, "abort", scope)
@@ -302,6 +303,16 @@ module Freentonic
         value = map.is_a?(Hash) && !key.nil? ? map[key] : nil
         value = spec["default"] if value.nil? && spec.key?("default")
         scope.bind(step["as"], value)
+      end
+
+      # apply: <function> — invoke a registered pure function with resolved
+      # args, binding the result. Dispatch is a registry lookup, never a
+      # `send` off YAML input; Fn.call deep-freezes the resolved args so an
+      # impl that mutates its input raises instead of corrupting a shared
+      # binding. See Freentonic::Fn for the purity contract.
+      def do_apply(step, scope)
+        args = step["args"] ? scope.resolve(step["args"]) : {}
+        scope.bind(step["as"], Fn.call(step["apply"].to_s, args))
       end
 
       # note:/warn:/abort: — emit an operator breadcrumb (embedded {token}

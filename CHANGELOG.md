@@ -10,6 +10,38 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.15.0 — `Fn` registry + the `apply:` verb (Ask 7)
+
+First step of the pure-functions program
+([docs/pure-functions-plan.md](docs/pure-functions-plan.md)): a registry
+of named **pure functions** and one shared verb to call them from any
+plan context. Groundwork for `normalize: plan:` (Ask 8) — the goal is
+deleting every per-provider `normalizer.rb`. Additive; no `version:` bump.
+
+- **`Freentonic::Fn`** — a closed, freentonic-owned registry of pure
+  functions: args in → value out, no I/O, no client, no clock, no input
+  mutation. Purity is enforced, not asked: `Fn.call` deep-freezes every
+  resolved arg, so a mutating impl raises `FrozenError` instead of
+  corrupting a shared plan binding. Every definition must declare a
+  description, typed params, an impl, and **at least one executable
+  example** — the registry test harness runs all examples (twice each,
+  asserting identical results), so a function cannot exist without being
+  born covered.
+- **`apply: <function> / args: / as:`** — new verb in the shared plan
+  step grammar, usable in `extract: plan:` steps, `for_each do:` blocks,
+  and the `elevate:` phase. Dispatch is a registry lookup (never a `send`
+  off YAML); the registry plays the same whitelist role for `apply:` as
+  the declared-endpoint list does for `fetch:`. Because `args:` is a
+  literal YAML hash, `--lint`/load statically reject an unknown function,
+  an undeclared parameter, a missing required parameter, or an unbound
+  `{ref}`.
+- **Tier A builtins** — registrations over the existing tested
+  helper/builder logic: `cents`, `cents_to_amount`, `parse_date`,
+  `parse_timestamp_ms`, `map_status`, `pick`, `extract_fields`,
+  `first_present`, `pan_last4`, `compact_whitespace`,
+  `spanish_iban_portable_keys`, `card_pan_portable_keys`,
+  `build_account`, `build_transaction`, `build_liability`.
+
 ## 0.14.0 — Extract-plan `lookup:` (dynamic-key map read)
 
 The one idiom the Ask 5 verbs turned out not to cover, and the last thing
