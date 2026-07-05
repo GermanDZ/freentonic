@@ -48,6 +48,26 @@ visibility on the invoke server.
   once the run starts); `started_at` / `elapsed_ms` appear only once running
   and measure child run-time — no longer inflated by queue wait.
 
+### Export resilience
+
+A failed export costs a whole bank login to redo, so transient failures no
+longer sink a run outright.
+
+- **HTTP exporter retries transient failures.** Connection-refused,
+  connect/read timeouts, and `5xx` responses are retried with exponential
+  backoff (2 retries by default → 3 attempts; `--export-* retries:` and
+  `retry_base_delay:` are configurable). DNS failures (`SocketError`) and
+  `4xx` are treated as permanent — retrying can't help — and raise
+  immediately. Each retry logs a one-line `⏳ … retry N/M` notice.
+- **Aggregate export errors.** When more than one exporter fails, the Export
+  stage now raises a single error naming *every* failed exporter and
+  carrying each message, instead of re-raising only the first and dropping
+  the rest. A lone failure is still re-raised verbatim.
+- **Exporter progress uses the injected stream.** The HTTP exporter's
+  status/retry/success lines now go through the engine's injected output
+  stream (like every other stage) rather than global `$stdout`, so they land
+  in the run log and are capturable.
+
 ### Fixed
 
 - **Chromium is pinned to a known-good version (`148.0.7778.96-1~deb12u1`).**

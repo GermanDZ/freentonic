@@ -10,8 +10,17 @@ module Freentonic
     # instance and subsequent --export-* flags attach to the most recently
     # declared one.
     class Base
+      # Progress/status stream. Defaults to $stdout so exporters work
+      # standalone, but the Export stage overwrites it with the engine's
+      # injected stream so status lines land in the run log (and are
+      # capturable in tests) like every other stage's output. Data output
+      # (the actual export destination for path=nil/"-") still uses
+      # #open_output → $stdout; only human progress lines go through #io.
+      attr_accessor :io
+
       def initialize(options = {})
         @options = options
+        @io = options[:io] || $stdout
       end
 
       def write(payload)

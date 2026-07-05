@@ -6,9 +6,10 @@ require "stringio"
 module Freentonic
   # Coverage for the Export *stage* fan-out (distinct from the individual
   # exporter classes tested in exporters_test.rb). The documented contract:
-  # every exporter runs even if an earlier one fails, and the *first* error
-  # is re-raised only after all exporters have had their turn — so a failing
-  # HTTP push never suppresses a local JSON dump (or vice versa).
+  # every exporter runs even if an earlier one fails; a single failure is
+  # re-raised verbatim; multiple failures raise one aggregate error naming
+  # every exporter that failed — so a failing HTTP push never suppresses a
+  # local JSON dump, and no failure is silently dropped.
   class StagesExportTest < Minitest::Test
     # Records whether it ran; optionally raises ExportError.
     class FakeExporter
@@ -54,12 +55,23 @@ module Freentonic
       assert after.ran, "exporter after a failure should still run"
     end
 
-    def test_first_error_is_the_one_reraised
+    def test_multiple_failures_aggregate_naming_every_failed_exporter
       first  = FakeExporter.new(fail_with: "first-failure")
       second = FakeExporter.new(fail_with: "second-failure")
       err = assert_raises(ExportError) { run_stage([first, second]) }
-      assert_equal "first-failure", err.message
+      # No failure is dropped: the aggregate message names both exporters
+      # and carries both underlying messages.
+      assert_includes err.message, "2 exporters failed"
+      assert_includes err.message, "first-failure"
+      assert_includes err.message, "second-failure"
+      assert first.ran
       assert second.ran
+    end
+
+    def test_single_failure_is_reraised_verbatim
+      only = FakeExporter.new(fail_with: "solo-failure")
+      err = assert_raises(ExportError) { run_stage([only, FakeExporter.new]) }
+      assert_equal "solo-failure", err.message
     end
 
     def test_missing_normalized_payload_is_user_error
