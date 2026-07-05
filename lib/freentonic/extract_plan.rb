@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "time"
+require "date"
 require_relative "extract_plan/scope"
 require_relative "extract_plan/interpreter"
 
@@ -34,10 +35,13 @@ module Freentonic
       # (see Stages::Extract#call_extractor) means those are simply not
       # passed.
       def call(client:, credentials:, from_date:, stdout:, stderr:)
+        today = Date.today
         scope = Scope.new
         scope.bind("from_date", from_date)
         scope.bind("from_ms", date_to_ms(from_date))
         scope.bind("now_ms", (Time.now.to_f * 1000).to_i)
+        scope.bind("today", today)
+        scope.bind("lookback_days", lookback_days(today, from_date))
 
         Interpreter.new(@plan, endpoint_names: @endpoint_names,
                         stdout: stdout, stderr: stderr)
@@ -45,6 +49,16 @@ module Freentonic
       end
 
       private
+
+      # Days between the lookback start and today — the same figure the
+      # Extract stage derives `from_date` from (`Date.today -
+      # lookback_days`) and that `when_context:` gates on in the browser
+      # phases. Exposed as a plan binding so a `when:` gate can toggle an
+      # extended-history fetch branch (Unicaja's >30-day path).
+      def lookback_days(today, from_date)
+        return nil if from_date.nil?
+        (today - from_date).to_i
+      end
 
       # Epoch milliseconds for the start of the lookback window — the
       # `{from_ms}` binding cursor-paginated endpoints expect. Mirrors the

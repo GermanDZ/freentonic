@@ -450,6 +450,70 @@ module Freentonic
         assert_nil schema.build_api_client({})
       end
 
+      # ── endpoint request headers + PUT (Ask 1) ────────────────────────
+
+      def fake_http(captured)
+        h = Object.new
+        h.define_singleton_method(:use_ssl=)      { |_| }
+        h.define_singleton_method(:open_timeout=) { |_| }
+        h.define_singleton_method(:read_timeout=) { |_| }
+        h.define_singleton_method(:request) do |req|
+          captured[:method]  = req.method
+          captured[:body]    = req.body
+          captured[:headers] = req.each_header.to_h
+          Struct.new(:code, :body) do
+            def [](k) = k.to_s.casecmp("content-type").zero? ? "application/json" : nil
+          end.new("200", '{"ok":true}')
+        end
+        h
+      end
+
+      def test_get_endpoint_headers_from_yaml_are_sent
+        schema = schema_with(
+          "base_url"  => "https://ing.ingdirect.es",
+          "endpoints" => [{
+            "name"    => "sca_challenge",
+            "method"  => "GET",
+            "path"    => "/genoma_api/rest/sca/documentation",
+            "headers" => { "x-ing-reset-validations" => "1" }
+          }]
+        )
+        client = schema.build_api_client({})
+        captured = {}
+        with_net_http_new(fake_http(captured)) { client.sca_challenge }
+        assert_equal "GET", captured[:method]
+        assert_equal "1",   captured[:headers]["x-ing-reset-validations"]
+      end
+
+      def test_put_endpoint_with_templated_header_from_yaml
+        schema = schema_with(
+          "base_url"  => "https://ing.ingdirect.es",
+          "endpoints" => [{
+            "name"    => "sca_commit",
+            "method"  => "PUT",
+            "path"    => "/genoma_api/rest/sca/documentation",
+            "json"    => { "processId" => "{process_id}" },
+            "headers" => { "x-ing-securityprocessid" => "{process_id}" }
+          }]
+        )
+        client = schema.build_api_client({})
+        captured = {}
+        with_net_http_new(fake_http(captured)) { client.sca_commit(process_id: "p-9") }
+        assert_equal "PUT", captured[:method]
+        assert_equal "p-9", captured[:headers]["x-ing-securityprocessid"]
+        assert_equal({ "processId" => "p-9" }, ::JSON.parse(captured[:body]))
+      end
+
+      def test_endpoint_with_unsupported_method_is_rejected
+        schema = schema_with(
+          "base_url"  => "https://example.com",
+          "endpoints" => [{ "name" => "wat", "method" => "DELETE", "path" => "/x" }]
+        )
+        err = assert_raises(UserError) { schema.build_api_client({}) }
+        assert_includes err.message, "unsupported"
+        assert_includes err.message, "DELETE"
+      end
+
       # ── capture_response_header ───────────────────────────────────────
 
       def valid_capture_response_header(extra = {})

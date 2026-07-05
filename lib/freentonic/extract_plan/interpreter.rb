@@ -6,13 +6,19 @@ module Freentonic
     # producing the raw provider payload the normalizer consumes.
     #
     # The verb set is fixed and closed — fetch / select / for_each (with
-    # its nested yield) — dispatched by a `case` on the step's key. There
-    # is no `send` off a YAML-supplied method name anywhere except the
-    # endpoint call, and that name is checked against the workflow's
-    # declared endpoint list first (see #invoke). That whitelist is the
-    # security boundary: a plan can only call endpoints the workflow
-    # already declares, never `raw_request`, `update_auth_headers!`, or
-    # any other client method.
+    # its nested yield), plus the Phase-2 data-shaping verbs let / concat /
+    # dedup_by — dispatched by a `case` on the step's key. There is no
+    # `send` off a YAML-supplied method name anywhere except the endpoint
+    # call, and that name is checked against the workflow's declared
+    # endpoint list first (see #invoke). That whitelist is the security
+    # boundary: a plan can only call endpoints the workflow already
+    # declares, never `raw_request`, `update_auth_headers!`, or any other
+    # client method.
+    #
+    # Any step may carry a `when:` gate (`{ binding: { op: operand } }`)
+    # reusing the workflow's `when_context` operator set. When the gate is
+    # false the step is a no-op — it neither fetches nor binds, so a
+    # downstream reference to its `as:` reads nil (Array-coerced to []).
     class Interpreter
       def initialize(plan, endpoint_names:, stdout:, stderr:)
         @steps          = Array(plan["steps"])
@@ -31,9 +37,14 @@ module Freentonic
       private
 
       def execute(step, client, scope)
-        if step.key?("fetch")       then do_fetch(step, client, scope)
-        elsif step.key?("select")   then do_select(step, scope)
-        elsif step.key?("for_each") then do_for_each(step, client, scope)
+        return if step.key?("when") && !gate_passes?(step["when"], scope)
+
+        if step.key?("fetch")        then do_fetch(step, client, scope)
+        elsif step.key?("select")    then do_select(step, scope)
+        elsif step.key?("for_each")  then do_for_each(step, client, scope)
+        elsif step.key?("let")       then do_let(step, scope)
+        elsif step.key?("concat")    then do_concat(step, scope)
+        elsif step.key?("dedup_by")  then do_dedup_by(step, scope)
         elsif step.key?("yield")
           raise UserError, "extract.plan: yield: is only valid inside a for_each do: block"
         else
@@ -80,6 +91,101 @@ module Freentonic
         value   = dig_first(source, spec["path"])
         value   = spec["default"] if value.nil? && spec.key?("default")
         scope.bind(step["as"], value)
+      end
+
+      # let: <name> — bind a name to a computed value. Exactly one source:
+      #   value:     a resolved template (Date/string/number/{token})
+      #   coalesce:  an ordered list of templates → first non-nil wins
+      #              (the declarative `a || b || "literal"` idiom)
+      #   days_ago:  an integer N → the pre-seeded `today` minus N days
+      #              (a Date), for lookback-window arithmetic
+      def do_let(step, scope)
+        name = step["let"].to_s
+        value =
+          if step.key?("coalesce")
+            resolve_coalesce(step["coalesce"], scope)
+          elsif step.key?("days_ago")
+            days_ago(step["days_ago"], scope)
+          else
+            scope.resolve(step["value"])
+          end
+        scope.bind(name, value)
+      end
+
+      # concat: [name, …] — bind `as:` to the concatenation of the named
+      # bound collections. Each is Array()-coerced, so an unbound name (a
+      # `when:`-skipped fetch's `as:`) contributes []. This is the
+      # structured form of `a + b` / `txs.concat(more)`.
+      def do_concat(step, scope)
+        merged = Array(step["concat"]).flat_map { |name| Array(scope.get(name)) }
+        scope.bind(step["as"], merged)
+      end
+
+      # dedup_by: key | [key, …] — bind `as:` to `from:` with duplicate
+      # rows removed, keeping the first occurrence of each key. The key is
+      # a single field or a fallback list (first non-nil field value wins).
+      # A row whose key resolves to nil is ALWAYS kept — never deduped —
+      # matching Unicaja's cross-endpoint merge where a missing sequence
+      # number must pass through rather than collapse rows together.
+      def do_dedup_by(step, scope)
+        fields = Array(step["dedup_by"]).map(&:to_s)
+        rows   = Array(scope.get(step["from"]))
+        seen   = {}
+        result = rows.select do |row|
+          key = dedup_key(row, fields)
+          if key.nil? then true
+          elsif seen[key] then false
+          else seen[key] = true
+          end
+        end
+        scope.bind(step["as"], result)
+      end
+
+      def dedup_key(row, fields)
+        return nil unless row.is_a?(Hash)
+        fields.lazy.map { |f| row[f] }.find { |v| !v.nil? }
+      end
+
+      def resolve_coalesce(list, scope)
+        Array(list).lazy.map { |tmpl| scope.resolve(tmpl) }.find { |v| !v.nil? }
+      end
+
+      # `today` is pre-seeded as a Date; subtracting an integer keeps the
+      # arithmetic anchored to the same reference the whole plan sees.
+      def days_ago(n, scope)
+        today = scope.get("today")
+        today.nil? ? nil : today - Integer(n)
+      end
+
+      # Evaluate a `when:` gate against the current scope, reusing the
+      # `when_context` operator semantics (see WorkflowSchema and
+      # BrowserWorkflowRunner#compare_context). Every declared key/op must
+      # hold. Operator/operand shapes are validated statically at load.
+      def gate_passes?(gate, scope)
+        return true if gate.nil? || gate.empty?
+        gate.all? do |key, ops|
+          actual = scope.get(key)
+          ops.all? { |op, operand| compare(actual, op, operand, key) }
+        end
+      end
+
+      def compare(actual, op, operand, key)
+        case op
+        when "gt"      then numeric!(actual, key) >  operand
+        when "gte"     then numeric!(actual, key) >= operand
+        when "lt"      then numeric!(actual, key) <  operand
+        when "lte"     then numeric!(actual, key) <= operand
+        when "eq"      then actual == operand
+        when "neq"     then actual != operand
+        when "present" then operand == true ? !actual.nil? : actual.nil?
+        when "absent"  then operand == true ? actual.nil? : !actual.nil?
+        else raise UserError, "extract.plan: when: unknown operator #{op.inspect} on key #{key.inspect}"
+        end
+      end
+
+      def numeric!(val, key)
+        return val if val.is_a?(Numeric)
+        raise UserError, "extract.plan: when: key #{key.inspect} requires a numeric value, got #{val.inspect}"
       end
 
       # for_each: iterate a bound collection, run `do:` sub-steps per item
