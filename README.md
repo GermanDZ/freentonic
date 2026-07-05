@@ -85,6 +85,10 @@ a real run, it `require`s the provider's ruby — only lint what you'd run.
 
 ## Workflow YAML reference
 
+The `version:` line is the dialect contract — see
+**[docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md)**
+for what `version: 1` guarantees and how breaking changes are staged.
+
 ```yaml
 version: 1
 

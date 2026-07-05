@@ -31,6 +31,14 @@ module Freentonic
       OPEN_TIMEOUT = 10
       READ_TIMEOUT = 60
 
+      # A push costs a whole bank login to redo, so transient failures
+      # (connection refused, timeouts, 5xx) get a bounded retry with
+      # exponential backoff before giving up. DNS failures (SocketError)
+      # and 4xx are treated as permanent — retrying won't help.
+      DEFAULT_RETRIES    = 2   # → up to 3 attempts total
+      RETRY_BASE_DELAY   = 0.5 # seconds; doubled each attempt
+      RETRYABLE_TRANSPORT = [Errno::ECONNREFUSED, Net::OpenTimeout, Net::ReadTimeout].freeze
+
       def write(payload)
         url = @options[:url] or raise UserError, "--export-url is required for the http exporter"
         uri = URI(url)
@@ -63,8 +71,8 @@ module Freentonic
                   "http exporter: refusing to send a bearer token over cleartext #{uri.scheme}:// " \
                   "(#{url}). Use an https:// URL, or drop the token if the receiver truly needs none."
           end
-          $stdout.puts "  ⚠ http exporter: POSTing over cleartext #{uri.scheme}:// — " \
-                       "the payload crosses the wire unencrypted."
+          io.puts "  ⚠ http exporter: POSTing over cleartext #{uri.scheme}:// — " \
+                  "the payload crosses the wire unencrypted."
         end
 
         http = Net::HTTP.new(uri.host, uri.port)
@@ -82,27 +90,88 @@ module Freentonic
         req.body = ::JSON.generate(with_run_id_meta(payload.to_h))
 
         started_at = Time.now
-        resp = begin
-          http.request(req)
-        rescue Errno::ECONNREFUSED
-          raise ExportError, "http exporter: connection refused to #{uri.host}:#{uri.port} — is the server running?"
-        rescue Net::OpenTimeout
-          raise ExportError, "http exporter: connection to #{uri.host}:#{uri.port} timed out after #{OPEN_TIMEOUT}s"
-        rescue SocketError => e
-          raise ExportError, "http exporter: could not resolve #{uri.host} (#{e.message})"
-        end
+        resp = request_with_retries(http, req, uri)
 
         result = handle_response(resp, url)
         # Emit a success line so the run log doesn't end at "Exporting via
         # http..." with nothing after — makes in-flight UIs look hung when
-        # they're actually just done. Goes to $stdout to match the
-        # "Exporting via ..." line that the Export stage writes; subprocess
-        # stdout is redirected to the run's log under the invoke server.
-        $stdout.puts "  → #{(@options[:method] || 'POST').to_s.upcase} #{url} → #{resp.code} in #{((Time.now - started_at) * 1000).to_i}ms"
+        # they're actually just done. Goes through #io (the engine's
+        # injected stream under the Export stage) to match the
+        # "Exporting via ..." line that stage writes.
+        io.puts "  → #{(@options[:method] || 'POST').to_s.upcase} #{url} → #{resp.code} in #{((Time.now - started_at) * 1000).to_i}ms"
         result
       end
 
       private
+
+      # Perform the request, retrying transient failures (connection
+      # refused/timeout, 5xx) with exponential backoff. Returns the final
+      # Net::HTTPResponse — including a 4xx or an exhausted-retry 5xx, which
+      # #handle_response then turns into an ExportError. Only genuinely
+      # permanent transport failures raise directly.
+      def request_with_retries(http, req, uri)
+        attempt = 0
+        loop do
+          attempt += 1
+          begin
+            resp = http.request(req)
+          rescue *RETRYABLE_TRANSPORT => e
+            raise transport_error(e, uri) if attempt > max_retries
+            io.puts retry_line(attempt, transport_reason(e, uri))
+            backoff(attempt)
+            next
+          rescue SocketError => e
+            raise ExportError, "http exporter: could not resolve #{uri.host} (#{e.message})"
+          end
+
+          if (500..599).cover?(resp.code.to_i) && attempt <= max_retries
+            io.puts retry_line(attempt, "HTTP #{resp.code}")
+            backoff(attempt)
+            next
+          end
+
+          return resp
+        end
+      end
+
+      def max_retries
+        @options.fetch(:retries, DEFAULT_RETRIES).to_i
+      end
+
+      def retry_line(attempt, reason)
+        "  ⏳ http exporter: #{reason} — retry #{attempt}/#{max_retries}"
+      end
+
+      def transport_reason(error, uri)
+        case error
+        when Errno::ECONNREFUSED then "connection refused to #{uri.host}:#{uri.port}"
+        when Net::OpenTimeout    then "connection to #{uri.host}:#{uri.port} timed out after #{OPEN_TIMEOUT}s"
+        when Net::ReadTimeout    then "read from #{uri.host}:#{uri.port} timed out after #{READ_TIMEOUT}s"
+        else                          error.message
+        end
+      end
+
+      # Final (retries exhausted) transport failure → a permanent ExportError.
+      def transport_error(error, uri)
+        case error
+        when Errno::ECONNREFUSED
+          ExportError.new("http exporter: connection refused to #{uri.host}:#{uri.port} — is the server running? (after #{max_retries} retries)")
+        when Net::OpenTimeout
+          ExportError.new("http exporter: connection to #{uri.host}:#{uri.port} timed out after #{OPEN_TIMEOUT}s (after #{max_retries} retries)")
+        when Net::ReadTimeout
+          ExportError.new("http exporter: read from #{uri.host}:#{uri.port} timed out after #{READ_TIMEOUT}s (after #{max_retries} retries)")
+        else
+          ExportError.new("http exporter: #{error.class}: #{error.message} (after #{max_retries} retries)")
+        end
+      end
+
+      def backoff(attempt)
+        delay = RETRY_BASE_DELAY * (2**(attempt - 1))
+        # Tests set retry_base_delay: 0 to skip the wait; production uses
+        # the constant. Injected as an option so the timing seam is testable.
+        delay = @options[:retry_base_delay] * (2**(attempt - 1)) if @options.key?(:retry_base_delay)
+        sleep(delay) if delay.positive?
+      end
 
       def build_request(uri)
         case (@options[:method] || "POST").to_s.upcase

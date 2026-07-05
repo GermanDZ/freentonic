@@ -171,7 +171,7 @@ module Freentonic
         $stdout = StringIO.new
         begin
           assert_raises(ExportError) do
-            Exporters::Http.new(url: "https://example.test/push", token: "t").write(sample_payload)
+            Exporters::Http.new(url: "https://example.test/push", token: "t", retries: 0).write(sample_payload)
           end
           refute_match(
             /→/,
@@ -193,7 +193,7 @@ module Freentonic
 
       with_net_http_new(fake_http) do
         err = assert_raises(ExportError) do
-          Exporters::Http.new(url: "https://example.test/push").write(sample_payload)
+          Exporters::Http.new(url: "https://example.test/push", retries: 0).write(sample_payload)
         end
         assert_includes err.message, "HTTP 500"
       end
@@ -386,6 +386,105 @@ module Freentonic
       end
       sent = ::JSON.parse(captured.body)
       refute sent.key?("meta"), "unexpected meta key when FREENTONIC_RUN_ID is absent"
+    end
+
+    # --- retry with backoff (#18) ---
+
+    # Fake Net::HTTP whose #request replays a scripted sequence of outcomes:
+    # a FakeResp is returned, an Exception instance is raised. Records how
+    # many times it was called.
+    def scripted_http(*outcomes)
+      calls = []
+      http = Object.new
+      http.define_singleton_method(:use_ssl=) { |_| }
+      http.define_singleton_method(:open_timeout=) { |_| }
+      http.define_singleton_method(:read_timeout=) { |_| }
+      http.define_singleton_method(:request) do |_req|
+        outcome = outcomes[calls.size] || outcomes.last
+        calls << outcome
+        raise outcome if outcome.is_a?(Exception)
+        outcome
+      end
+      http.define_singleton_method(:call_count) { calls.size }
+      http
+    end
+
+    def test_http_exporter_retries_transient_connection_refused_then_succeeds
+      http = scripted_http(Errno::ECONNREFUSED.new, FakeResp.new("200", "{}"))
+      out = StringIO.new
+      with_net_http_new(http) do
+        result = Exporters::Http.new(
+          url: "https://example.test/push", retry_base_delay: 0, io: out
+        ).write(sample_payload)
+        assert_equal({}, result)
+      end
+      assert_equal 2, http.call_count, "should retry once then succeed"
+      assert_match(/retry 1\/2/, out.string)
+      assert_match(%r{→ 200}, out.string, "success line still emitted after a retry")
+    end
+
+    def test_http_exporter_retries_5xx_then_succeeds
+      http = scripted_http(FakeResp.new("503", "busy"), FakeResp.new("200", '{"ok":true}'))
+      out = StringIO.new
+      with_net_http_new(http) do
+        result = Exporters::Http.new(
+          url: "https://example.test/push", retry_base_delay: 0, io: out
+        ).write(sample_payload)
+        assert_equal true, result["ok"]
+      end
+      assert_equal 2, http.call_count
+      assert_match(/HTTP 503 — retry 1\/2/, out.string)
+    end
+
+    def test_http_exporter_gives_up_after_exhausting_retries_on_transport
+      http = scripted_http(Errno::ECONNREFUSED.new)
+      with_net_http_new(http) do
+        err = assert_raises(ExportError) do
+          Exporters::Http.new(
+            url: "https://example.test/push", retry_base_delay: 0, io: StringIO.new
+          ).write(sample_payload)
+        end
+        assert_includes err.message, "connection refused"
+        assert_includes err.message, "after 2 retries"
+      end
+      assert_equal 3, http.call_count, "1 initial attempt + 2 retries"
+    end
+
+    def test_http_exporter_does_not_retry_dns_failure
+      http = scripted_http(SocketError.new("getaddrinfo: nodename nor servname"))
+      with_net_http_new(http) do
+        err = assert_raises(ExportError) do
+          Exporters::Http.new(
+            url: "https://example.test/push", retry_base_delay: 0, io: StringIO.new
+          ).write(sample_payload)
+        end
+        assert_includes err.message, "could not resolve"
+      end
+      assert_equal 1, http.call_count, "DNS failures are permanent — no retry"
+    end
+
+    def test_http_exporter_does_not_retry_4xx
+      http = scripted_http(FakeResp.new("404", "nope"))
+      with_net_http_new(http) do
+        assert_raises(ExportError) do
+          Exporters::Http.new(
+            url: "https://example.test/push", retry_base_delay: 0, io: StringIO.new
+          ).write(sample_payload)
+        end
+      end
+      assert_equal 1, http.call_count, "4xx is a permanent client error — no retry"
+    end
+
+    def test_http_exporter_progress_goes_to_injected_io_not_global_stdout
+      http = scripted_http(FakeResp.new("200", "{}"))
+      out = StringIO.new
+      with_net_http_new(http) do
+        silence_stdout do
+          Exporters::Http.new(url: "https://example.test/push", io: out).write(sample_payload)
+          assert_empty $stdout.string, "nothing should leak to global $stdout"
+        end
+      end
+      assert_match(%r{→ 200}, out.string, "progress line goes to the injected io")
     end
   end
 end

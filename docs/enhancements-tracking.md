@@ -35,7 +35,7 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 | # | Item | Status | PR / Commit | Notes |
 | - | --- | --- | --- | --- |
 | 13 | Async `/invoke` (202 + poll) | Done | p2-async-invoke | `/invoke` now validates synchronously then returns `202 {run_id, status:"queued"}`; a single worker thread runs invokes serially under `@invoke_mutex` (v1 serialization preserved) and `GET /runs/:id` reports `queued`/`running`/`done`/`error`/`cancelled` + the result. Client disconnect no longer wastes a run. Bounded queue (`max_queued_runs`→503) + FIFO-evicted retention (`max_retained_runs`); inline creds scrubbed from the record at finalize. Cancel now also works on still-queued runs; shutdown drains the worker and aborts the backlog |
-| 14 | Structured run events + minimal observability | Not started | | |
+| 14 | Structured run events + minimal observability | Done | b5d2d62 | `Reporter` typed event stream (`pipeline.start`, `stage.*`, `phase.*`, `step`) with `elapsed_ms`/`duration_ms`; human stage-timing summary (CLI default) + NDJSON to `<run_dir>/events.ndjson` (0600) under `FREENTONIC_RUN_DIR`; `step` logs action name + phase only (no resolved values). Server: one-line access log (`method path status ms`, no bodies/token), `GET /metrics` (runs_total, duration totals/avg, by_status/by_error_kind), `queued` vs `running` in `/status` with `queued_ms`/`started_at` split |
 | 15 | Container hardening + token lifecycle | Done | p2-hardening-and-tests | Wrapper + documented raw `docker run` now apply `--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only` + tmpfs (`/tmp`, `~/.config`, `~/.local`, `~/.pki`) — verified Chrome+Xvfb launch under read-only rootfs against the ING flag set. Token lifecycle: server accepts a *set* of tokens (`invoke_tokens:`), assembled by `InvokeServer.load_tokens` from `--invoke-token`(repeatable) + `FREENTONIC_INVOKE_TOKEN`(comma) + `--invoke-token-file`/`FREENTONIC_INVOKE_TOKEN_FILE`(one per line) → zero-downtime rotation; wrapper mounts the token file so the secret stays out of `docker inspect`. Deferred: in-container user-namespace Chrome sandbox (still `--no-sandbox`) |
 | 16 | Retire cheapest untested risk (engine, connect, export fan-out, etc.) | Done | p2-hardening-and-tests | New/expanded unit tests (+74): `engine` `stages_to_run` skip-matrix; `chrome_cdp` pure helpers (cookie domain/path/dedupe/format, `pgrep_pattern_for`, `resolve_profile_dir_from_env`, WS frame encode/decode round-trip); `Source#extract_credentials` require/validate/map/derive; `Stages::Export` fan-out (all run, first error re-raised); `Stages::Connect` `initial_url_from_workflow` + `ChromeCdp::Error`/`KeyError`→`UserError` wrapping; multi-token `load_tokens`/`authenticated?`. The P0-gap items it listed (dot-ids, shutdown drain, submit-not-in-flight, await-over-HTTP) were already covered by the P0 work |
 
@@ -43,15 +43,15 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 
 | # | Item | Status | PR / Commit | Notes |
 | - | --- | --- | --- | --- |
-| 17 | Declarative extractor plan (`extract: plan:`) | Not started | | |
-| 18 | Export resilience (retry, aggregate errors, stream injection) | Not started | | |
-| 19 | Plugin/registry unification (Exporters vs Secrets `build` signatures) | Not started | | |
-| 20 | Internal `api_client.rb` split (mechanical) | Not started | | |
-| 21 | Workflow schema versioning policy | Not started | | Pairs with #6 changelog backfill |
+| 17 | Declarative extractor plan (`extract: plan:`) | Not started | | The one remaining large item; flagship for the zero-provider-Ruby priority |
+| 18 | Export resilience (retry, aggregate errors, stream injection) | Done | p3-sweep | Http exporter retries connection-refused/timeout/5xx with exponential backoff (`retries:`/`retry_base_delay:` opts; DNS + 4xx stay permanent); Export stage aggregates multiple failures into one error naming every failed exporter (single failure still verbatim); `Exporters::Base#io` accessor, stage injects the engine stream, http progress/retry/success lines use it not `$stdout` |
+| 19 | Plugin/registry unification (Exporters vs Secrets `build` signatures) | Done | p3-sweep | `Secrets.build(name, options = {})` now matches `Exporters.build`; CLI `plain_file`/`inline_fd` construct via `Secrets.build` (registry-honoring) so third-party backends receive options uniformly; writing-plugins.md documents the options path |
+| 20 | Internal `api_client.rb` split (mechanical) | Done | p3-sweep | Extracted `ApiClient::Interpolation` + `ApiClient::CursorPagination` (included instance-method modules); `TimestampMs.parse` is the single source of truth (ApiClient + `Providers::Helpers#parse_timestamp_ms` were byte-identical dups); `source.rb` uses `workflow.raw` instead of `instance_variable_get`; extract-spec lookup de-duplicated to `source.extract_spec`. No behavior change |
+| 21 | Workflow schema versioning policy | Done | p3-sweep | New `docs/workflow-schema-versioning.md`: what `version: 1` guarantees (additive keys never bump; renames → one-release dual-accept window → `version: 2`) and how it maps to the changelog; version-mismatch error + README + CHANGELOG intro link it. Pairs with #6 |
 
 ## Summary
 
 - Total items: 21
-- Done: 15 (all of P0 + all of P1 + P2 #13, #15, #16)
+- Done: 20 (all of P0 + P1 + P2; P3 #18–#21)
 - In progress: 0
-- Not started: 6 (P2 #14 + all of P3)
+- Not started: 1 (P3 #17 — declarative extractor plan, the one large item left)

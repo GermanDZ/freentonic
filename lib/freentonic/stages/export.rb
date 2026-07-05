@@ -8,7 +8,9 @@ module Freentonic
     #
     # Non-fatal exporter errors are collected and re-raised after all
     # exporters have had a chance to run, so a failing HTTP push doesn't
-    # prevent a local JSON dump (or vice versa).
+    # prevent a local JSON dump (or vice versa). A single failure re-raises
+    # verbatim; multiple failures raise one aggregate error naming every
+    # exporter that failed (rather than silently dropping all but the first).
     class Export < Base
       def call
         payload = @context.fetch(:normalized) do
@@ -20,20 +22,41 @@ module Freentonic
 
         errors = []
         results = exporters.map do |exporter|
-          stdout.puts "\nExporting via #{exporter.class.name.split("::").last.downcase}..."
+          name = exporter_name(exporter)
+          # Route the exporter's own progress output through the engine's
+          # injected stream rather than global $stdout.
+          exporter.io = stdout if exporter.respond_to?(:io=)
+          stdout.puts "\nExporting via #{name}..."
           begin
             exporter.write(payload)
           rescue ExportError => e
             stderr.puts "  ✗ #{e.message}"
-            errors << e
+            errors << [name, e]
             nil
           end
         end
 
-        raise errors.first if errors.any?
+        raise aggregate_error(errors) if errors.any?
 
         @context[:export_results] = results
         @context
+      end
+
+      private
+
+      def exporter_name(exporter)
+        exporter.class.name.split("::").last.downcase
+      end
+
+      # One failure → re-raise it verbatim (preserves message + class).
+      # Several → a single ExportError that names each failed exporter, so
+      # no failure is lost to the caller.
+      def aggregate_error(errors)
+        return errors.first.last if errors.one?
+
+        names = errors.map(&:first).join(", ")
+        detail = errors.map { |name, e| "  - #{name}: #{e.message}" }.join("\n")
+        ExportError.new("#{errors.size} exporters failed (#{names}):\n#{detail}")
       end
     end
   end

@@ -37,10 +37,15 @@ module Freentonic
         @registry.keys.sort
       end
 
-      def build(name, **opts)
+      # Signature mirrors Exporters.build(name, options = {}) so both
+      # registries are constructed the same way. Options are splatted to
+      # the backend's keyword initializer, so a third-party backend that
+      # needs configuration receives it through the registry uniformly —
+      # no need for the CLI to special-case its construction.
+      def build(name, options = {})
         klass = @registry[name.to_sym]
         raise UserError, "unknown secret backend #{name.inspect} (available: #{registered.join(", ")})" unless klass
-        klass.new(**opts)
+        klass.new(**options)
       end
 
       # Default backend based on host OS. macOS → Keychain, otherwise CLI prompt.

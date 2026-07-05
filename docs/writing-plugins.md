@@ -213,6 +213,27 @@ The contract is intentionally tiny. `fetch` returns what's stored,
 `SecretResolver` caches results per `(source_key, secret_name)` so
 inside one run your backend is hit at most once per secret.
 
+**Configuration options.** Both registries construct instances the same
+way — `Secrets.build(name, options)` and `Exporters.build(name, options)`
+take an options hash and pass it to your class. For a secret backend the
+options are splatted to a keyword initializer, so a backend that needs
+configuration just declares the keywords it wants:
+
+```ruby
+class Vault < Store
+  def initialize(address:, namespace: "secret")
+    @address = address
+    @namespace = namespace
+  end
+  # ...
+end
+
+# Freentonic::Secrets.build(:vault, address: "https://vault.internal")
+```
+
+If your backend takes no options, `initialize` can be omitted entirely
+(the default `Store#initialize` accepts none).
+
 ### Example: a 1Password CLI backend
 
 ```ruby

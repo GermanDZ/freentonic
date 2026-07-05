@@ -294,14 +294,17 @@ module Freentonic
         raise UserError, "--secrets inline_fd does not take --secrets-file"
       end
 
+      # The CLI maps its flags to each backend's options, but construction
+      # always goes through the registry (Secrets.build) so a third-party
+      # backend registered under one of these names is honored too.
       case name
       when :plain_file
         path = options[:secrets_file] or raise UserError, "--secrets plain_file requires --secrets-file PATH"
         @stderr.puts(Secrets::PlainFile.insecure_banner)
-        Secrets::PlainFile.new(path: path)
+        Secrets.build(:plain_file, path: path)
       when :inline_fd
         fd = options[:secrets_fd] or raise UserError, "--secrets inline_fd requires --secrets-fd N"
-        Secrets::InlineFd.new(fd: fd)
+        Secrets.build(:inline_fd, fd: fd)
       else
         Secrets.build(name)
       end

@@ -36,9 +36,10 @@ module Freentonic
     end
 
     # The raw YAML extract: block. Exposed so the Extract stage can load it
-    # without reaching through `workflow.config`.
+    # without reaching through `workflow.config`. Accepts `extract:` either
+    # nested under `config:` (legacy) or at the document root.
     def extract_spec
-      workflow.config["extract"] || workflow.instance_variable_get(:@raw)["extract"]
+      workflow.config["extract"] || workflow.raw["extract"]
     end
 
     def extract_credentials(_session, workflow_context: {}, stdout:, stderr:)

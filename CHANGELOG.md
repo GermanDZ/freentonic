@@ -5,22 +5,12 @@ All notable changes to freentonic are documented here.
 With providers living in a separate repo, the workflow YAML dialect and
 the invoke-server API **are** freentonic's public contract — this
 changelog is their version signal. Every release below corresponds to a
-`version.rb` bump and a matching `vX.Y.Z` git tag.
+`version.rb` bump and a matching `vX.Y.Z` git tag. What the workflow
+`version: 1` line promises (additive keys never bump; renames get a
+one-release dual-accept window before `version: 2`) is spelled out in
+[docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
 ## Unreleased
-
-### Fixed
-
-- **http exporter allows cleartext + token to private/loopback receivers.**
-  The exporter refused to send a bearer token over cleartext `http://`
-  unconditionally, which blocked a legitimate topology: a same-host
-  container-network push (`http://kamal-proxy/push/…`) with TLS terminated
-  at an upstream edge proxy. It now permits cleartext + token when the
-  receiver host resolves **entirely** to loopback/private/link-local
-  addresses (the token can't leave the host's trust boundary), still warns,
-  and continues to refuse for any public/routable host — failing closed on
-  an unresolvable host. Matches the existing "localhost receivers" intent
-  for the no-token case.
 
 ### Structured run events + minimal observability
 
@@ -48,8 +38,38 @@ visibility on the invoke server.
   once the run starts); `started_at` / `elapsed_ms` appear only once running
   and measure child run-time — no longer inflated by queue wait.
 
+### Export resilience
+
+A failed export costs a whole bank login to redo, so transient failures no
+longer sink a run outright.
+
+- **HTTP exporter retries transient failures.** Connection-refused,
+  connect/read timeouts, and `5xx` responses are retried with exponential
+  backoff (2 retries by default → 3 attempts; `--export-* retries:` and
+  `retry_base_delay:` are configurable). DNS failures (`SocketError`) and
+  `4xx` are treated as permanent — retrying can't help — and raise
+  immediately. Each retry logs a one-line `⏳ … retry N/M` notice.
+- **Aggregate export errors.** When more than one exporter fails, the Export
+  stage now raises a single error naming *every* failed exporter and
+  carrying each message, instead of re-raising only the first and dropping
+  the rest. A lone failure is still re-raised verbatim.
+- **Exporter progress uses the injected stream.** The HTTP exporter's
+  status/retry/success lines now go through the engine's injected output
+  stream (like every other stage) rather than global `$stdout`, so they land
+  in the run log and are capturable.
+
 ### Fixed
 
+- **http exporter allows cleartext + token to private/loopback receivers.**
+  The exporter refused to send a bearer token over cleartext `http://`
+  unconditionally, which blocked a legitimate topology: a same-host
+  container-network push (`http://kamal-proxy/push/…`) with TLS terminated
+  at an upstream edge proxy. It now permits cleartext + token when the
+  receiver host resolves **entirely** to loopback/private/link-local
+  addresses (the token can't leave the host's trust boundary), still warns,
+  and continues to refuse for any public/routable host — failing closed on
+  an unresolvable host. Matches the existing "localhost receivers" intent
+  for the no-token case.
 - **Chromium is pinned to a known-good version (`148.0.7778.96-1~deb12u1`).**
   The Dockerfile installed `chromium` unpinned, so each image rebuild
   floated the browser to whatever bookworm-security currently shipped. A
