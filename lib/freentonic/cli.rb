@@ -17,7 +17,7 @@ module Freentonic
   #     --from-raw /tmp/raw.json \
   #     --export http --export-url https://api.example.com/push --export-token $TOK
   class Cli
-    STAGE_NAMES = %w[connect extract normalize export].freeze
+    STAGE_NAMES = %w[connect elevate extract normalize export].freeze
 
     def initialize(stdout: $stdout, stderr: $stderr)
       @stdout = stdout

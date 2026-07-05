@@ -16,10 +16,11 @@ module Freentonic
   #   from_raw:         path to load raw payload from (skips Connect + Extract)
   #   from_normalized:  path to load normalized payload from (skips everything upstream)
   class Engine
-    STAGE_ORDER = %i[connect extract normalize export].freeze
+    STAGE_ORDER = %i[connect elevate extract normalize export].freeze
 
     STAGE_CLASSES = {
       connect:   Stages::Connect,
+      elevate:   Stages::Elevate,
       extract:   Stages::Extract,
       normalize: Stages::Normalize,
       export:    Stages::Export
@@ -60,6 +61,7 @@ module Freentonic
 
       skip = Set.new
       skip << :connect   if @context[:from_raw] || @context[:from_normalized]
+      skip << :elevate   if @context[:from_raw] || @context[:from_normalized]
       skip << :extract   if @context[:from_raw] || @context[:from_normalized]
       skip << :normalize if @context[:from_normalized]
 

@@ -12,6 +12,50 @@ one-release dual-accept window before `version: 2`) is spelled out in
 
 ## Unreleased
 
+### Session elevation (`elevate:` phase)
+
+A new lifecycle stage — **Connect → Elevate → Extract → Normalize →
+Export** — for the session-elevation work that isn't login and isn't
+extraction: a PSD2 SCA handshake that mutates the session (operator
+approval + Bearer rotation) before the fetch loop. It lets a provider
+express declaratively what previously forced an `extractor.rb`. No-op
+when a workflow declares no `elevate:` block.
+
+- **`elevate:` block.** Reuses the `extract: plan:` step grammar
+  (`fetch`/`select`/`for_each`/`let`/`concat`/`dedup_by`, each optionally
+  `when:`-gated, seeded with `from_date`/`today`/`lookback_days`/…) and
+  adds two session-affecting step kinds a locked-down extract plan is
+  forbidden from having. It has no `output:` — its product is the mutation
+  it leaves on the client.
+- **`await_operator_approval: { message:, timeout: }`.** Pauses mid-flow
+  for a human to approve an out-of-band challenge (SCA push) on their
+  phone, surfaced through the same `RemotePromptStore` the invoke server
+  watches. No operator channel or a timeout → the step fails (never hangs
+  a headless run), feeding `on_failure:`.
+- **`rebind_credential: { header:, host:, value: }`.** Installs a value
+  derived from a fetched response as an auth header on the client via
+  `update_auth_headers!` — the one sanctioned session mutation, the
+  declarative form of ING's imperative Bearer rotation. An empty/nil
+  resolved value fails the step.
+- **`when:` + `on_failure: degrade|abort`.** A block-level `when:` gate
+  (e.g. `{ lookback_days: { gt: 90 } }`) runs elevation only when needed;
+  `degrade` warns and continues with the un-elevated session, `abort` (the
+  default) fails the run.
+- **Shared client instance.** The Elevate stage builds the api_client,
+  stashes it in `context[:api_client]`, and the Extract stage reuses that
+  instance — so a rebind performed during elevation is visible to the
+  fetch loop. (Previously Extract minted a fresh client per run.)
+- **Richer templating for elevate strings.** `message:`/`value:` support
+  embedded `{tokens}` inside surrounding text and array indices in dotted
+  paths (`{refreshed.accessTokens.0.accessToken}`); array-index digging
+  also now works in plan `select:`/`output:` paths. The plan grammar's
+  whole-token rule for structured args is unchanged.
+- **Statically validated + additive.** The block is checked at load and
+  `--lint` (endpoint whitelist, binding resolution, embedded-token refs,
+  operator/operand types, `on_failure:` domain). No `version:` bump; a
+  workflow without `elevate:` is untouched. See
+  [docs/elevate-phase.md](docs/elevate-phase.md).
+
 ### Declarative extractor plans (`extract: plan:`)
 
 A provider whose extractor is pure orchestration — call an endpoint, loop

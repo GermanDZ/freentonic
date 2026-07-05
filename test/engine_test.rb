@@ -59,7 +59,7 @@ module Freentonic
     end
 
     def test_default_runs_full_pipeline_in_order
-      assert_equal %i[connect extract normalize export], stages({})
+      assert_equal %i[connect elevate extract normalize export], stages({})
     end
 
     def test_only_stage_runs_exactly_one
@@ -71,7 +71,7 @@ module Freentonic
     end
 
     def test_through_stage_runs_prefix_inclusive
-      assert_equal %i[connect extract normalize], stages(through_stage: :normalize)
+      assert_equal %i[connect elevate extract normalize], stages(through_stage: :normalize)
     end
 
     def test_through_connect_runs_only_connect
@@ -148,7 +148,7 @@ module Freentonic
 
     def test_pipeline_start_lists_planned_stages
       events, = run_with_recorder(through_stage: :normalize)
-      assert_equal %w[connect extract normalize], events.first["stages"]
+      assert_equal %w[connect elevate extract normalize], events.first["stages"]
     end
   end
 end

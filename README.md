@@ -43,20 +43,21 @@ Prefer Docker? Two paths:
 
 ## The pipeline
 
-Freentonic runs every workflow through four stages. Each stage is
+Freentonic runs every workflow through five stages. Each stage is
 independently runnable and each one either reads or writes a named slot in
 a shared context hash:
 
 | Stage       | Reads              | Writes                | Effect                                                    |
 | ----------- | ------------------ | --------------------- | --------------------------------------------------------- |
 | `connect`   | —                  | `credentials`         | Launches Chrome, runs the YAML login pipeline, captures credentials. |
+| `elevate`   | `credentials`      | `api_client`          | Runs the [`elevate:`](docs/elevate-phase.md) session-elevation handshake (SCA) if declared; no-op otherwise. |
 | `extract`   | `credentials`      | `raw`                 | Calls the provider API via the declared extractor class or [`extract: plan:`](docs/extract-plan.md). |
 | `normalize` | `raw`              | `normalized`          | Applies the declared normalizer (Passthrough by default).             |
 | `export`    | `normalized`       | —                     | Fans the normalized payload out to every `--export` declared.         |
 
 ### Stage control flags
 
-- `--only-stage connect|extract|normalize|export` runs exactly one stage.
+- `--only-stage connect|elevate|extract|normalize|export` runs exactly one stage.
 - `--through STAGE` runs every stage up to and including `STAGE`.
 - `--dump-raw PATH` writes `context[:raw]` as pretty JSON after Extract.
 - `--from-raw PATH` loads raw from disk; skips Connect + Extract entirely.

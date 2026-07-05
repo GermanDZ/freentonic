@@ -41,6 +41,24 @@ module Freentonic
       def schema
         source.workflow
       end
+
+      # The invoke-server run directory, or nil for a local/CLI run.
+      def run_dir
+        dir = ENV["FREENTONIC_RUN_DIR"]
+        dir if dir && !dir.empty?
+      end
+
+      # The operator prompt channel — non-nil only under the invoke server
+      # (FREENTONIC_RUN_DIR set). Shared by the Extract and Elevate stages
+      # to surface mid-flow prompts (SCA approval) the admin UI renders.
+      def build_remote_prompt_store
+        dir = run_dir
+        return nil unless dir
+        Freentonic::RemotePromptStore.new(
+          prompts_dir: File.join(dir, "prompts"),
+          announce_to: stderr
+        )
+      end
     end
   end
 end
