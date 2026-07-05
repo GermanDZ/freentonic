@@ -9,6 +9,20 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Fixed
+
+- **Chromium is pinned to a known-good version (`148.0.7778.96-1~deb12u1`).**
+  The Dockerfile installed `chromium` unpinned, so each image rebuild
+  floated the browser to whatever bookworm-security currently shipped. A
+  redeploy pulled `150.0.7871.46-1~deb12u1`, which **SIGTRAPs (exit 133)
+  on launch** in the container — Chrome never opens the remote-debugging
+  port, so every scrape failed with `Chrome did not respond on debug port
+  after 45s` (exit 1 / `user_error` downstream). The browser is now
+  installed at a fixed version from a Debian snapshot and `apt-mark hold`;
+  `CHROMIUM_VERSION` / `CHROMIUM_SNAPSHOT` are build ARGs so a browser
+  bump is a deliberate, tested change. An unpinned external dependency
+  could otherwise take the whole bridge down with no code change.
+
 ### Container hardening + token lifecycle
 
 Defense-in-depth for the invoke-server container, and a token model that
