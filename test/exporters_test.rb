@@ -209,6 +209,49 @@ module Freentonic
       assert_includes err.message, "https://"
     end
 
+    def test_http_exporter_refuses_cleartext_token_to_public_ip
+      err = assert_raises(UserError) do
+        silence_stdout do
+          Exporters::Http.new(url: "http://93.184.216.34/push", token: "tok-abc").write(sample_payload)
+        end
+      end
+      assert_includes err.message, "cleartext"
+    end
+
+    # A same-host / private-network receiver (TLS terminated upstream) is
+    # inside the trust boundary, so cleartext + token is allowed there.
+    def test_http_exporter_allows_cleartext_token_to_loopback
+      captured = nil
+      fake_http = Object.new
+      fake_http.define_singleton_method(:use_ssl=) { |_| }
+      fake_http.define_singleton_method(:open_timeout=) { |_| }
+      fake_http.define_singleton_method(:read_timeout=) { |_| }
+      fake_http.define_singleton_method(:request) { |req| captured = req["Authorization"]; FakeResp.new("200", "{}") }
+
+      with_net_http_new(fake_http) do
+        silence_stdout do
+          Exporters::Http.new(url: "http://127.0.0.1:3000/push", token: "tok-abc").write(sample_payload)
+        end
+      end
+      assert_equal "Bearer tok-abc", captured, "token should still be sent to a loopback receiver"
+    end
+
+    def test_http_exporter_allows_cleartext_token_to_private_host
+      captured = nil
+      fake_http = Object.new
+      fake_http.define_singleton_method(:use_ssl=) { |_| }
+      fake_http.define_singleton_method(:open_timeout=) { |_| }
+      fake_http.define_singleton_method(:read_timeout=) { |_| }
+      fake_http.define_singleton_method(:request) { |req| captured = req["Authorization"]; FakeResp.new("200", "{}") }
+
+      with_net_http_new(fake_http) do
+        silence_stdout do
+          Exporters::Http.new(url: "http://10.10.40.5/push", token: "tok-abc").write(sample_payload)
+        end
+      end
+      assert_equal "Bearer tok-abc", captured
+    end
+
     def test_http_exporter_warns_on_cleartext_without_token
       fake_http = Object.new
       fake_http.define_singleton_method(:use_ssl=) { |_| }

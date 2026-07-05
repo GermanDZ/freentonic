@@ -9,6 +9,19 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Fixed
+
+- **http exporter allows cleartext + token to private/loopback receivers.**
+  The exporter refused to send a bearer token over cleartext `http://`
+  unconditionally, which blocked a legitimate topology: a same-host
+  container-network push (`http://kamal-proxy/push/…`) with TLS terminated
+  at an upstream edge proxy. It now permits cleartext + token when the
+  receiver host resolves **entirely** to loopback/private/link-local
+  addresses (the token can't leave the host's trust boundary), still warns,
+  and continues to refuse for any public/routable host — failing closed on
+  an unresolvable host. Matches the existing "localhost receivers" intent
+  for the no-token case.
+
 ### Structured run events + minimal observability
 
 A structured channel for run telemetry, plus request-level and aggregate

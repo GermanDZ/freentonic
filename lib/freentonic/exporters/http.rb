@@ -3,6 +3,8 @@
 require "net/http"
 require "uri"
 require "json"
+require "ipaddr"
+require "socket"
 
 module Freentonic
   module Exporters
@@ -44,12 +46,19 @@ module Freentonic
                 "#{url.chomp("/")}/your/endpoint/path"
         end
 
-        # Refuse to leak a bearer token over cleartext. The full financial
-        # payload AND the Authorization header would otherwise cross the wire
-        # unencrypted with no warning. Without a token we still warn — the
-        # payload itself is sensitive — but allow it (localhost receivers).
+        # Refuse to leak a bearer token over cleartext to a PUBLIC receiver:
+        # the full financial payload AND the Authorization header would
+        # otherwise cross the network unencrypted with no warning.
+        #
+        # We DO allow cleartext + token when the receiver resolves entirely to
+        # a private/loopback address — e.g. a same-host container-network push
+        # (`http://kamal-proxy/push/…`) where TLS is terminated by an upstream
+        # edge proxy. There the token never leaves the trust boundary, so a
+        # blanket refusal is a false positive that blocks a legitimate
+        # deployment topology. Without a token, cleartext is allowed anywhere
+        # with a warning (the payload itself is still sensitive).
         if uri.scheme != "https"
-          if resolved_token
+          if resolved_token && !private_or_loopback_host?(uri.host)
             raise UserError,
                   "http exporter: refusing to send a bearer token over cleartext #{uri.scheme}:// " \
                   "(#{url}). Use an https:// URL, or drop the token if the receiver truly needs none."
@@ -106,6 +115,39 @@ module Freentonic
 
       def resolved_token
         @options[:token] || ENV["FREENTONIC_HTTP_TOKEN"]
+      end
+
+      # True when `host` resolves ENTIRELY to loopback/private/link-local
+      # addresses — i.e. the cleartext push can't leave the host's trust
+      # boundary. Covers IP literals (127.0.0.1, 10.x, ::1, fc00::/7) and
+      # hostnames that resolve only to such addresses (a Docker network alias
+      # like `kamal-proxy`, or `localhost`). Fails CLOSED: an unresolvable
+      # host, or ANY public address in the result, is treated as public so
+      # the token is never sent in the clear to something routable.
+      def private_or_loopback_host?(host)
+        addrs = resolve_host_ips(host)
+        !addrs.empty? && addrs.all? { |ip| ip.loopback? || ip.private? || ip.link_local? }
+      end
+
+      # Resolve `host` to a list of IPAddr, using the same getaddrinfo path
+      # Net::HTTP will use for the actual connection (so /etc/hosts and the
+      # container's embedded DNS are honored). Returns [] on any failure.
+      def resolve_host_ips(host)
+        return [] if host.nil? || host.empty?
+
+        bare = host.delete_prefix("[").delete_suffix("]") # unwrap [IPv6]
+        begin
+          return [IPAddr.new(bare)]
+        rescue IPAddr::Error
+          # not an IP literal — fall through to name resolution
+        end
+
+        Addrinfo.getaddrinfo(host, nil, nil, :STREAM).filter_map do |ai|
+          next unless ai.ip?
+          IPAddr.new(ai.ip_address.split("%", 2).first) rescue nil
+        end
+      rescue SocketError, StandardError
+        []
       end
 
       # When the invoke server sets FREENTONIC_RUN_ID on the child process,
