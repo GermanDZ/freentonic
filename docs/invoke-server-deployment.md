@@ -64,8 +64,16 @@ The wrapper script is the fastest path:
 ```sh
 export FREENTONIC_WORKFLOWS_DIR=~/freentonic/workflows
 export FREENTONIC_RUNS_DIR=~/freentonic/runs
-export FREENTONIC_INVOKE_TOKEN=$(openssl rand -hex 32)
-echo "$FREENTONIC_INVOKE_TOKEN" > ~/.freentonic-invoke-token  # remember it
+
+# Recommended: put the token in a file and point the wrapper at it, so the
+# secret never lands in `docker inspect`. The file may hold several tokens
+# (one per line) for zero-downtime rotation.
+openssl rand -hex 32 > ~/.freentonic-invoke-token
+chmod 600 ~/.freentonic-invoke-token
+export FREENTONIC_INVOKE_TOKEN_FILE=~/.freentonic-invoke-token
+
+# …or, for quick local dev only (token visible in `docker inspect`):
+#   export FREENTONIC_INVOKE_TOKEN=$(openssl rand -hex 32)
 
 ./docker-run-freentonic.sh server
 ```
@@ -103,8 +111,16 @@ docker run -d \
   -v "$FREENTONIC_WORKFLOWS_DIR:/home/freentonic/workflows:ro" \
   -v "$FREENTONIC_RUNS_DIR:/workspace/runs" \
   -v "freentonic-chrome-profile:/home/freentonic/.cache/freentonic/chrome" \
+  -v "$FREENTONIC_INVOKE_TOKEN_FILE:/run/freentonic/invoke-token:ro" \
   --shm-size=256m \
-  -e "FREENTONIC_INVOKE_TOKEN=$FREENTONIC_INVOKE_TOKEN" \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --read-only \
+  --tmpfs /tmp \
+  --tmpfs /home/freentonic/.config \
+  --tmpfs /home/freentonic/.local \
+  --tmpfs /home/freentonic/.pki \
+  -e "FREENTONIC_INVOKE_TOKEN_FILE=/run/freentonic/invoke-token" \
   freentonic:latest
 ```
 
@@ -117,9 +133,28 @@ Notes:
   another machine, terminate TLS + auth upstream (nginx, a VPN, etc.)
   and publish on the shared interface.
 - **`--shm-size=256m`** — Chrome needs more than Docker's default 64 MB
-  of shared memory.
+  of shared memory. Also supplies the writable `/dev/shm` the read-only
+  rootfs (below) otherwise wouldn't have.
+- **`--cap-drop ALL` + `--security-opt no-new-privileges`** — Chrome runs
+  `--no-sandbox` unconditionally, so a compromised renderer already shares
+  the `freentonic` uid; these deny it every Linux capability and any path
+  to escalate further.
+- **`--read-only` + the four `--tmpfs` mounts** — freeze the image's root
+  filesystem so a renderer compromise can't drop a persistent implant. The
+  tmpfs list is the minimum that keeps Chrome + Xvfb happy: `/tmp` (Xvfb
+  sockets, Chrome scratch) and `~/.config` / `~/.local` / `~/.pki` (Chrome
+  config, crashpad database, NSS cert DB). Everything else the process
+  writes goes to a named volume (runs, chrome profile). Verified against
+  the ING anti-detection Chrome flag set.
+- **Token via `-v … /run/freentonic/invoke-token:ro` + `_FILE`** — mounting
+  the token file (rather than `-e FREENTONIC_INVOKE_TOKEN=…`) keeps the
+  secret out of `docker inspect`; only the in-container path is visible.
+  The file may hold several tokens, one per line — see
+  [Step 5](#step-5--environment-variables) and the rotation note below.
 - **`freentonic-chrome-profile`** is a named Docker volume. The image
-  creates subdirectories inside it, one per `profile_key`.
+  creates subdirectories inside it, one per `profile_key`. Its mount point
+  lives under the read-only `~/.cache`, but the volume mount itself stays
+  writable.
 - **Workflows mount is `:ro`**. The container should not be able to
   modify the source of truth for your workflows.
 
@@ -172,16 +207,24 @@ read it. The server never cleans up this directory — it's host-owned.
 
 ## Step 5 — Environment variables
 
-`FREENTONIC_INVOKE_TOKEN` is required when starting via the
-`./docker-run-freentonic.sh server` wrapper (it exits with an error
-if unset). If you're spawning the container with raw `docker run`
-and explicitly want OPEN mode for local dev, leave it unset — the
-server binary will start and log a loud warning on every boot.
-Everything else below is optional.
+A bearer token is required when starting via the
+`./docker-run-freentonic.sh server` wrapper — supply it as either
+`FREENTONIC_INVOKE_TOKEN` (passed with `-e`, so visible in `docker
+inspect`) or, preferably, `FREENTONIC_INVOKE_TOKEN_FILE` (a host path
+that is mounted read-only, keeping the secret out of `docker inspect`).
+The wrapper exits with an error if neither is set. If you're spawning
+the container with raw `docker run` and explicitly want OPEN mode for
+local dev, leave both unset — the server binary starts and logs a loud
+warning on every boot. Everything else below is optional.
+
+The server accepts a **set** of tokens (any one authenticates), which is
+what makes zero-downtime rotation possible — see the rotation note in
+[Security notes](#security-notes).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FREENTONIC_INVOKE_TOKEN` | *(wrapper: required; raw `docker run`: unset → OPEN mode with warning)* | Bearer token required on `/invoke`, `/status`, `/runs/:id`, `/cancel/:id`, `/profiles/prune`, `/runs/:id/log`. In OPEN mode the server accepts every request without auth — never do this in production. |
+| `FREENTONIC_INVOKE_TOKEN` | *(wrapper: required unless `_FILE` is set; raw `docker run`: unset → OPEN mode with warning)* | Bearer token required on `/invoke`, `/status`, `/runs/:id`, `/cancel/:id`, `/profiles/prune`, `/runs/:id/log`. Comma-separate to configure more than one. Passed via `-e`, so visible in `docker inspect` — prefer `_FILE` in production. In OPEN mode the server accepts every request without auth — never do this in production. |
+| `FREENTONIC_INVOKE_TOKEN_FILE` | *(unset)* | Path to a file of bearer tokens, **one per line** (blank lines and `#` comments ignored). Unioned with `FREENTONIC_INVOKE_TOKEN`. With the wrapper / raw `docker run`, mount the host file at this in-container path; only the path (not the secret) appears in `docker inspect`. Multiple lines = a live token set for rotation. Repeatable on the CLI as `--invoke-token-file`. |
 | `FREENTONIC_LISTEN_ADDR` | `0.0.0.0` inside the container | Interface to bind. Override to `127.0.0.1` only if you're running freentonic outside a container. |
 | `FREENTONIC_LISTEN_PORT` | `7878` | Port inside the container. |
 | `FREENTONIC_WORKFLOWS_DIR` | `/home/freentonic/workflows` | Workflow root inside the container. The `/invoke` request's `workflow` field is resolved against this path. |
@@ -198,6 +241,11 @@ The wrapper script `docker-run-freentonic.sh` also reads:
 | `FREENTONIC_IMAGE` | `freentonic:latest` | Image tag to launch. |
 | `FREENTONIC_CONTAINER_NAME` | `freentonic-server` | `docker run --name`. |
 | `FREENTONIC_CHROME_PROFILE_VOLUME` | `freentonic-chrome-profile` | Named volume for Chrome profiles. |
+| `FREENTONIC_INVOKE_TOKEN_FILE` | *(unset)* | Host path to a token file. When set, the wrapper mounts it read-only and passes `_FILE` to the container instead of `-e FREENTONIC_INVOKE_TOKEN` — takes precedence over the plain token. |
+
+The wrapper always applies the hardening flags from [Step 3](#step-3--raw-docker-run-for-other-orchestrators)
+(`--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, and
+the tmpfs mounts); there is no flag to disable them.
 
 ---
 
@@ -273,6 +321,10 @@ docker run -d \
   -e "FREENTONIC_INVOKE_TOKEN=$FREENTONIC_INVOKE_TOKEN" \
   freentonic:latest
 ```
+
+This dev-loop command drops the hardening flags (`--read-only` etc.) for
+convenience; add them from [Step 3](#step-3--raw-docker-run-for-other-orchestrators)
+if you want the dev container to mirror production.
 
 Restart the container after every change that touches `bin/freentonic-server`
 or `lib/freentonic/invoke_*.rb`. Workflow YAML and ruby extractor/normalizer
@@ -471,8 +523,25 @@ want that reset.
 ## Security notes
 
 - **The bearer token is the only access control.** Treat it like a
-  password. Rotate by stopping the container and starting with a new
-  token (invokes in flight during rotation are unaffected).
+  password.
+- **Zero-downtime token rotation.** The server accepts a set of tokens,
+  so you can roll one without a flag day:
+  1. Append the new token as a second line in `FREENTONIC_INVOKE_TOKEN_FILE`.
+  2. Restart the container (it now accepts old **and** new).
+  3. Cut each client over to the new token at its own pace.
+  4. Remove the old line and restart again.
+
+  With a single `-e FREENTONIC_INVOKE_TOKEN` you'd instead have to cut
+  every client over at the same instant the server restarts. Prefer the
+  file for anything you'll rotate.
+- **Keep the token out of `docker inspect`.** Deliver it via
+  `FREENTONIC_INVOKE_TOKEN_FILE` (a mounted file) rather than
+  `-e FREENTONIC_INVOKE_TOKEN`; the `-e` value is readable by anyone who
+  can inspect the container.
+- **Defense-in-depth container flags** (`--read-only`, `--cap-drop ALL`,
+  `--security-opt no-new-privileges`) are applied by both the wrapper and
+  the documented raw `docker run`. Chrome runs `--no-sandbox`, so these
+  are what stand between a renderer compromise and the host.
 - **`-p 127.0.0.1:7878:7878`** is critical. Binding to `0.0.0.0` on
   the host would let anyone on the network try tokens against your
   server. If you must expose it across hosts, terminate TLS + auth

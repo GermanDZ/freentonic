@@ -125,7 +125,7 @@ class InvokeServerAsyncTest < Minitest::Test
   def boot(max_queued_runs: 128, max_retained_runs: 256)
     @server = Freentonic::InvokeServer.new(
       runner:            @runner,
-      invoke_token:      @token,
+      invoke_tokens:     [@token],
       listen_addr:       "127.0.0.1",
       listen_port:       @port,
       logger:            nil,

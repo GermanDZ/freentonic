@@ -48,5 +48,71 @@ module Freentonic
         assert_equal({ "accounts" => [] }, context[:raw])
       end
     end
+
+    # ─── stages_to_run: the stage-skip matrix ───
+    #
+    # The heart of the offline-replay / partial-run feature. Pure decision
+    # logic over the context hash, so it's worth pinning every branch.
+
+    def stages(context)
+      Engine.new(context: context).send(:stages_to_run)
+    end
+
+    def test_default_runs_full_pipeline_in_order
+      assert_equal %i[connect extract normalize export], stages({})
+    end
+
+    def test_only_stage_runs_exactly_one
+      assert_equal [:extract], stages(only_stage: :extract)
+    end
+
+    def test_only_stage_accepts_string_and_symbolizes
+      assert_equal [:normalize], stages(only_stage: "normalize")
+    end
+
+    def test_through_stage_runs_prefix_inclusive
+      assert_equal %i[connect extract normalize], stages(through_stage: :normalize)
+    end
+
+    def test_through_connect_runs_only_connect
+      assert_equal [:connect], stages(through_stage: :connect)
+    end
+
+    def test_unknown_through_stage_is_user_error
+      err = assert_raises(UserError) { stages(through_stage: :bogus) }
+      assert_includes err.message, "unknown stage"
+    end
+
+    def test_from_raw_skips_connect_and_extract
+      # Replaying a raw dump: Connect + Extract are meaningless (we already
+      # have the raw payload), so only Normalize + Export remain.
+      assert_equal %i[normalize export], stages(from_raw: "/tmp/raw.json")
+    end
+
+    def test_from_normalized_skips_through_normalize
+      # Replaying a normalized dump: everything upstream of Export is skipped.
+      assert_equal [:export], stages(from_normalized: "/tmp/n.json")
+    end
+
+    def test_interactive_forces_connect_only
+      # Browse mode short-circuits at Connect even though no only_stage is set;
+      # the downstream stages would NoMethodError on the nil credentials hash.
+      assert_equal [:connect], stages(interactive: true)
+    end
+
+    def test_recording_forces_connect_only
+      assert_equal [:connect], stages(recording: true)
+    end
+
+    def test_interactive_wins_over_through_stage
+      # interactive/recording override an explicit --through.
+      assert_equal [:connect], stages(interactive: true, through_stage: :export)
+    end
+
+    def test_only_stage_intersected_with_from_raw_skip
+      # only_stage names a skipped stage → the skip set wins and it drops out,
+      # yielding an empty run rather than re-running a stage from_raw excludes.
+      assert_equal [], stages(only_stage: :extract, from_raw: "/tmp/raw.json")
+    end
   end
 end

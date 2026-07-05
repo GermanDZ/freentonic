@@ -27,7 +27,7 @@ class InvokeServerTest < Minitest::Test
 
     @server = Freentonic::InvokeServer.new(
       runner:       @runner,
-      invoke_token: @token,
+      invoke_tokens: [@token],
       listen_addr:  "127.0.0.1",
       listen_port:  @port,
       logger:       nil
@@ -53,7 +53,11 @@ class InvokeServerTest < Minitest::Test
     port
   end
 
-  def wait_for_server_up(timeout: 5)
+  # Generous ceiling: the loop returns the instant the port opens, so this
+  # only bounds the pathological case. 5s proved too tight when the full
+  # suite runs this server-in-a-thread under heavy scheduling load (the bind
+  # itself is reliable — the test passes 15/15 in isolation).
+  def wait_for_server_up(timeout: 20)
     deadline = Time.now + timeout
     while Time.now < deadline
       begin
@@ -194,7 +198,7 @@ class InvokeServerTest < Minitest::Test
     capped_port = find_free_port
     capped_server = Freentonic::InvokeServer.new(
       runner:                     @runner,
-      invoke_token:               @token,
+      invoke_tokens:              [@token],
       listen_addr:                "127.0.0.1",
       listen_port:                capped_port,
       logger:                     nil,

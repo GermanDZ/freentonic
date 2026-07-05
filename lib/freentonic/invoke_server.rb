@@ -15,9 +15,12 @@ module Freentonic
   # dependency on webrick (which became a bundled gem in Ruby 3.0 and is not
   # preinstalled in the slim Ruby images we build on).
   #
-  # Auth: if @invoke_token is set, clients must send
+  # Auth: if @invoke_tokens is non-empty, clients must send
   #   Authorization: Bearer <token>
-  # Missing/incorrect tokens return 401.
+  # matching any one of them. Missing/incorrect tokens return 401. Accepting a
+  # set (rather than a single token) lets an operator roll a new token out to
+  # clients before retiring the old one — zero-downtime rotation without a
+  # simultaneous client cutover.
   class InvokeServer
     DEFAULT_ADDR = "127.0.0.1"
     DEFAULT_PORT = 7878
@@ -85,9 +88,44 @@ module Freentonic
     # Chrome-profile corruption and drops the blocked /invoke response).
     SHUTDOWN_DRAIN_SECONDS = 20
 
+    # Assemble the accepted bearer-token set from every configured source and
+    # return a deduped list. Sources (all optional, all unioned):
+    #
+    #   cli_tokens     — values passed as --invoke-token (repeatable)
+    #   cli_files      — paths passed as --invoke-token-file (repeatable)
+    #   env_token      — FREENTONIC_INVOKE_TOKEN, comma-separated for >1 token
+    #   env_token_file — FREENTONIC_INVOKE_TOKEN_FILE, one token per line
+    #
+    # A *_FILE source keeps the secret off the process argv and out of
+    # `docker inspect` (only the path is visible), and holding several tokens
+    # at once is what makes zero-downtime rotation possible: publish the new
+    # token, cut clients over at their own pace, then drop the old one.
+    #
+    # File format: one token per line; blank lines and lines whose first
+    # non-space char is `#` are ignored; surrounding whitespace is stripped.
+    def self.load_tokens(cli_tokens: [], cli_files: [], env_token: nil, env_token_file: nil)
+      tokens = []
+      tokens.concat(Array(cli_tokens))
+      tokens.concat(env_token.to_s.split(",")) unless env_token.nil?
+      files = Array(cli_files)
+      files << env_token_file unless env_token_file.nil? || env_token_file.empty?
+      files.each { |path| tokens.concat(tokens_from_file(path)) }
+      tokens.map { |t| t.to_s.strip }.reject(&:empty?).uniq
+    end
+
+    def self.tokens_from_file(path)
+      unless File.file?(path)
+        raise UserError, "invoke-token file not found: #{path}"
+      end
+      File.readlines(path, chomp: true).reject do |line|
+        stripped = line.strip
+        stripped.empty? || stripped.start_with?("#")
+      end
+    end
+
     def initialize(
       runner:,
-      invoke_token: nil,
+      invoke_tokens: nil,
       listen_addr: DEFAULT_ADDR,
       listen_port: DEFAULT_PORT,
       logger: $stdout,
@@ -96,7 +134,8 @@ module Freentonic
       max_retained_runs: MAX_RETAINED_RUNS
     )
       @runner          = runner
-      @invoke_token    = (invoke_token && !invoke_token.empty?) ? invoke_token : nil
+      # Normalize to a frozen list of non-empty tokens. Empty ⇒ auth disabled.
+      @invoke_tokens   = Array(invoke_tokens).map { |t| t.to_s }.reject(&:empty?).uniq.freeze
       @listen_addr     = listen_addr
       @listen_port     = listen_port
       @logger          = logger
@@ -129,7 +168,7 @@ module Freentonic
       @server_socket = TCPServer.new(@listen_addr, @listen_port)
       @worker        = Thread.new { run_worker }
       log "listening on http://#{@listen_addr}:#{@listen_port}" \
-          "#{@invoke_token ? " (auth: bearer token)" : " (auth: OPEN — no token set)"}"
+          "#{@invoke_tokens.empty? ? " (auth: OPEN — no token set)" : " (auth: #{@invoke_tokens.size} bearer token#{@invoke_tokens.size == 1 ? "" : "s"})"}"
 
       loop do
         break if @shutting_down
@@ -1235,11 +1274,16 @@ module Freentonic
     # ─── helpers ───
 
     def authenticated?(req)
-      return true if @invoke_token.nil?
+      return true if @invoke_tokens.empty?
       header = req.headers["authorization"].to_s
       return false unless header.start_with?("Bearer ")
       provided = header.sub(/\ABearer\s+/, "").strip
-      secure_compare(provided, @invoke_token)
+      # Compare against every configured token and OR the results without
+      # short-circuiting, so acceptance time doesn't depend on which token
+      # matched (or how many precede it in the list).
+      matched = false
+      @invoke_tokens.each { |token| matched |= secure_compare(provided, token) }
+      matched
     end
 
     def secure_compare(a, b)
