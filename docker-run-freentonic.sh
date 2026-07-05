@@ -12,7 +12,14 @@
 #   FREENTONIC_IMAGE           image tag (default freentonic:latest)
 #   FREENTONIC_WORKFLOWS_DIR   host path to mount at /home/freentonic/workflows (REQUIRED for server)
 #   FREENTONIC_RUNS_DIR        host path to mount at /workspace/runs (default: $(pwd)/freentonic-runs)
-#   FREENTONIC_INVOKE_TOKEN    bearer token for /invoke (REQUIRED for server)
+#   FREENTONIC_INVOKE_TOKEN    bearer token for /invoke (REQUIRED for server
+#                              unless FREENTONIC_INVOKE_TOKEN_FILE is set;
+#                              passed via -e, so visible in `docker inspect`)
+#   FREENTONIC_INVOKE_TOKEN_FILE  host path to a file of bearer tokens (one per
+#                              line). Mounted read-only; keeps the secret out
+#                              of `docker inspect`. Multiple lines = a token
+#                              set for zero-downtime rotation. Takes precedence
+#                              over FREENTONIC_INVOKE_TOKEN.
 #   FREENTONIC_LISTEN_PORT     host port to expose the invoke server on (default 7878)
 #   FREENTONIC_CONTAINER_NAME  container name (default freentonic-server)
 #   FREENTONIC_VNC             0|1 (default 1) — expose VNC on 5900 for debug. Set to 0 to skip.
@@ -38,7 +45,6 @@ require_env() {
 
 cmd_server() {
   require_env FREENTONIC_WORKFLOWS_DIR "host path to workflows YAMLs"
-  require_env FREENTONIC_INVOKE_TOKEN  "bearer token protecting /invoke"
 
   local workflows_dir runs_dir
   workflows_dir="$(cd "${FREENTONIC_WORKFLOWS_DIR}" && pwd)"
@@ -55,8 +61,50 @@ cmd_server() {
     -v "${runs_dir}:/workspace/runs"
     -v "${CHROME_PROFILE_VOLUME}:/home/freentonic/.cache/freentonic/chrome"
     --shm-size=256m
-    -e "FREENTONIC_INVOKE_TOKEN=${FREENTONIC_INVOKE_TOKEN}"
+    # ── Hardening ────────────────────────────────────────────────────────
+    # Drop every Linux capability and forbid privilege escalation: Chrome
+    # runs --no-sandbox unconditionally, so a compromised renderer already
+    # shares the freentonic uid — deny it any path to more.
+    --cap-drop ALL
+    --security-opt no-new-privileges
+    # Read-only root filesystem. Everything the process legitimately writes
+    # is a named volume (runs, chrome profile) or a tmpfs below. This turns
+    # the rest of the image immutable, so a renderer compromise can't drop a
+    # persistent implant on the rootfs. The tmpfs list is the minimum that
+    # keeps Chrome + Xvfb happy under --read-only, verified against the
+    # ING anti-detection flag set:
+    #   /tmp                       Xvfb sockets, Chrome scratch
+    #   ~/.config ~/.local ~/.pki  Chrome config / crashpad DB / NSS cert DB
+    #   /dev/shm                   supplied writable by --shm-size above
+    --read-only
+    --tmpfs /tmp
+    --tmpfs /home/freentonic/.config
+    --tmpfs /home/freentonic/.local
+    --tmpfs /home/freentonic/.pki
   )
+
+  # Token delivery. Prefer a mounted file (FREENTONIC_INVOKE_TOKEN_FILE, a
+  # host path): only the in-container path lands in `docker inspect`, never
+  # the secret. Fall back to -e for the single-token convenience case, with
+  # a note that the value is then visible to anyone who can inspect the
+  # container. Either way the server accepts a *set* of tokens, so the file
+  # can hold old+new during a rotation window.
+  if [ -n "${FREENTONIC_INVOKE_TOKEN_FILE:-}" ]; then
+    local token_file
+    token_file="$(cd "$(dirname "${FREENTONIC_INVOKE_TOKEN_FILE}")" && pwd)/$(basename "${FREENTONIC_INVOKE_TOKEN_FILE}")"
+    if [ ! -f "${token_file}" ]; then
+      echo "error: FREENTONIC_INVOKE_TOKEN_FILE=${token_file} not found" >&2
+      exit 2
+    fi
+    args+=(
+      -v "${token_file}:/run/freentonic/invoke-token:ro"
+      -e "FREENTONIC_INVOKE_TOKEN_FILE=/run/freentonic/invoke-token"
+    )
+  else
+    require_env FREENTONIC_INVOKE_TOKEN "bearer token protecting /invoke (or set FREENTONIC_INVOKE_TOKEN_FILE to a host token file to keep it out of \`docker inspect\`)"
+    echo "note: passing the token via -e; it is visible in \`docker inspect\`. Set FREENTONIC_INVOKE_TOKEN_FILE to a host file to avoid that." >&2
+    args+=(-e "FREENTONIC_INVOKE_TOKEN=${FREENTONIC_INVOKE_TOKEN}")
+  fi
 
   if [ "${VNC}" = "1" ]; then
     args+=(

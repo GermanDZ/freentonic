@@ -36,8 +36,8 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 | - | --- | --- | --- | --- |
 | 13 | Async `/invoke` (202 + poll) | Done | p2-async-invoke | `/invoke` now validates synchronously then returns `202 {run_id, status:"queued"}`; a single worker thread runs invokes serially under `@invoke_mutex` (v1 serialization preserved) and `GET /runs/:id` reports `queued`/`running`/`done`/`error`/`cancelled` + the result. Client disconnect no longer wastes a run. Bounded queue (`max_queued_runs`→503) + FIFO-evicted retention (`max_retained_runs`); inline creds scrubbed from the record at finalize. Cancel now also works on still-queued runs; shutdown drains the worker and aborts the backlog |
 | 14 | Structured run events + minimal observability | Not started | | |
-| 15 | Container hardening + token lifecycle | Not started | | |
-| 16 | Retire cheapest untested risk (engine, connect, export fan-out, etc.) | Not started | | |
+| 15 | Container hardening + token lifecycle | Done | p2-hardening-and-tests | Wrapper + documented raw `docker run` now apply `--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only` + tmpfs (`/tmp`, `~/.config`, `~/.local`, `~/.pki`) — verified Chrome+Xvfb launch under read-only rootfs against the ING flag set. Token lifecycle: server accepts a *set* of tokens (`invoke_tokens:`), assembled by `InvokeServer.load_tokens` from `--invoke-token`(repeatable) + `FREENTONIC_INVOKE_TOKEN`(comma) + `--invoke-token-file`/`FREENTONIC_INVOKE_TOKEN_FILE`(one per line) → zero-downtime rotation; wrapper mounts the token file so the secret stays out of `docker inspect`. Deferred: in-container user-namespace Chrome sandbox (still `--no-sandbox`) |
+| 16 | Retire cheapest untested risk (engine, connect, export fan-out, etc.) | Done | p2-hardening-and-tests | New/expanded unit tests (+74): `engine` `stages_to_run` skip-matrix; `chrome_cdp` pure helpers (cookie domain/path/dedupe/format, `pgrep_pattern_for`, `resolve_profile_dir_from_env`, WS frame encode/decode round-trip); `Source#extract_credentials` require/validate/map/derive; `Stages::Export` fan-out (all run, first error re-raised); `Stages::Connect` `initial_url_from_workflow` + `ChromeCdp::Error`/`KeyError`→`UserError` wrapping; multi-token `load_tokens`/`authenticated?`. The P0-gap items it listed (dot-ids, shutdown drain, submit-not-in-flight, await-over-HTTP) were already covered by the P0 work |
 
 ## P3 — Direction
 
@@ -52,6 +52,6 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 ## Summary
 
 - Total items: 21
-- Done: 13 (all of P0 + all of P1 + P2 #13)
+- Done: 15 (all of P0 + all of P1 + P2 #13, #15, #16)
 - In progress: 0
-- Not started: 8 (rest of P2 + P3)
+- Not started: 6 (P2 #14 + all of P3)

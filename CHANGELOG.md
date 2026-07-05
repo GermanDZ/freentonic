@@ -9,6 +9,38 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### Container hardening + token lifecycle
+
+Defense-in-depth for the invoke-server container, and a token model that
+supports zero-downtime rotation.
+
+- **Hardened container.** The wrapper (`docker-run-freentonic.sh server`)
+  and the documented raw `docker run` now apply `--cap-drop ALL`,
+  `--security-opt no-new-privileges`, and a `--read-only` root filesystem
+  with the minimum tmpfs mounts Chrome + Xvfb need (`/tmp`, `~/.config`,
+  `~/.local`, `~/.pki`; `/dev/shm` comes from `--shm-size`). Chrome runs
+  `--no-sandbox`, so a renderer compromise already shares the `freentonic`
+  uid — this denies it capabilities, privilege escalation, and a writable
+  rootfs to persist on. Verified against the ING anti-detection flag set.
+- **Token set instead of a single token — breaking config change.** The
+  server now accepts *any* of a configured set of bearer tokens.
+  `InvokeServer` takes `invoke_tokens:` (was `invoke_token:`); tokens are
+  assembled by `InvokeServer.load_tokens` from `--invoke-token`
+  (repeatable), `FREENTONIC_INVOKE_TOKEN` (comma-separated), and
+  `--invoke-token-file` / `FREENTONIC_INVOKE_TOKEN_FILE` (a file, one token
+  per line, `#` comments + blanks ignored). To rotate: add the new token as
+  a second line, restart, cut clients over at their own pace, then drop the
+  old line — no simultaneous cutover.
+- **Token out of `docker inspect`.** When `FREENTONIC_INVOKE_TOKEN_FILE`
+  (a host path) is set, the wrapper mounts it read-only and passes only the
+  in-container path via `-e`; the secret no longer appears in
+  `docker inspect`. `-e FREENTONIC_INVOKE_TOKEN` still works for local dev,
+  with a note that its value is inspectable.
+
+**Migration:** embedders constructing `InvokeServer` directly must pass
+`invoke_tokens: [tok]` instead of `invoke_token: tok`. Operators using the
+wrapper or the plain `FREENTONIC_INVOKE_TOKEN` env var need no change.
+
 ### Async `/invoke` (202 + poll) — **breaking API change**
 
 `POST /invoke` no longer blocks for the whole run. It now validates the
