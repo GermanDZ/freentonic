@@ -38,7 +38,11 @@ module Freentonic
         stdout.puts "\nFetching data..."
         from_date = Date.today - @context.fetch(:lookback_days)
 
-        client = source.workflow.build_api_client(@context[:credentials])
+        # Reuse the client the Elevate stage built and mutated (its
+        # rebind_credential rotations live on that instance); only build a
+        # fresh one when there was no elevate phase.
+        client = @context[:api_client] ||
+                 source.workflow.build_api_client(@context[:credentials])
         extractor = load_extractor
 
         @context[:raw] = call_extractor(
@@ -76,20 +80,6 @@ module Freentonic
           accepted = params.select { |kind, _| %i[key keyreq].include?(kind) }.map(&:last)
           extractor.call(**all_kwargs.slice(*accepted))
         end
-      end
-
-      def run_dir
-        dir = ENV["FREENTONIC_RUN_DIR"]
-        dir if dir && !dir.empty?
-      end
-
-      def build_remote_prompt_store
-        dir = run_dir
-        return nil unless dir
-        Freentonic::RemotePromptStore.new(
-          prompts_dir: File.join(dir, "prompts"),
-          announce_to: stderr
-        )
       end
 
       def load_extractor

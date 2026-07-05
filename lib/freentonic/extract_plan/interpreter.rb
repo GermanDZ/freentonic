@@ -39,6 +39,14 @@ module Freentonic
       def execute(step, client, scope)
         return if step.key?("when") && !gate_passes?(step["when"], scope)
 
+        dispatch(step, client, scope)
+      end
+
+      # Verb dispatch, split out from the `when:` gate so a subclass (the
+      # elevate interpreter) can add step kinds without re-implementing the
+      # gate — it overrides #dispatch and falls back to `super` for the
+      # shared verbs.
+      def dispatch(step, client, scope)
         if step.key?("fetch")        then do_fetch(step, client, scope)
         elsif step.key?("select")    then do_select(step, scope)
         elsif step.key?("for_each")  then do_for_each(step, client, scope)
@@ -157,35 +165,11 @@ module Freentonic
         today.nil? ? nil : today - Integer(n)
       end
 
-      # Evaluate a `when:` gate against the current scope, reusing the
-      # `when_context` operator semantics (see WorkflowSchema and
-      # BrowserWorkflowRunner#compare_context). Every declared key/op must
-      # hold. Operator/operand shapes are validated statically at load.
+      # Evaluate a `when:` gate against the current scope. Delegates to the
+      # shared WhenGate so the plan's per-step gate and the elevate phase's
+      # block gate can never diverge.
       def gate_passes?(gate, scope)
-        return true if gate.nil? || gate.empty?
-        gate.all? do |key, ops|
-          actual = scope.get(key)
-          ops.all? { |op, operand| compare(actual, op, operand, key) }
-        end
-      end
-
-      def compare(actual, op, operand, key)
-        case op
-        when "gt"      then numeric!(actual, key) >  operand
-        when "gte"     then numeric!(actual, key) >= operand
-        when "lt"      then numeric!(actual, key) <  operand
-        when "lte"     then numeric!(actual, key) <= operand
-        when "eq"      then actual == operand
-        when "neq"     then actual != operand
-        when "present" then operand == true ? !actual.nil? : actual.nil?
-        when "absent"  then operand == true ? actual.nil? : !actual.nil?
-        else raise UserError, "extract.plan: when: unknown operator #{op.inspect} on key #{key.inspect}"
-        end
-      end
-
-      def numeric!(val, key)
-        return val if val.is_a?(Numeric)
-        raise UserError, "extract.plan: when: key #{key.inspect} requires a numeric value, got #{val.inspect}"
+        WhenGate.passes?(gate, scope)
       end
 
       # for_each: iterate a bound collection, run `do:` sub-steps per item
@@ -258,7 +242,11 @@ module Freentonic
       def dig_path(source, path)
         return nil if path.nil? || source.nil?
         path.to_s.split(".").inject(source) do |acc, key|
-          acc.is_a?(Hash) ? acc[key] : nil
+          if acc.is_a?(Hash)
+            acc[key]
+          elsif acc.is_a?(Array) && key.match?(/\A\d+\z/)
+            acc[key.to_i]
+          end
         end
       end
 

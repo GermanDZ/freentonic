@@ -62,6 +62,12 @@ module Freentonic
       @raw["normalize"]
     end
 
+    # The `elevate:` session-elevation block, or nil. Runs between connect
+    # and extract (Stages::Elevate). Root-level only.
+    def elevate_spec
+      @raw["elevate"]
+    end
+
     # Builds (and memoizes) the ApiClient subclass from the api_client: YAML
     # without instantiating it. Exposed so `--lint` can validate the
     # endpoint / auth-header / ext translation offline — building the class
@@ -287,6 +293,7 @@ module Freentonic
 
       validate_error_signals!
       validate_extract!
+      validate_elevate!
     end
 
     def validate_error_signals!
@@ -334,9 +341,122 @@ module Freentonic
     PLAN_STEP_VERBS = %w[fetch select for_each let concat dedup_by].freeze
 
     # Bindings the interpreter pre-seeds before the first step (see
-    # ExtractPlan::PlanExtractor#call). Static validation starts from this
-    # set so a plan may reference them without an explicit binding step.
+    # ExtractPlan::PlanExtractor#call / ExtractPlan.seed_scope). Static
+    # validation starts from this set so a plan (or the elevate phase) may
+    # reference them without an explicit binding step.
     PLAN_SEED_BINDINGS = %w[from_date from_ms now_ms today lookback_days].freeze
+
+    # ── elevate: validation ────────────────────────────────────────────
+    #
+    # The session-elevation phase reuses the extract-plan step grammar
+    # (fetch/select/for_each/let/concat/dedup_by, each optionally when:-
+    # gated) and adds two session-affecting step kinds. Like a plan it is
+    # walked linearly with binding tracking, seeded with PLAN_SEED_BINDINGS,
+    # and its `fetch:` resolves against the same declared-endpoint
+    # whitelist. Unlike a plan it has no output:.
+    ELEVATE_STEP_VERBS =
+      (PLAN_STEP_VERBS + %w[await_operator_approval rebind_credential]).freeze
+
+    def validate_elevate!
+      ev = @raw["elevate"]
+      return if ev.nil?
+      loc = "workflow #{@path} elevate"
+      unless ev.is_a?(Hash)
+        raise UserError, "#{loc}: must be a hash with steps:"
+      end
+
+      bound = PLAN_SEED_BINDINGS.dup
+      validate_plan_when!(ev["when"], "#{loc}.when", bound) if ev.key?("when")
+
+      if ev.key?("on_failure") && !%w[degrade abort].include?(ev["on_failure"])
+        raise UserError,
+              "#{loc}.on_failure: must be \"degrade\" or \"abort\" (got #{ev["on_failure"].inspect})"
+      end
+
+      steps = ev["steps"]
+      unless steps.is_a?(Array) && !steps.empty?
+        raise UserError, "#{loc}.steps: must be a non-empty array"
+      end
+
+      endpoints = api_client_endpoint_names
+      steps.each_with_index do |step, i|
+        validate_elevate_step!(step, "#{loc}.steps[#{i}]", endpoints, bound)
+      end
+    end
+
+    def validate_elevate_step!(step, loc, endpoints, bound)
+      unless step.is_a?(Hash)
+        raise UserError, "#{loc}: must be a hash"
+      end
+      verbs = step.keys & ELEVATE_STEP_VERBS
+      if verbs.empty?
+        raise UserError, "#{loc}: unknown step (expected one of #{ELEVATE_STEP_VERBS.join(", ")}; " \
+                         "got keys #{step.keys.inspect})"
+      end
+      if verbs.size > 1
+        raise UserError, "#{loc}: a step must declare exactly one verb, found #{verbs.inspect}"
+      end
+
+      case verbs.first
+      when "await_operator_approval" then validate_elevate_await!(step, loc, bound)
+      when "rebind_credential"       then validate_elevate_rebind!(step, loc, bound)
+      else
+        # Shared plan verb — delegate to the plan validator, which checks
+        # the single-verb rule + when: gate and tracks new bindings.
+        validate_plan_step!(step, loc, endpoints, bound, allow_yield: false)
+      end
+    end
+
+    # await_operator_approval: { message:, timeout? } — message may embed
+    # {tokens}; each must reference a bound name. Binds nothing.
+    def validate_elevate_await!(step, loc, bound)
+      validate_plan_when!(step["when"], "#{loc}.when", bound) if step.key?("when")
+      spec = step["await_operator_approval"]
+      unless spec.is_a?(Hash) && spec["message"].is_a?(String) && !spec["message"].empty?
+        raise UserError, "#{loc}.await_operator_approval: requires a non-empty message:"
+      end
+      validate_embedded_refs!(spec["message"], "#{loc}.await_operator_approval.message", bound)
+      return unless spec.key?("timeout")
+
+      t = spec["timeout"]
+      unless t.is_a?(Integer) && t.positive?
+        raise UserError, "#{loc}.await_operator_approval.timeout: must be a positive integer (got #{t.inspect})"
+      end
+    end
+
+    # rebind_credential: { header:, host?, value: } — value may embed
+    # {tokens}; each must reference a bound name. Mutates the client, binds
+    # nothing into the scope.
+    def validate_elevate_rebind!(step, loc, bound)
+      validate_plan_when!(step["when"], "#{loc}.when", bound) if step.key?("when")
+      spec = step["rebind_credential"]
+      unless spec.is_a?(Hash)
+        raise UserError, "#{loc}.rebind_credential: must be a hash"
+      end
+      unless spec["header"].is_a?(String) && !spec["header"].empty?
+        raise UserError, "#{loc}.rebind_credential: requires a non-empty header:"
+      end
+      unless spec["value"].is_a?(String) && !spec["value"].empty?
+        raise UserError, "#{loc}.rebind_credential: requires a non-empty value:"
+      end
+      if spec.key?("host") && !(spec["host"].is_a?(String) && !spec["host"].empty?)
+        raise UserError, "#{loc}.rebind_credential.host: must be a non-empty string when present"
+      end
+      validate_embedded_refs!(spec["value"], "#{loc}.rebind_credential.value", bound)
+    end
+
+    # Every {token} embedded in an elevate message:/value: must reference a
+    # name bound by this point (its root binding). The embedded analogue of
+    # validate_plan_refs!, which only checks whole-token strings.
+    def validate_embedded_refs!(str, loc, bound)
+      return unless str.is_a?(String)
+      str.scan(/\{([^}]+)\}/).each do |(token)|
+        root = token.split(".").first
+        next if bound.include?(root)
+        raise UserError,
+              "#{loc}: {#{token}} references unbound name #{root.inspect} (bound: #{bound.join(", ")})"
+      end
+    end
 
     # Walk the plan linearly, tracking which names are bound so far, and
     # fail loud on: a fetch to an undeclared endpoint, a reference to an

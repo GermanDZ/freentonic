@@ -99,7 +99,7 @@ subsystem has a different review posture.
 | Workflow schema     | `lib/freentonic/workflow_schema.rb`                   | YAML → runtime binding + validation + `api_client.ext` loader.     |
 | Source              | `lib/freentonic/source.rb`                            | `credentials:` validation + mapping from captured context.         |
 | Secret resolver     | `lib/freentonic/secret_resolver.rb`                   | `secret(NAME)` recursive resolution with caching.                  |
-| Pipeline stages     | `lib/freentonic/stages/`                              | `Connect`, `Extract`, `Normalize`, `Export` stage drivers.         |
+| Pipeline stages     | `lib/freentonic/stages/`                              | `Connect`, `Elevate`, `Extract`, `Normalize`, `Export` stage drivers. |
 | Engine              | `lib/freentonic/engine.rb`                            | Stage orchestration, stage ordering, serialization hooks.          |
 | CLI                 | `lib/freentonic/cli.rb`, `bin/freentonic`             | OptionParser, `-r` pre-processing, exporter/secret wiring.         |
 | Exporter plugins    | `lib/freentonic/exporters/`                           | `Base`, `Json`, `Jsonl`, `Csv`, `Http` + registry.                 |
@@ -359,10 +359,10 @@ Credential Manager). User-specific backends should stay in `-r`.
 
 ### 5. New pipeline stage
 
-Rare. The four existing stages (Connect → Extract → Normalize →
-Export) cover every current use case. A new stage is justified
-only if you can't make the work fit inside an existing stage
-without conflating concerns.
+Rare. The five existing stages (Connect → Elevate → Extract →
+Normalize → Export) cover every current use case. A new stage is
+justified only if you can't make the work fit inside an existing
+stage without conflating concerns.
 
 **Implementation:**
 - Create `lib/freentonic/stages/<name>.rb`.
