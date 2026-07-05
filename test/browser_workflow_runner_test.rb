@@ -448,6 +448,21 @@ module Freentonic
         )
       end
 
+      def test_note_prints_verbatim_and_never_resolves_a_secret
+        session = FakeSession.new
+        stdout = StringIO.new
+        resolver = FakeSecretResolver.new
+        # A whole-string secret() reference is exactly what SecretResolver
+        # would otherwise resolve — and then print into the persisted run log.
+        steps = [{ "action" => "note", "message" => "secret(USER_DNI)" }]
+        gate_runner(session: session, steps: steps, runtime_context: {},
+                    stdout: stdout, resolver: resolver).execute_phase("login")
+
+        assert_includes stdout.string, "secret(USER_DNI)", "note must print its message verbatim"
+        refute_includes stdout.string, "12345678A", "note must not leak the resolved secret"
+        refute_includes resolver.calls, "secret(USER_DNI)", "note must not call the secret resolver"
+      end
+
       def test_when_context_gt_runs_step_when_condition_true
         session = FakeSession.new
         steps = [{

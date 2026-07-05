@@ -277,6 +277,37 @@ class InvokeServerTest < Minitest::Test
     assert_match(/headers too large/, raw)
   end
 
+  # ── BufferedReader absolute deadline (pre-auth slow-drip DoS) ──
+
+  def test_buffered_reader_trips_absolute_deadline_without_waiting_idle_timeout
+    a, b = UNIXSocket.pair
+    # Deadline already in the past → the very first blocking read is refused,
+    # instantly, rather than blocking for the 30s idle window.
+    past = Process.clock_gettime(Process::CLOCK_MONOTONIC) - 0.01
+    reader = Freentonic::InvokeServer::BufferedReader.new(a, 30, deadline: past)
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    err = assert_raises(Freentonic::InvokeServer::RequestMalformed) { reader.readline_crlf }
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+    assert_match(/deadline exceeded/, err.message)
+    assert_operator elapsed, :<, 5, "must not fall through to the 30s idle timeout"
+  ensure
+    a&.close
+    b&.close
+  end
+
+  def test_buffered_reader_reads_normally_within_deadline
+    a, b = UNIXSocket.pair
+    future = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
+    reader = Freentonic::InvokeServer::BufferedReader.new(a, 30, deadline: future)
+    b.write("hello\r\n")
+    assert_equal "hello\r\n", reader.readline_crlf
+  ensure
+    a&.close
+    b&.close
+  end
+
   # ── /runs/:run_id/log auth + validation ───────────────────
 
   def test_log_requires_auth

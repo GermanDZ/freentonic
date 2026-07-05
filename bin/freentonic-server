@@ -15,6 +15,7 @@ options = {
   workflows_dir:       ENV["FREENTONIC_WORKFLOWS_DIR"] || Freentonic::InvokeRunner::DEFAULT_WORKFLOWS_DIR,
   runs_dir:            ENV["FREENTONIC_RUNS_DIR"]      || Freentonic::InvokeRunner::DEFAULT_RUNS_DIR,
   chrome_profile_root: ENV["FREENTONIC_CHROME_PROFILE_ROOT"] || Freentonic::InvokeRunner::DEFAULT_CHROME_PROFILE_ROOT,
+  secrets_dir:         ENV["FREENTONIC_SECRETS_DIR"]  || Freentonic::InvokeRunner::DEFAULT_SECRETS_DIR,
   vnc_password_file:   ENV["FREENTONIC_VNC_PASSWORD_FILE"]   || Freentonic::InvokeRunner::DEFAULT_VNC_PASSWORD_FILE,
   invoke_token:        ENV["FREENTONIC_INVOKE_TOKEN"]
 }
@@ -26,6 +27,7 @@ OptionParser.new do |opts|
   opts.on("--workflows-dir DIR",     "Workflows root (default #{options[:workflows_dir]})") { |v| options[:workflows_dir] = v }
   opts.on("--runs-dir DIR",          "Runs output root (default #{options[:runs_dir]})") { |v| options[:runs_dir] = v }
   opts.on("--chrome-profile-root DIR", "Chrome profile root (default #{options[:chrome_profile_root]})") { |v| options[:chrome_profile_root] = v }
+  opts.on("--secrets-dir DIR",       "credentials.file root (default #{options[:secrets_dir]})") { |v| options[:secrets_dir] = v }
   opts.on("--vnc-password-file PATH", "x11vnc passwdfile, rotated per invoke (default #{options[:vnc_password_file]})") { |v| options[:vnc_password_file] = v }
   opts.on("--invoke-token TOKEN",    "Bearer token (or set FREENTONIC_INVOKE_TOKEN)") { |v| options[:invoke_token] = v }
   opts.on("-h", "--help") { puts opts; exit 0 }
@@ -36,6 +38,7 @@ runner = Freentonic::InvokeRunner.new(
   workflows_dir:       options[:workflows_dir],
   runs_dir:            options[:runs_dir],
   chrome_profile_root: options[:chrome_profile_root],
+  secrets_dir:         options[:secrets_dir],
   vnc_password_file:   options[:vnc_password_file],
   logger:              ->(msg) { $stdout.puts("[invoke-runner] #{msg}") }
 )

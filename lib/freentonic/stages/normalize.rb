@@ -31,7 +31,9 @@ module Freentonic
           raise UserError, "workflow #{schema.path}: normalize: must be a hash with ruby: and class: keys"
         end
 
-        ruby_path = File.expand_path(spec["ruby"], File.dirname(schema.path))
+        workflow_dir = File.dirname(schema.path)
+        ruby_path = File.expand_path(spec["ruby"], workflow_dir)
+        ruby_path = PathConfinement.resolve_within!(ruby_path, workflow_dir, label: "normalize.ruby")
         require ruby_path
         klass = spec["class"].to_s.split("::").inject(Object) { |ns, name| ns.const_get(name, false) }
         klass.new

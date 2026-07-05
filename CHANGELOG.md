@@ -9,6 +9,81 @@ changelog is their version signal. Every release below corresponds to a
 
 ## Unreleased
 
+### HTTP export over cleartext + `note` secret hygiene
+
+- The http exporter now **refuses** to send a bearer token over a
+  cleartext `http://` URL (the payload and `Authorization` header would
+  otherwise cross the wire unencrypted). Cleartext without a token still
+  works but prints a warning.
+- `note` / `note_if_selector` messages are printed **verbatim** —
+  `secret()` is no longer resolved in them, so a note can't leak a
+  resolved secret into the persisted run log.
+
+### CSV exporter: neutralize formula injection
+
+Cells whose first character is a spreadsheet formula trigger
+(`= + - @ \t \r`) are now prefixed with a leading apostrophe so Excel /
+Sheets treat them as text — merchant names and transfer memos are
+attacker-influenceable bank text, so `=HYPERLINK(...)` / `@SUM(...)` would
+otherwise execute on open. Plain numeric literals (including negative
+amounts) are left untouched so financial columns stay summable.
+
+### Confine provider ruby to the workflow's directory subtree
+
+`extract.ruby`, `normalize.ruby`, and `api_client.ext.file` now must
+resolve inside the workflow YAML's own directory subtree (the documented
+"ship code alongside your YAML" layout). An absolute or `../` path — or a
+symlink — that escapes the subtree is rejected with a `UserError` at load
+time (and flagged by `--lint`). Shrinks the residual attack chain where a
+token-holder names an export artifact `foo.rb` in a writable run dir and
+points a ruby reference at it.
+
+### Invoke server: confine `credentials.file` to a secrets root
+
+`credentials.file` is now resolved under a configured secrets root
+(`/workspace/secrets`, `--secrets-dir`) with the same expand_path/realpath
+containment `workflow` gets — absolute paths are re-rooted, symlinks
+escaping the root are rejected. Previously any absolute container path was
+accepted, and its content hash leaked through the derived `profile_key` on
+`/status` as a file-content confirmation oracle. **Breaking:**
+`credentials.file` is now a path relative to the secrets root, not an
+arbitrary absolute path.
+
+### Invoke server: bound pre-auth request reads (slow-drip DoS)
+
+The request reader now enforces a 30s absolute wall-clock deadline from
+accept to end-of-body, independent of the per-select idle timeout.
+Previously a client trickling one byte per 29s reset the idle window
+forever and pinned a connection slot without authenticating; enough such
+sockets could 503 every endpoint including `/healthz`.
+
+### `freentonic --lint` — offline workflow validation
+
+A dry-run that statically validates a workflow without launching Chrome
+or hitting the bank. Checks the schema, that `extract:`/`normalize:`/ext
+ruby loads and its classes resolve, that `api_client:` builds into a
+client class, that every `credentials.require` key is captured by some
+action's `as:`, and that every `secret(NAME)` has a `secrets:` entry
+(warning). Exit `0` clean, `1` on error. Previously the earliest full
+check of a workflow was a live login.
+
+### Action registry + exhaustive load-time validation
+
+Every workflow action now lives in a single declarative registry
+(`WorkflowActions`) that lists its required and optional keys. Schema
+validation is driven from it, closing two long-standing gaps:
+
+- **Unknown actions fail at load, not mid-run.** A typo like
+  `navigat` previously passed validation and only died at the runner's
+  dispatch `else` branch — possibly *after* the operator completed 2FA.
+  It now raises a `UserError` at load time listing the known actions.
+- **Required keys are checked for all ~33 actions**, not just the ~13
+  that had bespoke validators. Provider authors get a precise
+  `<action> requires <key>:` error in milliseconds.
+
+A drift-guard test keeps the registry and the runner's dispatch in
+lockstep — neither can list an action the other omits.
+
 ### `await_external_approval` prompt kind
 
 A third SCA pattern alongside `input` and `confirm`: the workflow polls

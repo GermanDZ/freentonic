@@ -44,6 +44,12 @@ module Freentonic
     # first 8 chars; the API doc notes that as the effective entropy ceiling.
     VNC_PASSWORD_PATTERN = /\A[\x21-\x7E]{1,64}\z/
 
+    # credentials.file is resolved under this root (like `workflow` under the
+    # workflows root) so a token-holder can't point it at an arbitrary
+    # container file — whose content hash would otherwise leak through the
+    # derived profile_key on /status as a file-content confirmation oracle.
+    DEFAULT_SECRETS_DIR = "/workspace/secrets"
+
     DEFAULT_TIMEOUT = 1800
     MAX_TIMEOUT     = 7200
     ALLOWED_EXPORT_MODES = %w[json jsonl csv http].freeze
@@ -55,16 +61,18 @@ module Freentonic
 
     # @param body [Hash] parsed JSON request
     # @param workflows_dir [String] absolute path to the workflows root
-    def self.from_hash(body, workflows_dir:)
-      new(body, workflows_dir: workflows_dir).tap(&:validate!)
+    # @param secrets_dir [String] absolute path to the credentials-file root
+    def self.from_hash(body, workflows_dir:, secrets_dir: DEFAULT_SECRETS_DIR)
+      new(body, workflows_dir: workflows_dir, secrets_dir: secrets_dir).tap(&:validate!)
     end
 
-    def initialize(body, workflows_dir:)
+    def initialize(body, workflows_dir:, secrets_dir: DEFAULT_SECRETS_DIR)
       unless body.is_a?(Hash)
         raise InvokeError.new(:bad_request, "request body must be a JSON object")
       end
       @body = body
       @workflows_dir = workflows_dir
+      @secrets_dir = secrets_dir
     end
 
     def validate!
@@ -183,15 +191,47 @@ module Freentonic
       end
 
       if file
-        unless file.is_a?(String) && File.absolute_path?(file)
-          raise InvokeError.new(:unprocessable, "credentials.file must be an absolute path string")
+        unless file.is_a?(String) && !file.empty?
+          raise InvokeError.new(:unprocessable, "credentials.file must be a non-empty string")
         end
-        unless File.file?(file)
-          raise InvokeError.new(:unprocessable, "credentials.file does not exist: #{file}")
-        end
+        file = resolve_credentials_file!(file)
       end
 
       [inline, file]
+    end
+
+    # Resolve credentials.file under the secrets root with the same
+    # expand_path/realpath containment the workflow path gets. Any path (even
+    # an absolute one) is interpreted relative to the secrets root, so
+    # "/etc/passwd" lands at "<secrets_dir>/etc/passwd" and can't escape.
+    def resolve_credentials_file!(file)
+      if file.include?("\0")
+        raise InvokeError.new(:unprocessable, "credentials.file contains a null byte")
+      end
+
+      root      = File.expand_path(@secrets_dir)
+      candidate = File.expand_path(File.join(root, file))
+
+      unless candidate == root || candidate.start_with?(root + File::SEPARATOR)
+        raise InvokeError.new(:unprocessable, "credentials.file must resolve under the secrets root")
+      end
+
+      begin
+        resolved = File.realpath(candidate)
+      rescue Errno::ENOENT
+        raise InvokeError.new(:unprocessable, "credentials.file does not exist: #{file}")
+      end
+
+      resolved_root = File.realpath(root)
+      unless resolved == resolved_root || resolved.start_with?(resolved_root + File::SEPARATOR)
+        raise InvokeError.new(:unprocessable, "credentials.file resolves outside the secrets root")
+      end
+
+      unless File.file?(resolved)
+        raise InvokeError.new(:unprocessable, "credentials.file is not a regular file: #{file}")
+      end
+
+      resolved
     end
 
     def parse_export

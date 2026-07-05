@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require "yaml"
+require_relative "workflow_actions"
+require_relative "path_confinement"
 
 module Freentonic
   class WorkflowSchema
@@ -15,7 +17,7 @@ module Freentonic
       new(path: path, raw: raw)
     end
 
-    attr_reader :path
+    attr_reader :path, :raw
 
     def initialize(path:, raw:)
       @path = path
@@ -60,11 +62,21 @@ module Freentonic
       @raw["normalize"]
     end
 
-    def build_api_client(credentials)
+    # Builds (and memoizes) the ApiClient subclass from the api_client: YAML
+    # without instantiating it. Exposed so `--lint` can validate the
+    # endpoint / auth-header / ext translation offline — building the class
+    # loads the ext file and runs every define_get/define_post macro, so any
+    # malformed api_client config surfaces here. Returns nil when the
+    # workflow declares no api_client:.
+    def api_client_class
       return nil unless @raw["api_client"]
       require_relative "api_client"
       @_api_client_class ||= build_api_client_class(@raw["api_client"])
-      @_api_client_class.new(credentials)
+    end
+
+    def build_api_client(credentials)
+      klass = api_client_class or return nil
+      klass.new(credentials)
     end
 
     private
@@ -204,6 +216,7 @@ module Freentonic
         raise UserError, "workflow #{@path}: api_client.ext must be a hash with file: and module: keys"
       end
       ext_path = File.expand_path(ext_spec["file"], File.dirname(@path))
+      ext_path = PathConfinement.resolve_within!(ext_path, File.dirname(@path), label: "api_client.ext.file")
       require ext_path
       mod = ext_spec["module"].to_s.split("::").inject(Object) do |ns, name|
         ns.const_get(name, false)
@@ -271,6 +284,12 @@ module Freentonic
     def validate_step!(phase_name, step, index)
       unless step.is_a?(Hash) && step["action"].is_a?(String)
         raise UserError, "workflow #{@path} phase #{phase_name.inspect} step #{index}: must be a hash with an action: key"
+      end
+
+      action = step["action"]
+      unless WorkflowActions.known?(action)
+        raise UserError, "workflow #{@path} phase #{phase_name.inspect} step #{index}: " \
+                         "unknown action #{action.inspect} (known actions: #{WorkflowActions.names.sort.join(", ")})"
       end
 
       validate_when_context!(phase_name, step, index) if step.key?("when_context")
@@ -345,6 +364,21 @@ module Freentonic
           raise UserError, "#{loc} timeout: must be a positive integer"
         end
       end
+
+      validate_required_keys!(phase_name, step, index)
+    end
+
+    # Load-time presence check for every action's required keys, driven by the
+    # WorkflowActions registry. Runs after the per-action `case` so bespoke
+    # validators (which give richer type-level messages) win when they cover a
+    # key; this backstops the ~20 actions that have no bespoke validator.
+    def validate_required_keys!(phase_name, step, index)
+      action  = step["action"]
+      missing = WorkflowActions.required_keys(action).reject { |k| step.key?(k) }
+      return if missing.empty?
+
+      raise UserError, "workflow #{@path} phase #{phase_name.inspect} step #{index}: " \
+                       "#{action} requires #{missing.map { |k| "#{k}:" }.join(", ")}"
     end
 
     MAX_ENTRIES_CAP    = 10_000

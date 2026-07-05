@@ -88,9 +88,9 @@ response.
 | `run_id` | yes | Caller-supplied identifier. Charset `[A-Za-z0-9_\-:.]{1,64}`. All per-run artifacts are namespaced under this id. Must be unique per in-flight invoke (409 on duplicate). |
 | `workflow` | yes | Path to the workflow YAML, **relative to the container's workflows root** (`/home/freentonic/workflows` by default). Path-traversal attempts (`../`), symlinks escaping the root, or references to non-files return `404`. |
 | `profile_key` | no | Identifies which Chrome profile subdirectory to use. Charset `[A-Za-z0-9_.\-]{1,128}`. **Strongly recommend** supplying an explicit, per-tenant value like `"acme__tenant42"`; otherwise the server derives one as `sha256(workflow + "\0" + credentials_fingerprint)[0..15]` which changes when credentials rotate, forcing a fresh login. |
-| `credentials` | yes | Exactly one of `inline` (object of `KEY` → `VALUE`) or `file` (absolute path inside the container — useful when the caller has pre-managed a secrets file as a read-only bind mount). |
+| `credentials` | yes | Exactly one of `inline` (object of `KEY` → `VALUE`) or `file` (a path **relative to the container's secrets root**, `/workspace/secrets` by default — useful when the caller has pre-managed a secrets file as a read-only bind mount). |
 | `credentials.inline` | xor | Object. Keys must match `[A-Za-z_][A-Za-z0-9_.]*`; values cannot contain `\n` or `\0`. |
-| `credentials.file` | xor | Absolute path inside the container. Must exist; should be mode `0600`. |
+| `credentials.file` | xor | Path resolved **under the secrets root** (`/workspace/secrets`). Like `workflow`, it is confined: absolute paths are re-rooted under the secrets root and symlinks escaping it are rejected (`422`). Must exist; should be mode `0600`. |
 | `export` | no | Output configuration. If omitted, you must use a workflow that has a `--dump-raw`-equivalent — in practice always include this. |
 | `export.mode` | yes *(within export)* | One of `http`, `json`, `jsonl`, `csv`. |
 | `export.url` | if `mode=http` | Full receiver URL (include the path — `https://host/api/push`, not just `https://host`). |
@@ -218,7 +218,7 @@ its own `meta:` block.
 | `422` | `"credentials must contain exactly one of 'inline' or 'file'"` | Both provided or neither. |
 | `422` | `"credentials.inline key ... is not a valid identifier"` | Key charset violation. |
 | `422` | `"credentials.inline value for ... contains a forbidden character"` | Value contains `\n` or `\0`. |
-| `422` | `"credentials.file does not exist: ..."` | Bound file not accessible. |
+| `422` | `"credentials.file does not exist: ..."` | Bound file not accessible (or resolves outside the secrets root). |
 | `413` | `"payload too large"` | Body exceeded 1 MiB. |
 | `500` | `"<Exception class>: <message>"` | Unhandled server error. Check container logs. |
 | `503` | `"server shutting down"` | SIGTERM received; no new invokes accepted. |

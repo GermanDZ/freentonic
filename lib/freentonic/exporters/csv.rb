@@ -48,8 +48,26 @@ module Freentonic
         headers = rows.flat_map(&:keys).uniq.sort
         ::CSV.generate do |csv|
           csv << headers
-          rows.each { |row| csv << headers.map { |h| stringify(row[h]) } }
+          rows.each { |row| csv << headers.map { |h| neutralize_formula(stringify(row[h])) } }
         end
+      end
+
+      # Cells whose first char is one of these are interpreted as a formula
+      # by Excel / Google Sheets when the CSV is opened. Merchant names and
+      # transfer memos are attacker-influenceable bank text, so `=HYPERLINK(...)`
+      # / `@SUM(...)` / `+cmd` would execute on open.
+      FORMULA_TRIGGERS = ["=", "+", "-", "@", "\t", "\r"].freeze
+      # Plain numeric literals (including negative amounts) are safe and must
+      # stay numeric — prefixing "-50.00" with a quote would turn every debit
+      # into text the spreadsheet can't sum.
+      NUMERIC_LITERAL = /\A[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?\z/
+
+      # Prefix a leading apostrophe so the spreadsheet treats the cell as text.
+      def neutralize_formula(str)
+        return str if str.empty?
+        return str unless FORMULA_TRIGGERS.include?(str[0])
+        return str if str.match?(NUMERIC_LITERAL)
+        "'#{str}"
       end
 
       def build_row(txn, account)

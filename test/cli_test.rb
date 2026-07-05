@@ -55,6 +55,22 @@ module Freentonic
       assert_includes stderr.string, "missing --workflow"
     end
 
+    def test_lint_requires_workflow
+      stderr = StringIO.new
+      status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--lint"])
+      assert_equal 1, status
+      assert_includes stderr.string, "--lint requires --workflow"
+    end
+
+    def test_lint_runs_linter_and_returns_its_exit_code
+      stdout = StringIO.new
+      status = Cli.new(stdout: stdout, stderr: StringIO.new).run([
+        "--lint", "--workflow", File.expand_path("../examples/example_bank.yml", __dir__)
+      ])
+      assert_equal 0, status
+      assert_includes stdout.string, "lints clean"
+    end
+
     def test_purge_rejects_workflow_flag
       stderr = StringIO.new
       status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--purge", "--workflow", "x.yml"])

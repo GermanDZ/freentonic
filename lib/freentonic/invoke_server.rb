@@ -25,6 +25,12 @@ module Freentonic
     MAX_BODY_BYTES  = 1 * 1024 * 1024 # 1 MiB
     MAX_HEADER_BYTES = 16 * 1024
     READ_TIMEOUT    = 30
+    # Absolute wall-clock budget for reading a whole request (accept → end of
+    # body), independent of READ_TIMEOUT's per-select idle window. Without it,
+    # a client trickling one byte per (READ_TIMEOUT - 1)s resets the idle
+    # window forever and pins a connection slot without ever authenticating —
+    # enough such sockets 503 everything, including /healthz.
+    REQUEST_READ_DEADLINE = 30
 
     # Cap on concurrent connection handler threads. /invoke is serialized by
     # @invoke_mutex anyway; this cap protects us from log-tail clients (or
@@ -316,10 +322,14 @@ module Freentonic
     class BufferedReader
       MAX_LINE_BYTES = 16 * 1024
 
-      def initialize(io, timeout)
-        @io      = io
-        @timeout = timeout
-        @buffer  = String.new.force_encoding(Encoding::BINARY)
+      # `deadline` is a monotonic-clock instant (or nil): once passed, no
+      # further blocking read is allowed, so a slow-drip client can't hold the
+      # connection past REQUEST_READ_DEADLINE no matter how it paces its bytes.
+      def initialize(io, timeout, deadline: nil)
+        @io       = io
+        @timeout  = timeout
+        @deadline = deadline
+        @buffer   = String.new.force_encoding(Encoding::BINARY)
       end
 
       def readline_crlf
@@ -347,7 +357,13 @@ module Freentonic
 
       def fill_buffer
         loop do
-          ready = IO.select([@io], nil, nil, @timeout)
+          wait = @timeout
+          if @deadline
+            remaining = @deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            raise RequestMalformed, "read deadline exceeded" if remaining <= 0
+            wait = remaining if remaining < wait
+          end
+          ready = IO.select([@io], nil, nil, wait)
           raise RequestMalformed, "read timeout" unless ready
           chunk = @io.read_nonblock(4096, exception: false)
           case chunk
@@ -364,7 +380,8 @@ module Freentonic
     end
 
     def read_request(client)
-      reader = BufferedReader.new(client, READ_TIMEOUT)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + REQUEST_READ_DEADLINE
+      reader = BufferedReader.new(client, READ_TIMEOUT, deadline: deadline)
       line = reader.readline_crlf
       return nil if line.nil?
       unless line =~ /\A([A-Z]+) (\S+) HTTP\/1\.[01]\r\n\z/
@@ -485,7 +502,7 @@ module Freentonic
       return [400, { "error" => "invalid or missing JSON body" }] if body.nil?
 
       begin
-        request = InvokeRequest.from_hash(body, workflows_dir: @runner.workflows_dir)
+        request = InvokeRequest.from_hash(body, workflows_dir: @runner.workflows_dir, secrets_dir: @runner.secrets_dir)
       rescue InvokeError => e
         return [e.status_code, { "error" => e.message }]
       end

@@ -50,6 +50,7 @@ module Freentonic
 
     DEFAULT_RUNS_DIR             = "/workspace/runs"
     DEFAULT_WORKFLOWS_DIR        = "/home/freentonic/workflows"
+    DEFAULT_SECRETS_DIR          = "/workspace/secrets" # keep in sync w/ InvokeRequest::DEFAULT_SECRETS_DIR
     DEFAULT_CHROME_PROFILE_ROOT  = File.expand_path("~/.cache/freentonic/chrome")
     DEFAULT_FREENTONIC_CMD       = [RbConfig.ruby, "-I/opt/freentonic/lib", "/opt/freentonic/bin/freentonic"].freeze
     DEFAULT_ARTIFACT_ROOT        = "/workspace"
@@ -63,7 +64,7 @@ module Freentonic
       SecureRandom.hex(32)
     end
 
-    attr_reader :workflows_dir, :runs_dir, :chrome_profile_root, :vnc_password_file
+    attr_reader :workflows_dir, :runs_dir, :chrome_profile_root, :vnc_password_file, :secrets_dir
 
     # Pre-assigned fd number used to hand inline credentials to the child.
     # 0/1/2 are stdin/stdout/stderr; 3 is the first free slot.
@@ -76,6 +77,7 @@ module Freentonic
       freentonic_cmd:         DEFAULT_FREENTONIC_CMD,
       artifact_root:          DEFAULT_ARTIFACT_ROOT,
       vnc_password_file:      DEFAULT_VNC_PASSWORD_FILE,
+      secrets_dir:            DEFAULT_SECRETS_DIR,
       logger:                 nil
     )
       @workflows_dir       = workflows_dir
@@ -84,6 +86,7 @@ module Freentonic
       @freentonic_cmd      = Array(freentonic_cmd).dup.freeze
       @artifact_root       = artifact_root
       @vnc_password_file   = vnc_password_file
+      @secrets_dir         = secrets_dir
       @logger              = logger
     end
 
