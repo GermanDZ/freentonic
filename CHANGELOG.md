@@ -10,6 +10,29 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.14.0 — Extract-plan `lookup:` (dynamic-key map read)
+
+The one idiom the Ask 5 verbs turned out not to cover, and the last thing
+standing between ING and a deleted `extractor.rb`: a **dynamic-key map
+read**. `index_by:` builds a `Hash`, but nothing read it back — `select:`'s
+`path:` is a static string and a `when:`/`skip_when:` gate compares a
+binding against a *literal*, never against another binding. So a plan could
+iterate legacy products (carrying `type` for kind routing but no v2 UUID)
+or modern products (carrying identifiers but no `type`) — never join them.
+Additive; no `version:` bump.
+
+- **`lookup: { from:, key:, default? }`** — read a bound map with a
+  runtime-resolved key. `from:` names a `Hash` (typically from `index_by:`);
+  `key:` is a value template (`{product.uuid}`) resolved against the current
+  scope, so inside a `for_each` the same step reads a different entry each
+  iteration. The declarative form of `uuid_map[product["uuid"]]`. A missing
+  key — or an unbound / non-`Hash` `from:` — binds `default:` when given,
+  else `nil`, so a downstream `skip_when:`/`warn:` routes on the absent
+  value. Read-only: it digs an already-built binding, computing nothing
+  (same filter/dig/index altitude as `select:`).
+- Statically validated at load + `--lint` (`from:` bound by an earlier
+  step, `key:` template refs bound, non-empty `as:`).
+
 ## 0.13.0 — Declarative extract plans + session elevation
 
 Providers can now express extraction and PSD2 session elevation entirely

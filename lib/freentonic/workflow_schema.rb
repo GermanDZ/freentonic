@@ -339,7 +339,7 @@ module Freentonic
     end
 
     PLAN_STEP_VERBS =
-      %w[fetch select for_each let concat dedup_by index_by note warn abort].freeze
+      %w[fetch select for_each let concat dedup_by index_by lookup note warn abort].freeze
 
     # Bindings the interpreter pre-seeds before the first step (see
     # ExtractPlan::PlanExtractor#call / ExtractPlan.seed_scope). Static
@@ -516,6 +516,7 @@ module Freentonic
       when "concat"    then validate_plan_concat!(step, loc, bound)
       when "dedup_by"  then validate_plan_dedup_by!(step, loc, bound)
       when "index_by"  then validate_plan_index_by!(step, loc, bound)
+      when "lookup"    then validate_plan_lookup!(step, loc, bound)
       when "note", "warn", "abort" then validate_plan_message!(step, verbs.first, loc, bound)
       when "skip_when" then validate_plan_when!(step["skip_when"], "#{loc}.skip_when", bound)
       when "yield"     then validate_plan_yield!(step, loc, bound)
@@ -551,6 +552,26 @@ module Freentonic
       if spec.key?("where") && !spec["where"].is_a?(Hash)
         raise UserError, "#{loc}.where: must be a hash of field => value matchers"
       end
+    end
+
+    # lookup: { from:, key:, default? } — read a bound map with a
+    # runtime-resolved key. from: must be a name bound by an earlier step (a
+    # map, typically from index_by:); key: is a value template whose
+    # whole-token refs must be bound. Binds `as:`.
+    def validate_plan_lookup!(step, loc, bound)
+      spec = step["lookup"]
+      unless spec.is_a?(Hash) && spec["from"] && spec.key?("key")
+        raise UserError, "#{loc}.lookup: must be a hash with from: and key:"
+      end
+      unless bound.include?(spec["from"].to_s)
+        raise UserError, "#{loc}.lookup.from: #{spec["from"].inspect} is not bound by an earlier step " \
+                         "(bound: #{bound.join(", ")})"
+      end
+      validate_plan_refs!(spec["key"], "#{loc}.lookup.key", bound)
+      unless step["as"].is_a?(String) && !step["as"].empty?
+        raise UserError, "#{loc}.lookup: requires a non-empty as: to bind the result"
+      end
+      bound << step["as"]
     end
 
     # note:/warn:/abort: <message> — an operator breadcrumb; abort: raises.

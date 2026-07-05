@@ -509,5 +509,81 @@ module Freentonic
       YAML
       assert_includes err, "non-empty"
     end
+
+    # ── Ask 6: lookup (dynamic-key map read) ────────────────────────────
+
+    def test_lookup_valid_loads
+      assert_nil load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - index_by: { from: wallet, key: k, value: v }
+                as: uuid_map
+              - for_each: { source: wallet }
+                as_item: product
+                as: joined
+                do:
+                  - lookup: { from: uuid_map, key: "{product.uuid}" }
+                    as: v2_uuid
+                  - skip_when: { v2_uuid: { absent: true } }
+                  - yield: { uuid: "{v2_uuid}" }
+            output: { joined: "{joined}" }
+      YAML
+    end
+
+    def test_lookup_from_must_be_bound
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - lookup: { from: nope, key: k }
+                as: v
+            output: {}
+      YAML
+      assert_includes err, "not bound"
+    end
+
+    def test_lookup_requires_from_and_key
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - lookup: { from: wallet }
+                as: v
+            output: {}
+      YAML
+      assert_includes err, "from: and key:"
+    end
+
+    def test_lookup_requires_as
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - lookup: { from: wallet, key: k }
+            output: {}
+      YAML
+      assert_includes err, "as:"
+    end
+
+    def test_lookup_key_unbound_ref_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - lookup: { from: wallet, key: "{nope}" }
+                as: v
+            output: {}
+      YAML
+      assert_includes err, "unbound name"
+    end
   end
 end

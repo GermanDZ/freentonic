@@ -22,9 +22,10 @@ Use `plan:` when the extractor would only:
 
 A plan can also shape the fetched data: coalesce a value from several
 sources (`let:` + `coalesce:`), merge arrays (`concat:`), dedupe by a key
-or key-fallback chain (`dedup_by:`), and gate a step on a numeric or
+or key-fallback chain (`dedup_by:`), build a lookup map (`index_by:`) and
+read it back with a runtime key (`lookup:`), and gate a step on a numeric or
 presence condition (`when:`). That covers a conditional extended-history
-fetch and a cross-endpoint merge/dedup without any Ruby.
+fetch, a cross-endpoint merge/dedup, and a two-list key join without any Ruby.
 
 Keep the `{ruby:, class:}` escape hatch when the extractor needs anything
 imperative — a plan **cannot** express these by design:
@@ -262,6 +263,31 @@ create a `nil => nil` mapping).
   as: uuid_map
 ```
 
+**`lookup: { from:, key:, default? }`** — the inverse of `index_by:`: read
+a bound map with a *runtime-resolved* key. `from:` names a `Hash` built by
+an earlier step; `key:` is a value template (`{product.uuid}`) resolved
+against the current scope, so inside a `for_each` the same step reads a
+different entry each iteration. Binds via `as:`. A missing key — or an
+unbound / non-`Hash` `from:` — binds `default:` when given, else `nil`, so a
+downstream `skip_when:`/`warn:` can route on the absent value. This is the
+one idiom that joins two lists keyed differently — e.g. legacy products
+(carrying `type`) against modern products (carrying identifiers). It only
+digs an already-built binding; it computes nothing.
+
+```yaml
+# join each legacy product to its v2 UUID via the map index_by: built
+- for_each: { source: products }
+  as_item: product
+  do:
+    - lookup: { from: uuid_map, key: "{product.uuid}" }
+      as: v2_uuid
+    - warn: "no v2 UUID for {product.uuid}; skipping"
+      when: { v2_uuid: { absent: true } }
+    - skip_when: { v2_uuid: { absent: true } }
+    - yield: { uuid: "{v2_uuid}", alias: "{product.alias}" }
+  as: joined
+```
+
 **`note: <msg>` / `warn: <msg>` / `abort: <msg>`** — emit an operator
 breadcrumb: `note` to stdout, `warn` to stderr, `abort` raises a
 `UserError`. The message embeds `{tokens}` (resolved against the current
@@ -324,8 +350,9 @@ load) verifies, with no Chrome and no network:
 - exactly one of `plan:` / (`ruby:` + `class:`),
 - every `fetch:` names a declared endpoint,
 - every `{token}` root and every `select.from` / `for_each.source` /
-  `concat:` name / `dedup_by.from` / `when:` key references a name bound
-  earlier (loop variables scoped to their `do:`),
+  `concat:` name / `dedup_by.from` / `index_by.from` / `lookup.from` /
+  `when:` key references a name bound earlier (loop variables scoped to
+  their `do:`),
 - step shapes are well-formed and every verb is known,
 - each `for_each` contains a `yield:`,
 - each `let:` declares exactly one of `value:` / `coalesce:` / `days_ago:`,
