@@ -6,8 +6,9 @@ module Freentonic
     # producing the raw provider payload the normalizer consumes.
     #
     # The verb set is fixed and closed — fetch / select / for_each (with
-    # its nested yield), plus the Phase-2 data-shaping verbs let / concat /
-    # dedup_by — dispatched by a `case` on the step's key. There is no
+    # its nested yield), the Phase-2 data-shaping verbs let / concat /
+    # dedup_by, and the lookup/routing/guard verbs index_by / lookup /
+    # note / warn / abort — dispatched by a `case` on the step's key. There is no
     # `send` off a YAML-supplied method name anywhere except the endpoint
     # call, and that name is checked against the workflow's declared
     # endpoint list first (see #invoke). That whitelist is the security
@@ -54,6 +55,7 @@ module Freentonic
         elsif step.key?("concat")    then do_concat(step, scope)
         elsif step.key?("dedup_by")  then do_dedup_by(step, scope)
         elsif step.key?("index_by")  then do_index_by(step, scope)
+        elsif step.key?("lookup")    then do_lookup(step, scope)
         elsif step.key?("note")      then do_message(step, "note", scope)
         elsif step.key?("warn")      then do_message(step, "warn", scope)
         elsif step.key?("abort")     then do_message(step, "abort", scope)
@@ -281,6 +283,25 @@ module Freentonic
         pick = spec["pick"]
         return source unless pick
         source.is_a?(Hash) ? source[pick] : nil
+      end
+
+      # lookup: { from:, key:, default: } — read a bound map with a
+      # runtime-resolved key. This is index_by:'s inverse — the dynamic-key
+      # map read `uuid_map[product["uuid"]]` — the one idiom joining two
+      # product lists needs. `from:` names a Hash built by an earlier step
+      # (typically index_by:); `key:` is a value template (`{product.uuid}`)
+      # resolved per iteration, so the same plan step reads a different entry
+      # each loop. A missing key — or an unbound / non-Hash `from:` — binds
+      # `default:` when given, else nil, so a downstream `skip_when:`/`warn:`
+      # can route on the absent value. Read-only: it digs an already-built
+      # binding, computing nothing (same filter/dig/index altitude as select).
+      def do_lookup(step, scope)
+        spec  = step["lookup"]
+        map   = scope.get(spec["from"])
+        key   = scope.resolve(spec["key"])
+        value = map.is_a?(Hash) && !key.nil? ? map[key] : nil
+        value = spec["default"] if value.nil? && spec.key?("default")
+        scope.bind(step["as"], value)
       end
 
       # note:/warn:/abort: — emit an operator breadcrumb (embedded {token}

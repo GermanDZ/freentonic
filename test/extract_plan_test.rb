@@ -690,6 +690,76 @@ module Freentonic
         assert_equal({ "w" => { "fallback" => true } }, result)
         assert_includes err, "optional fetch failed"
       end
+
+      # ── Ask 6: lookup (dynamic-key map read) ─────────────────────────────
+
+      def test_lookup_reads_map_with_runtime_key
+        plan = {
+          "steps" => [
+            { "let" => "uuid_map", "value" => { "v1a" => "uuidA", "v1b" => "uuidB" } },
+            { "let" => "key", "value" => "v1b" },
+            { "lookup" => { "from" => "uuid_map", "key" => "{key}" }, "as" => "hit" }
+          ],
+          "output" => { "hit" => "{hit}" }
+        }
+        assert_equal({ "hit" => "uuidB" }, run_plan(plan, client: FakeClient.new(responses: {})))
+      end
+
+      def test_lookup_missing_key_binds_nil_then_default
+        plan = {
+          "steps" => [
+            { "let" => "uuid_map", "value" => { "known" => "u1" } },
+            { "lookup" => { "from" => "uuid_map", "key" => "absent" }, "as" => "miss" },
+            { "lookup" => { "from" => "uuid_map", "key" => "absent", "default" => "fallback" }, "as" => "defaulted" }
+          ],
+          "output" => { "miss" => "{miss}", "defaulted" => "{defaulted}" }
+        }
+        assert_equal({ "miss" => nil, "defaulted" => "fallback" },
+                     run_plan(plan, client: FakeClient.new(responses: {})))
+      end
+
+      def test_lookup_unbound_or_non_hash_from_binds_nil
+        # `from:` names a when-skipped (unbound) fetch's as: — a nil map.
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_wallet", "as" => "wallet",
+              "when" => { "lookback_days" => { "gt" => 9999 } } }, # skipped → unbound
+            { "lookup" => { "from" => "wallet", "key" => "anything" }, "as" => "v" }
+          ],
+          "output" => { "v" => "{v}" }
+        }
+        assert_equal({ "v" => nil }, run_plan(plan, client: FakeClient.new(responses: {})))
+      end
+
+      # The ING join Ask 6 unlocks: per-product lookup of a v2 UUID, warn +
+      # skip on absent, yield the joined row.
+      def test_lookup_joins_two_lists_per_iteration_with_skip
+        plan = {
+          "steps" => [
+            { "let" => "uuid_map", "value" => { "L1" => "u1", "L3" => "u3" } },
+            { "let" => "products", "value" => [
+              { "uuid" => "L1", "alias" => "checking" },
+              { "uuid" => "L2", "alias" => "orphan" },   # no v2 UUID → warn + skip
+              { "uuid" => "L3", "alias" => "savings" }
+            ] },
+            {
+              "for_each" => { "source" => "products" },
+              "as_item" => "product", "as" => "joined",
+              "do" => [
+                { "lookup" => { "from" => "uuid_map", "key" => "{product.uuid}" }, "as" => "v2_uuid" },
+                { "warn" => "no v2 UUID for {product.alias}", "when" => { "v2_uuid" => { "absent" => true } } },
+                { "skip_when" => { "v2_uuid" => { "absent" => true } } },
+                { "yield" => { "uuid" => "{v2_uuid}", "alias" => "{product.alias}" } }
+              ]
+            }
+          ],
+          "output" => { "joined" => "{joined}" }
+        }
+        result, _out, err = run_plan_io(plan, client: FakeClient.new(responses: {}))
+        assert_equal([{ "uuid" => "u1", "alias" => "checking" },
+                      { "uuid" => "u3", "alias" => "savings" }], result["joined"])
+        assert_includes err, "no v2 UUID for orphan"
+      end
     end
   end
 end

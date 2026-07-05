@@ -432,14 +432,15 @@ The declarative extractor grammar (`lib/freentonic/extract_plan/`) is a
 closed verb set — `fetch` / `select` / `for_each` / `yield` (Phase 1);
 `let` / `concat` / `dedup_by` + the `when:` gate (Phase 2); `index_by`,
 the `note` / `warn` / `abort` message verbs, `skip_when` (for_each only),
-and fetch `on_error:` (Ask 5) — dispatched by `Interpreter#dispatch` (the
-`elevate:` phase subclasses it and adds `await_operator_approval` /
-`rebind_credential`). A new verb is justified only when a real provider
-needs it: Phase 1 took Revolut to zero Ruby, Phase 2 did the same for
-Fintonic and Unicaja, and Ask 5 covers ING's remaining orchestration
-(index-a-list-to-a-map, skip-with-warn routing, fatal-fetch guard) — so
-even ING is now a candidate for zero extractor Ruby (the `{ruby:, class:}`
-escape hatch stays as a general capability). Resist growing `when:` into a
+and fetch `on_error:` (Ask 5); `lookup` (Ask 6 — dynamic-key map read) —
+dispatched by `Interpreter#dispatch` (the `elevate:` phase subclasses it
+and adds `await_operator_approval` / `rebind_credential`). A new verb is
+justified only when a real provider needs it: Phase 1 took Revolut to zero
+Ruby, Phase 2 did the same for Fintonic and Unicaja, and Asks 5–6 cover
+ING's remaining orchestration (index-a-list-to-a-map, read-it-back-by-key,
+skip-with-warn routing, fatal-fetch guard) — so even ING is now a candidate
+for zero extractor Ruby (the `{ruby:, class:}` escape hatch stays as a
+general capability). Resist growing `when:` into a
 string-predicate expression language, and keep the "no computing verbs"
 guardrail: plan verbs filter/dig/index/guard; arithmetic or string surgery
 beyond `{templates}` belongs in the normalizer.
