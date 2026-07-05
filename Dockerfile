@@ -29,10 +29,15 @@ FROM ruby:3.2-slim-bookworm
 # build (see docs — build to a throwaway tag and run a `--dump-dom
 # about:blank` smoke test before promoting).
 #
-# The exact version lives only in the snapshot once the live security repo
-# rolls forward, so we add a snapshot apt source for the install, request
-# the exact version (apt also pulls the strict-versioned chromium-common
-# from the same snapshot), hold it, then drop the snapshot source again.
+# The pinned version lives only in the snapshot once the live security
+# repo rolls forward. `chromium` strictly depends on
+# `chromium-common (= <version>)`, and apt will NOT downgrade
+# chromium-common from the live repo's newer build to satisfy that — so
+# pinning `chromium=` alone fails with "held broken packages". Instead we
+# add the snapshot source AND an apt-preferences pin over the whole
+# `chromium*` group at priority 1001 (force, allows downgrade), so every
+# chromium sub-package resolves to the snapshot version consistently. Then
+# hold + drop the snapshot source again.
 ARG CHROMIUM_VERSION=148.0.7778.96-1~deb12u1
 # snapshot.debian.org state carrying that chromium in bookworm-security.
 ARG CHROMIUM_SNAPSHOT=20260507T164458Z
@@ -42,9 +47,11 @@ ARG CHROMIUM_SNAPSHOT=20260507T164458Z
 # per-invoke children, python3 so websockify runs (pure-python).
 RUN echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ bookworm-security main" \
       > /etc/apt/sources.list.d/snapshot-chromium.list \
+  && printf 'Package: chromium*\nPin: version %s\nPin-Priority: 1001\n' "${CHROMIUM_VERSION}" \
+      > /etc/apt/preferences.d/chromium-pin \
   && apt-get -o Acquire::Check-Valid-Until=false update \
   && apt-get install -y --no-install-recommends \
-    chromium="${CHROMIUM_VERSION}" \
+    chromium \
     procps \
     fonts-liberation \
     fonts-dejavu-core \
@@ -53,8 +60,8 @@ RUN echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-
     x11vnc \
     tini \
     python3 \
-  && apt-mark hold chromium \
-  && rm -f /etc/apt/sources.list.d/snapshot-chromium.list \
+  && apt-mark hold chromium chromium-common \
+  && rm -f /etc/apt/sources.list.d/snapshot-chromium.list /etc/apt/preferences.d/chromium-pin \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for defense-in-depth.
