@@ -12,19 +12,6 @@ one-release dual-accept window before `version: 2`) is spelled out in
 
 ## Unreleased
 
-### Fixed
-
-- **http exporter allows cleartext + token to private/loopback receivers.**
-  The exporter refused to send a bearer token over cleartext `http://`
-  unconditionally, which blocked a legitimate topology: a same-host
-  container-network push (`http://kamal-proxy/push/…`) with TLS terminated
-  at an upstream edge proxy. It now permits cleartext + token when the
-  receiver host resolves **entirely** to loopback/private/link-local
-  addresses (the token can't leave the host's trust boundary), still warns,
-  and continues to refuse for any public/routable host — failing closed on
-  an unresolvable host. Matches the existing "localhost receivers" intent
-  for the no-token case.
-
 ### Structured run events + minimal observability
 
 A structured channel for run telemetry, plus request-level and aggregate
@@ -73,6 +60,16 @@ longer sink a run outright.
 
 ### Fixed
 
+- **http exporter allows cleartext + token to private/loopback receivers.**
+  The exporter refused to send a bearer token over cleartext `http://`
+  unconditionally, which blocked a legitimate topology: a same-host
+  container-network push (`http://kamal-proxy/push/…`) with TLS terminated
+  at an upstream edge proxy. It now permits cleartext + token when the
+  receiver host resolves **entirely** to loopback/private/link-local
+  addresses (the token can't leave the host's trust boundary), still warns,
+  and continues to refuse for any public/routable host — failing closed on
+  an unresolvable host. Matches the existing "localhost receivers" intent
+  for the no-token case.
 - **Chromium is pinned to a known-good version (`148.0.7778.96-1~deb12u1`).**
   The Dockerfile installed `chromium` unpinned, so each image rebuild
   floated the browser to whatever bookworm-security currently shipped. A
