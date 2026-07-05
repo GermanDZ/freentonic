@@ -181,7 +181,7 @@ Everything else below is optional.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FREENTONIC_INVOKE_TOKEN` | *(wrapper: required; raw `docker run`: unset → OPEN mode with warning)* | Bearer token required on `/invoke`, `/status`, `/cancel/:id`, `/profiles/prune`, `/runs/:id/log`. In OPEN mode the server accepts every request without auth — never do this in production. |
+| `FREENTONIC_INVOKE_TOKEN` | *(wrapper: required; raw `docker run`: unset → OPEN mode with warning)* | Bearer token required on `/invoke`, `/status`, `/runs/:id`, `/cancel/:id`, `/profiles/prune`, `/runs/:id/log`. In OPEN mode the server accepts every request without auth — never do this in production. |
 | `FREENTONIC_LISTEN_ADDR` | `0.0.0.0` inside the container | Interface to bind. Override to `127.0.0.1` only if you're running freentonic outside a container. |
 | `FREENTONIC_LISTEN_PORT` | `7878` | Port inside the container. |
 | `FREENTONIC_WORKFLOWS_DIR` | `/home/freentonic/workflows` | Workflow root inside the container. The `/invoke` request's `workflow` field is resolved against this path. |
@@ -237,9 +237,10 @@ docker stop -t 30 freentonic-server
 ```
 
 A run that is mid-2FA (blocked on an operator prompt) will not finish
-within the drain window; it is terminated and its `/invoke` returns an
-error. Draining only rescues runs that can complete their teardown in
-time — it is not a promise to let an arbitrarily long login finish.
+within the drain window; it is terminated and finalizes as an error (via
+`GET /runs/{run_id}`), and anything still queued behind it is aborted.
+Draining only rescues runs that can complete their teardown in time — it
+is not a promise to let an arbitrarily long login finish.
 
 ---
 

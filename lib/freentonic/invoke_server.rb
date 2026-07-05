@@ -40,6 +40,21 @@ module Freentonic
 
     CANCEL_GRACE_SECONDS = 10
 
+    # /invoke is async: it validates + enqueues, then returns 202 immediately.
+    # A single worker thread pops the queue and runs one invoke at a time under
+    # @invoke_mutex (v1's strict serialization is preserved). Two bounds keep the
+    # registry from growing without limit:
+    #   MAX_QUEUED_RUNS   — accepted-but-not-yet-finished runs; over it, 503.
+    #   MAX_RETAINED_RUNS — finished runs kept in memory so GET /runs/:id can
+    #                       still report a result after completion. The oldest
+    #                       are evicted FIFO; a caller that misses the window
+    #                       falls back to reading artifacts off the runs dir.
+    MAX_QUEUED_RUNS   = 128
+    MAX_RETAINED_RUNS = 256
+
+    # Pushed onto @run_queue by drain to make the worker exit its pop loop.
+    WORKER_SHUTDOWN = :__worker_shutdown__
+
     STATUS_REASONS = {
       200 => "OK",
       202 => "Accepted",
@@ -76,17 +91,30 @@ module Freentonic
       listen_addr: DEFAULT_ADDR,
       listen_port: DEFAULT_PORT,
       logger: $stdout,
-      max_concurrent_connections: MAX_CONCURRENT_CONNECTIONS
+      max_concurrent_connections: MAX_CONCURRENT_CONNECTIONS,
+      max_queued_runs:   MAX_QUEUED_RUNS,
+      max_retained_runs: MAX_RETAINED_RUNS
     )
       @runner          = runner
       @invoke_token    = (invoke_token && !invoke_token.empty?) ? invoke_token : nil
       @listen_addr     = listen_addr
       @listen_port     = listen_port
       @logger          = logger
+      @max_queued_runs   = max_queued_runs
+      @max_retained_runs = max_retained_runs
 
       @invoke_mutex        = Mutex.new
       @in_flight_mutex     = Mutex.new
       @in_flight           = {}
+      # Run-lifecycle registry, guarded by @runs_mutex. Outlives @in_flight
+      # (which only tracks queued+running work) so GET /runs/:id can report a
+      # result after the run leaves the in-flight set. @completed_order is the
+      # FIFO eviction index over terminal records.
+      @runs_mutex          = Mutex.new
+      @runs                = {}
+      @completed_order     = []
+      @run_queue           = Thread::Queue.new
+      @worker              = nil
       @shutting_down       = false
       @server_socket       = nil
       @connection_mutex    = Mutex.new
@@ -99,6 +127,7 @@ module Freentonic
 
     def start
       @server_socket = TCPServer.new(@listen_addr, @listen_port)
+      @worker        = Thread.new { run_worker }
       log "listening on http://#{@listen_addr}:#{@listen_port}" \
           "#{@invoke_token ? " (auth: bearer token)" : " (auth: OPEN — no token set)"}"
 
@@ -161,12 +190,26 @@ module Freentonic
       terminate_in_flight_groups
 
       deadline = Time.now + SHUTDOWN_DRAIN_SECONDS
+
+      # Wake the worker so it stops popping the queue and exits. execute_run
+      # already refuses to start a fresh child once @shutting_down is set, so
+      # anything still queued behind the running invoke is aborted, not run.
+      if @worker
+        @run_queue << WORKER_SHUTDOWN
+        remaining = deadline - Time.now
+        @worker.join(remaining) if remaining.positive?
+      end
+
       threads = @connection_mutex.synchronize { @handler_threads.dup }
       threads.each do |t|
         remaining = deadline - Time.now
         break if remaining <= 0
         t.join(remaining)
       end
+
+      # Any run still queued (worker abandoned mid-drain, or never got to it)
+      # is reported as aborted rather than left dangling in "queued" forever.
+      abort_pending_runs("server shutting down")
     end
 
     def terminate_in_flight_groups
@@ -451,6 +494,7 @@ module Freentonic
     def dispatch(request)
       method = request.method
       path   = request.path.split("?", 2).first
+      run_status_match = path.match(%r{\A/runs/([^/]+)\z})
 
       case
       when method == "GET" && path == "/healthz"
@@ -461,6 +505,9 @@ module Freentonic
         handle_invoke(request)
       when method == "POST" && path == "/profiles/prune"
         handle_prune_profiles(request)
+      when run_status_match
+        return method_not_allowed unless method == "GET"
+        handle_run_status(request, run_status_match[1])
       when path.start_with?("/cancel/")
         return method_not_allowed unless method == "POST"
         handle_cancel(request, path[("/cancel/".length)..])
@@ -494,6 +541,71 @@ module Freentonic
       [200, { "in_flight" => entries }]
     end
 
+    # GET /runs/{run_id} — lifecycle + result of one async invoke.
+    #
+    #   queued   → 200 {status, submitted_at}
+    #   running  → 200 {status, started_at, elapsed_ms}
+    #   done     → 200 {status, exit_code, error_kind, duration_ms, artifacts,
+    #                   log_path, warnings, finished_at}
+    #   error    → 200 {status, error, finished_at}   (server/containment failure)
+    #   cancelled→ 200 {status, finished_at}
+    #   unknown  → 404 (never submitted, or evicted past MAX_RETAINED_RUNS)
+    #
+    # 200 means "here is the run's state", not "the run succeeded" — a non-zero
+    # exit_code is still reported under a 200 with status="done".
+    def handle_run_status(req, run_id)
+      return unauthorized unless authenticated?(req)
+      return [404, { "error" => "run_id not found" }] unless run_id =~ RUN_ID_PATTERN
+
+      snapshot = @runs_mutex.synchronize do
+        record = @runs[run_id]
+        next nil unless record
+        {
+          status:       record[:status],
+          submitted_at: record[:submitted_at],
+          started_at:   record[:started_at],
+          finished_at:  record[:finished_at],
+          result:       record[:result],
+          error:        record[:error]
+        }
+      end
+      return [404, { "error" => "run_id not found" }] unless snapshot
+
+      body = { "run_id" => run_id, "status" => snapshot[:status] }
+      case snapshot[:status]
+      when "queued"
+        body["submitted_at"] = snapshot[:submitted_at].iso8601
+      when "running"
+        body["started_at"] = snapshot[:started_at].iso8601
+        body["elapsed_ms"] = ((Time.now - snapshot[:started_at]) * 1000).to_i
+      when "done"
+        r = snapshot[:result]
+        body.merge!(
+          "exit_code"   => r.exit_code,
+          "error_kind"  => r.error_kind,
+          "duration_ms" => r.duration_ms,
+          "artifacts"   => r.artifacts.map(&:to_h),
+          "log_path"    => r.log_path,
+          "warnings"    => r.warnings,
+          "finished_at" => snapshot[:finished_at].iso8601
+        )
+      when "error"
+        body["error"]       = snapshot[:error]
+        body["finished_at"] = snapshot[:finished_at].iso8601
+      when "cancelled"
+        body["finished_at"] = snapshot[:finished_at].iso8601
+      end
+
+      [200, body]
+    end
+
+    # POST /invoke — accept a run for asynchronous execution.
+    #
+    # Validation is synchronous (charset/containment/export errors still come
+    # back as 4xx on the POST itself). A well-formed request is registered,
+    # enqueued for the worker, and answered with 202 + {run_id}. The caller
+    # polls GET /runs/:id for progress and the eventual result. A client that
+    # disconnects after the 202 does NOT cancel the run — use POST /cancel/:id.
     def handle_invoke(req)
       return [503, { "error" => "server shutting down" }] if @shutting_down
       return unauthorized unless authenticated?(req)
@@ -507,12 +619,20 @@ module Freentonic
         return [e.status_code, { "error" => e.message }]
       end
 
+      # Bound the accepted-but-unfinished backlog. Without this a token holder
+      # could fire thousands of /invoke calls and pin unbounded memory (each
+      # queued record holds the request, including inline credentials).
+      if current_in_flight_count >= @max_queued_runs
+        return [503, { "error" => "run queue full; retry later", "retry_after" => 5 }]
+      end
+
+      submitted_at = Time.now
       registered = @in_flight_mutex.synchronize do
         next false if @in_flight.key?(request.run_id)
         @in_flight[request.run_id] = {
           run_id:      request.run_id,
           profile_key: request.profile_key,
-          started_at:  Time.now,
+          started_at:  submitted_at,
           pid:         nil,
           pgid:        nil
         }
@@ -520,14 +640,73 @@ module Freentonic
       end
       return [409, { "error" => "run_id already in flight" }] unless registered
 
+      @runs_mutex.synchronize do
+        # Reusing a run_id whose prior record is still retained: drop the stale
+        # terminal record so the fresh run reports its own state.
+        forget_run(request.run_id)
+        @runs[request.run_id] = {
+          run_id:       request.run_id,
+          profile_key:  request.profile_key,
+          status:       "queued",
+          request:      request,
+          submitted_at: submitted_at,
+          started_at:   nil,
+          finished_at:  nil,
+          result:       nil,
+          error:        nil
+        }
+      end
+      @run_queue << request.run_id
+
+      [202, {
+        "run_id" => request.run_id,
+        "status" => "queued"
+      }]
+    end
+
+    # Single worker: pops accepted run_ids and executes them one at a time.
+    # Serialization via @invoke_mutex is preserved end-to-end (prune still
+    # queues behind a live invoke on the same mutex).
+    def run_worker
+      loop do
+        run_id = @run_queue.pop
+        break if run_id.equal?(WORKER_SHUTDOWN)
+        begin
+          execute_run(run_id)
+        rescue StandardError => e
+          log_exception("worker", e)
+          finalize_run(run_id, nil, InvokeError.new(:server_error, "#{e.class}: #{e.message}"))
+        end
+      end
+    end
+
+    def execute_run(run_id)
+      record  = @runs_mutex.synchronize { @runs[run_id] }
+      return unless record                      # forgotten (reuse) before dequeue
+      return unless record[:status] == "queued" # already cancelled while queued
+
+      # Don't start a fresh bank login during shutdown; abort the queued run.
+      if @shutting_down
+        finalize_run(run_id, nil, InvokeError.new(:unavailable, "server shutting down"))
+        return
+      end
+
+      request = record[:request]
+      @runs_mutex.synchronize do
+        # Re-check under the lock: a cancel could have landed between the read
+        # above and here.
+        return unless record[:status] == "queued"
+        record[:status]     = "running"
+        record[:started_at] = Time.now
+      end
+
       result = nil
       error  = nil
-
       @invoke_mutex.synchronize do
         begin
           result = @runner.run(request) do |pid, pgid|
             @in_flight_mutex.synchronize do
-              entry = @in_flight[request.run_id]
+              entry = @in_flight[run_id]
               if entry
                 entry[:pid]  = pid
                 entry[:pgid] = pgid
@@ -540,21 +719,44 @@ module Freentonic
           log_exception("invoke", e)
           error = InvokeError.new(:server_error, "#{e.class}: #{e.message}")
         ensure
-          @in_flight_mutex.synchronize { @in_flight.delete(request.run_id) }
+          @in_flight_mutex.synchronize { @in_flight.delete(run_id) }
         end
       end
 
-      return [error.status_code, { "error" => error.message }] if error
+      finalize_run(run_id, result, error)
+    end
 
-      [200, {
-        "run_id"      => result.run_id,
-        "exit_code"   => result.exit_code,
-        "error_kind"  => result.error_kind,
-        "duration_ms" => result.duration_ms,
-        "artifacts"   => result.artifacts.map(&:to_h),
-        "log_path"    => result.log_path,
-        "warnings"    => result.warnings
-      }]
+    # Move a run to a terminal state and record its outcome. Drops the request
+    # reference (which may hold inline credentials) so nothing sensitive lingers
+    # in a retained record, then evicts the oldest terminal records past the cap.
+    def finalize_run(run_id, result, error)
+      @runs_mutex.synchronize do
+        record = @runs[run_id]
+        return unless record
+        return if terminal_status?(record[:status]) # cancel already finalized it
+
+        record[:request]     = nil
+        record[:finished_at] = Time.now
+        if error
+          record[:status] = "error"
+          record[:error]  = error.message
+        else
+          record[:status] = "done"
+          record[:result] = result
+        end
+
+        retain_terminal(run_id)
+      end
+    end
+
+    # Append a just-finished run to the eviction index and drop the oldest
+    # terminal records past the retention cap. Caller must hold @runs_mutex.
+    def retain_terminal(run_id)
+      @completed_order << run_id
+      while @completed_order.size > @max_retained_runs
+        oldest = @completed_order.shift
+        @runs.delete(oldest)
+      end
     end
 
     def handle_log(client, req, run_id)
@@ -975,6 +1177,32 @@ module Freentonic
       return [400, { "error" => "missing run_id in path" }] if run_id.empty?
 
       entry = @in_flight_mutex.synchronize { @in_flight[run_id]&.dup }
+      return [404, { "error" => "run_id not in flight or not yet spawned" }] unless entry
+
+      # Cancel-while-queued: atomically flip the record to "cancelled" iff it
+      # hasn't started. The worker re-checks status=="queued" under @runs_mutex
+      # before spawning, so whichever side wins this lock is authoritative — no
+      # child is ever spawned for a run cancelled here.
+      cancelled_while_queued = @runs_mutex.synchronize do
+        record = @runs[run_id]
+        if record && record[:status] == "queued"
+          record[:status]      = "cancelled"
+          record[:request]     = nil
+          record[:finished_at] = Time.now
+          retain_terminal(run_id)
+          true
+        else
+          false
+        end
+      end
+      if cancelled_while_queued
+        @in_flight_mutex.synchronize { @in_flight.delete(run_id) }
+        return [202, { "accepted" => true, "run_id" => run_id }]
+      end
+
+      # Running (or in the brief pre-spawn window). Re-read the pgid: it may have
+      # been registered between the snapshot above and now.
+      entry = @in_flight_mutex.synchronize { @in_flight[run_id]&.dup }
       return [404, { "error" => "run_id not in flight or not yet spawned" }] unless entry && entry[:pgid]
 
       begin
@@ -1042,6 +1270,32 @@ module Freentonic
 
     def in_flight?(run_id)
       @in_flight_mutex.synchronize { @in_flight.key?(run_id) }
+    end
+
+    TERMINAL_STATUSES = %w[done error cancelled].freeze
+
+    def terminal_status?(status)
+      TERMINAL_STATUSES.include?(status)
+    end
+
+    # Drop a run record entirely (used when a run_id is reused). Caller must
+    # hold @runs_mutex.
+    def forget_run(run_id)
+      return unless @runs.key?(run_id)
+      @runs.delete(run_id)
+      @completed_order.delete(run_id)
+    end
+
+    # Mark every still-queued run as errored. Called during shutdown drain, after
+    # the worker has been asked to stop, so no run flips out from under us.
+    def abort_pending_runs(message)
+      to_abort = @runs_mutex.synchronize do
+        @runs.each_value.select { |r| r[:status] == "queued" }.map { |r| r[:run_id] }
+      end
+      to_abort.each do |run_id|
+        @in_flight_mutex.synchronize { @in_flight.delete(run_id) }
+        finalize_run(run_id, nil, InvokeError.new(:unavailable, message))
+      end
     end
 
     # True when expires_at is a parseable ISO8601 timestamp in the past. A

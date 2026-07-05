@@ -11,9 +11,10 @@ For deployment and container setup, see
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/healthz` | Liveness probe. Always unauthenticated. |
-| `GET` | `/status` | List in-flight invokes. Auth required if token is set. |
-| `POST` | `/invoke` | Run one workflow end-to-end. Blocks until it finishes. |
-| `POST` | `/cancel/{run_id}` | Best-effort SIGTERM to an in-flight invoke. |
+| `GET` | `/status` | List in-flight (queued + running) invokes. Auth required if token is set. |
+| `POST` | `/invoke` | Accept one workflow for async execution. Returns `202` + `run_id`. |
+| `GET` | `/runs/{run_id}` | Poll a run's lifecycle + result (`queued`/`running`/`done`/`error`/`cancelled`). |
+| `POST` | `/cancel/{run_id}` | Best-effort cancel of a queued or running invoke. |
 | `GET` | `/runs/{run_id}/log` | Stream (or `Range`-poll) a run's log file. |
 | `GET` | `/runs/{run_id}/prompts` | List interactive prompts (2FA / SMS) waiting for a value. |
 | `POST` | `/runs/{run_id}/prompts/{prompt_id}` | Submit the value for a pending prompt. |
@@ -53,11 +54,16 @@ mode, spawn the container with raw `docker run` instead.
 
 ## `POST /invoke`
 
-Run one workflow. Blocks until the child process exits or the
-`timeout_sec` elapses. Returns 200 with the exit code and artifact
-list. A non-zero `exit_code` on 200 means the workflow ran but
-something inside it failed — inspect the log referenced in the
-response.
+Accept one workflow for **asynchronous** execution. The request is
+validated synchronously, then queued and answered immediately with
+`202 Accepted` + a `run_id`. The workflow runs in the background; poll
+[`GET /runs/{run_id}`](#get-runsrun_id) for progress and the eventual
+result.
+
+Runs still execute **strictly one at a time** (a single worker drains the
+queue under one mutex — see [Concurrency contract](#concurrency-contract)).
+A client that disconnects after the `202` does **not** cancel the run; use
+[`POST /cancel/{run_id}`](#post-cancelrun_id).
 
 ### Request body
 
@@ -155,48 +161,17 @@ This lets the receiver correlate its ingest with the originating
 `/invoke` call without every workflow having to wire the run_id through
 its own `meta:` block.
 
-### Response — success (HTTP 200)
+### Response — accepted (HTTP 202)
 
 ```json
-{
-  "run_id":      "2026-04-21T12-34-56Z-abc123",
-  "exit_code":   0,
-  "error_kind":  null,
-  "duration_ms": 12345,
-  "artifacts": [
-    { "path": "runs/2026-04-21T12-34-56Z-abc123/log", "size": 9412 },
-    { "path": "runs/2026-04-21T12-34-56Z-abc123/2026-04-21T12-34-56Z-abc123-freentonic-timeout-20260421-123502-481.png", "size": 82411 }
-  ],
-  "log_path": "runs/2026-04-21T12-34-56Z-abc123/log",
-  "warnings": []
-}
+{ "run_id": "2026-04-21T12-34-56Z-abc123", "status": "queued" }
 ```
 
-- All `artifacts[].path` values are **relative to the host-side directory**
-  you bind-mounted to `/workspace`. So if you mounted
-  `-v ~/freentonic/runs:/workspace/runs`, the file is at
-  `~/freentonic/runs/2026-04-21T12-34-56Z-abc123/log` on the host.
-- `exit_code` is:
-  - `0` — workflow completed successfully.
-  - `1` — `UserError` in freentonic (bad YAML, missing secrets, validation
-    failure, etc.). See the log.
-  - `2` — `ExportError` (receiver rejected the payload, connection refused).
-  - `128 + N` — child exited on signal N (e.g. `143` for SIGTERM, typically
-    from `timeout_sec`).
-- `error_kind` classifies the failure so the caller doesn't have to grep
-  the log. One of:
-  - `null` — `exit_code == 0`, workflow succeeded.
-  - `"timeout"` — the server's watchdog killed the child because
-    `timeout_sec` elapsed. Takes precedence over the signal used to kill it.
-  - `"signal"` — the child died on a signal (SIGSEGV, SIGBUS, external
-    kill, etc.), not because of our timeout watchdog.
-  - `"user_error"` — `UserError` (exit 1). Retrying verbatim won't help;
-    the request or workflow is wrong.
-  - `"export_error"` — `ExportError` (exit 2). Receiver rejected the
-    payload; retrying may or may not help depending on the receiver.
-  - `"unknown"` — non-zero exit code that doesn't match any of the above.
-- `duration_ms` is wall time from subprocess spawn to `Process.wait` return.
-- `warnings` contains informational messages like `"timeout reached (...); child was terminated"`.
+The run is now queued for the worker. `status` is `"queued"` at this
+point; it becomes `"running"` when the worker picks it up. Poll
+[`GET /runs/{run_id}`](#get-runsrun_id) for the exit code, artifacts, and
+`error_kind`. The `run_id` echoed here is the same one you supplied (or
+will need for every follow-up call).
 
 ### Response — errors
 
@@ -221,20 +196,35 @@ its own `meta:` block.
 | `422` | `"credentials.file does not exist: ..."` | Bound file not accessible (or resolves outside the secrets root). |
 | `413` | `"payload too large"` | Body exceeded 1 MiB. |
 | `500` | `"<Exception class>: <message>"` | Unhandled server error. Check container logs. |
+| `503` | `"run queue full; retry later"` | The accepted-but-unfinished backlog is at capacity (`max_queued_runs`, default 128). Body also carries `retry_after` (seconds). |
 | `503` | `"server shutting down"` | SIGTERM received; no new invokes accepted. |
+
+Note these are all failures to **accept** the run. Once you have a `202`,
+every failure *during* the run (bad YAML, receiver rejection, timeout,
+crash) surfaces via `GET /runs/{run_id}`, not here.
 
 ### Concurrency contract
 
-- **v1 is strictly serialized.** Two simultaneous `POST /invoke` calls
-  do not run in parallel; the second blocks inside the server until the
-  first returns. Plan your web-app retry behavior with this in mind
-  (use a worker pool with `concurrency=1` per freentonic container).
-- **Duplicate `run_id` while in-flight → 409.** Once the original
-  finishes and is removed from the in-flight registry, the same `run_id`
-  can be reused — but we recommend not reusing ids, to keep artifact
-  history clean.
-- **Connections block for the full invoke duration.** Set your HTTP
-  client's read-timeout to at least `timeout_sec + 30 seconds`.
+- **v1 is strictly serialized.** `/invoke` returns immediately, but a
+  single worker runs one invoke at a time. Submit two and the second sits
+  in `queued` until the first reaches a terminal state. Throughput is
+  unchanged from the old blocking model — only the wire protocol changed.
+- **Bounded backlog.** At most `max_queued_runs` (default 128) runs may be
+  accepted-but-unfinished at once; beyond that `/invoke` returns `503`
+  with `retry_after`. Size your web-app job queue accordingly (a
+  per-container worker pool with `concurrency=1` is still the right shape).
+- **Retention window.** Finished runs are kept in memory
+  (`max_retained_runs`, default 256) so `GET /runs/{run_id}` can report a
+  result after completion. Past that, the oldest terminal records are
+  evicted and their `run_id` returns `404` — read the artifacts off the
+  runs dir instead (they are never deleted by the server).
+- **Duplicate `run_id` while in-flight → 409.** Once a run reaches a
+  terminal state and leaves the in-flight set, the same `run_id` can be
+  re-submitted (the prior retained record is replaced). We still recommend
+  unique ids to keep artifact history clean.
+- **No long read-timeout needed.** The `202` comes back in milliseconds;
+  your client's read-timeout only has to cover request validation. Long
+  runs are observed by polling, not by holding a socket open.
 
 ---
 
@@ -253,14 +243,16 @@ Response (HTTP 200):
 {"ok":true,"in_flight":0,"shutting_down":false}
 ```
 
-`in_flight` is `0` or `1` given v1 serialization. `shutting_down`
-flips to `true` after SIGTERM.
+`in_flight` counts runs that are **queued or running** (accepted but not
+yet in a terminal state) — so it can exceed `1` when work is backed up
+behind the single worker. `shutting_down` flips to `true` after SIGTERM.
 
 ---
 
 ## `GET /status`
 
-Inspect the in-flight invoke (0 or 1 given serialization).
+List the in-flight invokes — those **queued or running**. With v1's single
+worker at most one is actually running; the rest are waiting their turn.
 **Auth required** (if the server has a token set).
 
 ```sh
@@ -283,15 +275,134 @@ Response (HTTP 200):
 }
 ```
 
-The array is empty when the server is idle.
+The array is empty when the server is idle. `started_at`/`elapsed_ms` are
+measured from **acceptance**, so for a still-queued run `elapsed_ms`
+includes queue wait. (A dedicated `queued` vs `running` split in `/status`
+is a planned follow-up; use `GET /runs/{run_id}` for the precise state
+today.)
+
+---
+
+## `GET /runs/{run_id}`
+
+Poll one run's lifecycle and result. This is how you observe an async
+invoke after the `202`. **Auth required.**
+
+```sh
+curl -sS -H "Authorization: Bearer $FREENTONIC_INVOKE_TOKEN" \
+  http://127.0.0.1:7878/runs/2026-04-21T12-34-56Z-abc123
+```
+
+The response always carries `run_id` and `status`; the rest depends on the
+state.
+
+**`queued`** — accepted, waiting for the worker:
+
+```json
+{ "run_id": "…", "status": "queued", "submitted_at": "2026-04-21T12:34:56Z" }
+```
+
+**`running`** — the worker is executing it:
+
+```json
+{ "run_id": "…", "status": "running", "started_at": "2026-04-21T12:34:57Z", "elapsed_ms": 4812 }
+```
+
+**`done`** — the child exited (successfully *or* not). Same fields the old
+synchronous `/invoke` returned, plus `finished_at`:
+
+```json
+{
+  "run_id":      "2026-04-21T12-34-56Z-abc123",
+  "status":      "done",
+  "exit_code":   0,
+  "error_kind":  null,
+  "duration_ms": 12345,
+  "artifacts": [
+    { "path": "runs/2026-04-21T12-34-56Z-abc123/log", "size": 9412 },
+    { "path": "runs/2026-04-21T12-34-56Z-abc123/2026-04-21T12-34-56Z-abc123-freentonic-timeout-20260421-123502-481.png", "size": 82411 }
+  ],
+  "log_path":    "runs/2026-04-21T12-34-56Z-abc123/log",
+  "warnings":    [],
+  "finished_at": "2026-04-21T12:35:09Z"
+}
+```
+
+- **`status: "done"` does not mean success** — it means the run finished.
+  Check `exit_code` / `error_kind`.
+- All `artifacts[].path` values are **relative to the host-side directory**
+  you bind-mounted to `/workspace`. So if you mounted
+  `-v ~/freentonic/runs:/workspace/runs`, the file is at
+  `~/freentonic/runs/2026-04-21T12-34-56Z-abc123/log` on the host.
+- `exit_code` is:
+  - `0` — workflow completed successfully.
+  - `1` — `UserError` in freentonic (bad YAML, missing secrets, validation
+    failure, etc.). See the log.
+  - `2` — `ExportError` (receiver rejected the payload, connection refused).
+  - `128 + N` — child exited on signal N (e.g. `143` for SIGTERM, typically
+    from `timeout_sec`).
+- `error_kind` classifies the failure so the caller doesn't have to grep
+  the log. One of:
+  - `null` — `exit_code == 0`, workflow succeeded.
+  - `"timeout"` — the server's watchdog killed the child because
+    `timeout_sec` elapsed. Takes precedence over the signal used to kill it.
+  - `"signal"` — the child died on a signal (SIGSEGV, SIGBUS, external
+    kill, etc.), not because of our timeout watchdog.
+  - `"user_error"` — `UserError` (exit 1). Retrying verbatim won't help;
+    the request or workflow is wrong.
+  - `"export_error"` — `ExportError` (exit 2). Receiver rejected the
+    payload; retrying may or may not help depending on the receiver.
+  - `"unknown"` — non-zero exit code that doesn't match any of the above.
+- `duration_ms` is wall time from subprocess spawn to `Process.wait` return
+  (execution only — it excludes any time the run spent `queued`).
+- `warnings` contains informational messages like `"timeout reached (...); child was terminated"`.
+
+**`error`** — the run failed *around* execution (e.g. a defense-in-depth
+containment check, or an unexpected server error) rather than the child
+exiting with a code. No `exit_code`:
+
+```json
+{ "run_id": "…", "status": "error", "error": "profile_key escapes its containment root", "finished_at": "…" }
+```
+
+**`cancelled`** — the run was cancelled while still queued, before any
+child spawned (see [`POST /cancel`](#post-cancelrun_id)):
+
+```json
+{ "run_id": "…", "status": "cancelled", "finished_at": "…" }
+```
+
+> A run that was cancelled **while running** shows up as `done` with a
+> `signal` / non-zero `exit_code` — cancellation there is "kill the child",
+> and the child's real exit is reported. Only queued-cancel yields the
+> `cancelled` status.
+
+### Error statuses
+
+| Status | When |
+|---|---|
+| `401` | Missing or wrong bearer token. |
+| `404` | `run_id` charset violates `[A-Za-z0-9_\-:.]{1,64}`, was never submitted, or has been **evicted** from the retention window (default 256 most-recent finished runs). |
+| `405` | Anything other than `GET`. |
+
+Once a `run_id` is evicted, its status is gone from memory — but the
+artifacts on the runs dir remain. Persist the terminal result into your
+own store when you first observe `done`/`error` rather than relying on the
+in-memory window indefinitely.
 
 ---
 
 ## `POST /cancel/{run_id}`
 
-Best-effort cancellation. Sends SIGTERM to the child's process group,
-then SIGKILL after 10 seconds if the child is still alive.
+Best-effort cancellation, for both queued and running invokes.
 **Auth required.**
+
+- **Queued run** (not yet started): removed from the queue atomically and
+  marked `cancelled` — no Chrome child is ever spawned. `GET /runs/{run_id}`
+  then reports `status: "cancelled"`.
+- **Running run**: SIGTERM to the child's process group, then SIGKILL after
+  10 seconds if it's still alive. The run finalizes as `done` with a
+  non-zero `exit_code` (the child's real exit), not `cancelled`.
 
 ```sh
 curl -sS -X POST \
@@ -305,14 +416,13 @@ Response (HTTP 202):
 {"accepted":true,"run_id":"2026-04-21T12-34-56Z-abc123"}
 ```
 
-Cancellation does not interrupt the already-blocking `POST /invoke`
-call — the server returns from `/invoke` normally (with a non-zero
-`exit_code`) once the child dies. The `/cancel` endpoint simply makes
-that happen sooner.
+Cancellation is asynchronous: for a running invoke the endpoint returns
+`202` right away and the worker finalizes the run once the child dies —
+observe the terminal state via `GET /runs/{run_id}`.
 
-If the run id is unknown or the child hasn't been spawned yet
-(extremely brief window between registration and spawn), you get
-`404 {"error":"run_id not in flight or not yet spawned"}`.
+If the run id is unknown, already terminal, or in the extremely brief
+window between a run leaving the queue and its child being spawned, you
+get `404 {"error":"run_id not in flight or not yet spawned"}`.
 
 ---
 
@@ -395,10 +505,9 @@ loop do
 end
 ```
 
-The run is considered finished from the caller's perspective once
-`POST /invoke` returns (the blocking call). After that, the log file
-is stable and `Range` isn't strictly necessary — but it's the same
-code path.
+The run is finished once `GET /runs/{run_id}` reports a terminal status
+(`done`/`error`/`cancelled`). After that the log file is stable and
+`Range` isn't strictly necessary — but it's the same code path.
 
 ---
 
@@ -507,13 +616,12 @@ is the contract.
 
 ### End-to-end pattern
 
-While `POST /invoke` is blocking, run a small companion goroutine /
-thread that polls every ~500 ms:
+After the `202`, poll every ~500 ms:
 
 1. `GET /runs/{run_id}/prompts`
 2. If `prompts` is non-empty, surface the message to the operator,
    collect the value, then `POST /runs/{run_id}/prompts/{prompt_id}`.
-3. Repeat until the main `POST /invoke` returns.
+3. Repeat until `GET /runs/{run_id}` reports a terminal status.
 
 Combine with `Range`-polling on `/runs/{run_id}/log` if you want to
 stream the run's progress to the operator at the same time.
@@ -666,6 +774,22 @@ curl -sS \
   "timeout_sec": 900
 }
 JSON
+# → 202 {"run_id":"adhoc-…","status":"queued"}
+```
+
+Then poll until the run reaches a terminal state:
+
+```sh
+RUN_ID="adhoc-…"   # the run_id you submitted
+while :; do
+  STATUS=$(curl -sS -H "Authorization: Bearer $TOKEN" \
+    "http://127.0.0.1:7878/runs/$RUN_ID")
+  echo "$STATUS"
+  case "$(echo "$STATUS" | jq -r .status)" in
+    queued|running) sleep 2 ;;
+    *) break ;;   # done / error / cancelled
+  esac
+done
 ```
 
 ### Ruby (stdlib, no gems)
@@ -693,13 +817,30 @@ req.body = JSON.generate(
 )
 
 http = Net::HTTP.new(uri.host, uri.port)
-http.read_timeout = 950  # must exceed timeout_sec + grace
-res = http.request(req)
+res  = http.request(req)   # returns in ms; no long read-timeout needed
+raise "invoke rejected: #{res.code} #{res.body}" unless res.code.to_i == 202
+run_id = JSON.parse(res.body).fetch("run_id")
 
-raise "invoke failed: #{res.code} #{res.body}" unless res.code.to_i == 200
-result = JSON.parse(res.body)
-puts "exit=#{result["exit_code"]} duration=#{result["duration_ms"]}ms"
-puts "log: #{result["log_path"]}"
+# Poll for the result.
+status_uri = URI("http://127.0.0.1:7878/runs/#{run_id}")
+loop do
+  sreq = Net::HTTP::Get.new(status_uri)
+  sreq["Authorization"] = "Bearer #{ENV.fetch('FREENTONIC_INVOKE_TOKEN')}"
+  sres = Net::HTTP.start(status_uri.host, status_uri.port) { |h| h.request(sreq) }
+  run  = JSON.parse(sres.body)
+
+  case run["status"]
+  when "queued", "running"
+    sleep 2
+  when "done"
+    puts "exit=#{run["exit_code"]} error_kind=#{run["error_kind"].inspect} duration=#{run["duration_ms"]}ms"
+    puts "log: #{run["log_path"]}"
+    break
+  else # "error" / "cancelled"
+    warn "run ended: #{run["status"]} #{run["error"]}"
+    break
+  end
+end
 ```
 
 ### Python (requests)
@@ -710,11 +851,12 @@ import os, time, requests
 token = os.environ["FREENTONIC_INVOKE_TOKEN"]
 receiver_token = os.environ["RECEIVER_TOKEN"]
 
+run_id = f"owner42-ing-{int(time.time())}"
 resp = requests.post(
     "http://127.0.0.1:7878/invoke",
     headers={"Authorization": f"Bearer {token}"},
     json={
-        "run_id": f"owner42-ing-{int(time.time())}",
+        "run_id": run_id,
         "workflow": "ing/workflow.yml",
         "profile_key": "ing__owner42",
         "credentials": {"inline": {"USER_DNI": "12345678A", "USER_PIN": "123456"}},
@@ -725,10 +867,22 @@ resp = requests.post(
         },
         "timeout_sec": 900,
     },
-    timeout=(10, 950),   # (connect, read)
+    timeout=(10, 10),   # (connect, read) — the 202 is immediate
 )
-resp.raise_for_status()
-print(resp.json())
+resp.raise_for_status()   # 202 on success
+
+# Poll for the result.
+while True:
+    run = requests.get(
+        f"http://127.0.0.1:7878/runs/{run_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=(10, 10),
+    ).json()
+    if run["status"] in ("queued", "running"):
+        time.sleep(2)
+        continue
+    print(run)   # done / error / cancelled
+    break
 ```
 
 ### Node.js (fetch)
@@ -736,14 +890,14 @@ print(resp.json())
 ```js
 const token = process.env.FREENTONIC_INVOKE_TOKEN;
 
+const runId = `owner42-ing-${Date.now()}`;
+const auth = { "Authorization": `Bearer ${token}` };
+
 const res = await fetch("http://127.0.0.1:7878/invoke", {
   method: "POST",
-  headers: {
-    "Authorization": `Bearer ${token}`,
-    "Content-Type":  "application/json",
-  },
+  headers: { ...auth, "Content-Type": "application/json" },
   body: JSON.stringify({
-    run_id:       `owner42-ing-${Date.now()}`,
+    run_id:       runId,
     workflow:     "ing/workflow.yml",
     profile_key:  "ing__owner42",
     credentials:  { inline: { USER_DNI: "12345678A", USER_PIN: "123456" } },
@@ -754,12 +908,18 @@ const res = await fetch("http://127.0.0.1:7878/invoke", {
     },
     timeout_sec: 900,
   }),
-  // Node's default fetch has no built-in body read-timeout; wrap in AbortController
-  // with a duration > timeout_sec if you need one.
+  // The 202 is immediate — no long-lived connection to keep open.
 });
+if (res.status !== 202) throw new Error(`invoke rejected: ${res.status} ${await res.text()}`);
 
-if (!res.ok) throw new Error(`invoke failed: ${res.status} ${await res.text()}`);
-console.log(await res.json());
+// Poll for the result.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+while (true) {
+  const run = await (await fetch(`http://127.0.0.1:7878/runs/${runId}`, { headers: auth })).json();
+  if (run.status === "queued" || run.status === "running") { await sleep(2000); continue; }
+  console.log(run); // done / error / cancelled
+  break;
+}
 ```
 
 ---
@@ -769,11 +929,16 @@ console.log(await res.json());
 1. **User clicks "sync" in your web app for provider `ing`, owner 42.**
 2. Web app computes `run_id` (e.g. `owner42-ing-$(uuid)`) and
    `profile_key` (e.g. `ing__owner42`).
-3. Web app POSTs to `/invoke`. The HTTP call blocks — expect it to
-   take seconds to minutes depending on the provider.
-4. Response comes back with `exit_code` and `artifacts`.
-5. Web app enumerates `<runs_dir>/<run_id>/` to attach the log and
-   any screenshots to the sync record in its own database.
+3. Web app POSTs to `/invoke` and gets back `202 {run_id}` in
+   milliseconds. Persist the `run_id` against the sync record.
+4. A background job (or the same request, if you prefer) polls
+   `GET /runs/{run_id}` every ~2 s until `status` is terminal
+   (`done`/`error`/`cancelled`). Optionally `Range`-poll
+   `/runs/{run_id}/log` to stream progress to the user meanwhile.
+5. On `done`, web app enumerates `<runs_dir>/<run_id>/` to attach the log
+   and any screenshots to the sync record, and stores `exit_code` /
+   `error_kind`. **Persist the terminal result now** — the in-memory
+   status is evicted after the retention window.
 6. If `exit_code != 0`, web app surfaces the last 10 lines of the log
    to the user and offers a retry button.
 7. **User retries.** Web app generates a fresh `run_id`, keeps the
@@ -786,21 +951,30 @@ console.log(await res.json());
 - **Pick a `run_id` scheme you can sort and grep.** `{tenant}-{provider}-{iso8601}-{nonce}`
   is a good shape.
 - **Consider a job queue (Sidekiq, RQ, etc.)** in your web app that
-  serializes requests per freentonic container — since v1 is
-  serialized, sending many concurrent invokes just creates connection
-  queue depth without throughput gain.
-- **Set your HTTP client's read-timeout > `timeout_sec + 30`** to
-  avoid premature disconnects.
+  serializes requests per freentonic container — since v1 runs one invoke
+  at a time, firing many at once just fills the server's bounded queue
+  (and `503`s past `max_queued_runs`) without throughput gain.
+- **No long read-timeouts anymore.** `/invoke` and `GET /runs/{run_id}`
+  both return immediately; a short client timeout (e.g. 10 s) is fine.
+- **Persist terminal results promptly.** `GET /runs/{run_id}` only retains
+  the last `max_retained_runs` (default 256) finished runs in memory;
+  after that it `404`s and you fall back to the artifacts on disk.
 - **Use `/status`** in an internal ops view; users never need to see it.
 
 ---
 
 ## What's NOT in v1
 
-- Parallelism (planned: per-`profile_key` mutex + subprocess port/display pools).
-- Server-push log streaming (SSE/chunked). `GET /runs/{run_id}/log` with
-  `Range`-based polling covers the live-tail use case; SSE is a future
-  nicety.
+- Parallelism (planned: per-`profile_key` mutex + subprocess port/display
+  pools). `/invoke` is async now, but execution is still serialized by a
+  single worker.
+- Durable run state. The `queued`/`running`/`done` registry is in-memory
+  and bounded; it does not survive a server restart, and old runs are
+  evicted. The runs dir on disk is the durable record.
+- A `queued` vs `running` split in `/status` (use `GET /runs/{run_id}`).
+- Server-push status/log streaming (SSE/chunked). Poll
+  `GET /runs/{run_id}` and `Range`-poll `/runs/{run_id}/log`; SSE is a
+  future nicety.
 - Metrics endpoint (`/metrics` Prometheus-style).
 - Retry/backoff built into `/invoke`. Handle retries in the web app.
 - Per-user sockets / multi-tenant auth. One token, one server.

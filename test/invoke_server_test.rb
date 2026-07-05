@@ -435,7 +435,10 @@ class InvokeServerTest < Minitest::Test
     assert_equal "404", res.code
   end
 
-  def test_runs_path_without_log_suffix_is_404
+  def test_runs_status_404_for_unknown_run
+    # GET /runs/:id (no /log suffix) is the async run-status endpoint. A run
+    # that was never submitted to this server — even one with a log on disk —
+    # is unknown to the in-memory registry and 404s.
     write_log("run-a", "hi")
     res = get("/runs/run-a", auth)
     assert_equal "404", res.code
