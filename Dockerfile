@@ -17,12 +17,34 @@ RUN apt-get update \
 # ─── final stage ──────────────────────────────────────────────────────────
 FROM ruby:3.2-slim-bookworm
 
-# Chromium for CDP, procps for pgrep (used by ChromeCdp process management),
-# fonts for proper page rendering, xvfb + x11vnc for non-headless mode,
-# tini so PID 1 reaps the per-invoke child processes cleanly,
-# python3 so websockify can run (pure-python, no pip deps needed).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
+# Chromium is PINNED to a known-good version, installed from a Debian
+# snapshot. Debian bookworm-security *floats* the chromium package, so a
+# bare `apt-get install chromium` picks up whatever is current at build
+# time — and that silently broke us: 150.0.7871.46-1~deb12u1 SIGTRAPs
+# (exit 133) on launch inside this container, while 148.0.7778.96-1~deb12u1
+# runs fine. Because the image is rebuilt on every deploy, an unpinned
+# browser means an external dependency can take the whole bridge down with
+# no code change. The snapshot pin makes the browser reproducible; bump
+# CHROMIUM_VERSION + CHROMIUM_SNAPSHOT deliberately after testing a newer
+# build (see docs — build to a throwaway tag and run a `--dump-dom
+# about:blank` smoke test before promoting).
+#
+# The exact version lives only in the snapshot once the live security repo
+# rolls forward, so we add a snapshot apt source for the install, request
+# the exact version (apt also pulls the strict-versioned chromium-common
+# from the same snapshot), hold it, then drop the snapshot source again.
+ARG CHROMIUM_VERSION=148.0.7778.96-1~deb12u1
+# snapshot.debian.org state carrying that chromium in bookworm-security.
+ARG CHROMIUM_SNAPSHOT=20260507T164458Z
+
+# procps for pgrep (ChromeCdp process management), fonts for page
+# rendering, xvfb + x11vnc for non-headless mode, tini so PID 1 reaps the
+# per-invoke children, python3 so websockify runs (pure-python).
+RUN echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ bookworm-security main" \
+      > /etc/apt/sources.list.d/snapshot-chromium.list \
+  && apt-get -o Acquire::Check-Valid-Until=false update \
+  && apt-get install -y --no-install-recommends \
+    chromium="${CHROMIUM_VERSION}" \
     procps \
     fonts-liberation \
     fonts-dejavu-core \
@@ -31,6 +53,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     x11vnc \
     tini \
     python3 \
+  && apt-mark hold chromium \
+  && rm -f /etc/apt/sources.list.d/snapshot-chromium.list \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for defense-in-depth.
