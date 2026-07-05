@@ -49,11 +49,22 @@ regresses, it's a security bug — please report it.
    strict nested `const_get(name, false)` walk — YAML authors cannot
    influence which Ruby constant gets resolved beyond what they type.
 
-5. **The HTTP exporter has a token environment fallback** (`--export-token`
+5. **`extract: plan:` cannot call arbitrary client methods.** The plan
+   interpreter dispatches on a fixed, closed verb set (fetch / select /
+   for_each / yield), and a `fetch:` step resolves its endpoint name
+   against the workflow's own declared `api_client.endpoints` list —
+   validated at load and re-checked at call time. There is no `send` off
+   an arbitrary YAML string. A plan therefore cannot reach `raw_request`,
+   `update_auth_headers!`, or any client method that isn't a declared
+   endpoint; it is strictly less powerful than the `{ruby:, class:}`
+   escape hatch. (This narrows blast radius *within* the "YAML is code"
+   trust boundary — a plan is data, unlike a sibling `extractor.rb`.)
+
+6. **The HTTP exporter has a token environment fallback** (`--export-token`
    → `FREENTONIC_HTTP_TOKEN`) so secrets do not need to appear in your
    shell history or process list.
 
-6. **`prompt_stdin_and_fill` handles single-use values that are never
+7. **`prompt_stdin_and_fill` handles single-use values that are never
    persisted.** SMS OTPs and similar one-shot codes are read from an
    interactive TTY (refused on non-tty stdin), fed into the page through
    the same `fill_selector` path used by `fill` (CDP key events, never

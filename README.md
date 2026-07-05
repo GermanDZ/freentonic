@@ -50,7 +50,7 @@ a shared context hash:
 | Stage       | Reads              | Writes                | Effect                                                    |
 | ----------- | ------------------ | --------------------- | --------------------------------------------------------- |
 | `connect`   | —                  | `credentials`         | Launches Chrome, runs the YAML login pipeline, captures credentials. |
-| `extract`   | `credentials`      | `raw`                 | Calls the provider API via the declared extractor class.              |
+| `extract`   | `credentials`      | `raw`                 | Calls the provider API via the declared extractor class or [`extract: plan:`](docs/extract-plan.md). |
 | `normalize` | `raw`              | `normalized`          | Applies the declared normalizer (Passthrough by default).             |
 | `export`    | `normalized`       | —                     | Fans the normalized payload out to every `--export` declared.         |
 
@@ -171,6 +171,11 @@ api_client:
 # The Extract stage loads this Ruby file relative to the YAML directory
 # and instantiates the named class, then calls #call(client:, credentials:,
 # from_date:, stdout:, stderr:).
+#
+# When the extractor is pure orchestration (fetch → loop → assemble), you
+# can drop the Ruby entirely and declare an `extract: plan:` instead — a
+# small fetch/select/for_each/output grammar over the endpoints above.
+# See docs/extract-plan.md.
 extract:
   ruby: ./extractor.rb
   class: ExampleBank::Extractor

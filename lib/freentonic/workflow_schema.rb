@@ -79,6 +79,16 @@ module Freentonic
       klass.new(credentials)
     end
 
+    # The declared api_client endpoint names, as Strings. This is the
+    # whitelist an `extract: plan:` `fetch:` step resolves against — the
+    # interpreter never calls a client method not in this list. Empty when
+    # the workflow declares no api_client / no endpoints.
+    def api_client_endpoint_names
+      Array(@raw.dig("api_client", "endpoints")).filter_map do |ep|
+        ep["name"].to_s if ep.is_a?(Hash) && ep["name"]
+      end
+    end
+
     private
 
     def build_api_client_class(ac)
@@ -260,6 +270,7 @@ module Freentonic
       end
 
       validate_error_signals!
+      validate_extract!
     end
 
     def validate_error_signals!
@@ -277,6 +288,194 @@ module Freentonic
         unless sig.key?("text") || sig.key?("selector") || sig.key?("title")
           raise UserError, "workflow #{@path} config.error_signals[#{i}] must have text:, selector:, or title:"
         end
+      end
+    end
+
+    # ── extract: validation ────────────────────────────────────────────
+    #
+    # `extract:` is optional at load time (a connect-only workflow has
+    # none). When present it is exactly one of the escape-hatch form
+    # ({ruby:, class:}) or the declarative form (plan:). The ruby form's
+    # class resolution is checked at stage/lint time; the plan form is
+    # fully statically validated here.
+    def validate_extract!
+      ext = @raw["extract"] || config["extract"]
+      return if ext.nil?
+
+      unless ext.is_a?(Hash)
+        raise UserError, "workflow #{@path} extract: must be a hash"
+      end
+
+      has_plan = ext.key?("plan")
+      has_ruby = ext.key?("ruby") || ext.key?("class")
+      if has_plan && has_ruby
+        raise UserError, "workflow #{@path} extract: declares both plan: and ruby:/class: — pick one"
+      end
+
+      validate_extract_plan!(ext["plan"]) if has_plan
+    end
+
+    PLAN_STEP_VERBS = %w[fetch select for_each].freeze
+
+    # Walk the plan linearly, tracking which names are bound so far, and
+    # fail loud on: a fetch to an undeclared endpoint, a reference to an
+    # unbound name, a malformed/unknown step, or a for_each with no yield.
+    # Bindings start with the interpreter's pre-seeded scope.
+    def validate_extract_plan!(plan)
+      loc = "workflow #{@path} extract.plan"
+      unless plan.is_a?(Hash)
+        raise UserError, "#{loc}: must be a hash with steps: and output:"
+      end
+
+      steps = plan["steps"]
+      unless steps.is_a?(Array)
+        raise UserError, "#{loc}.steps: must be an array"
+      end
+      unless plan["output"].is_a?(Hash)
+        raise UserError, "#{loc}.output: must be a hash mapping keys to \"{binding}\" values"
+      end
+
+      endpoints = api_client_endpoint_names
+      bound     = %w[from_date from_ms now_ms]
+
+      steps.each_with_index do |step, i|
+        validate_plan_step!(step, "#{loc}.steps[#{i}]", endpoints, bound, allow_yield: false)
+      end
+
+      validate_plan_refs!(plan["output"], "#{loc}.output", bound)
+    end
+
+    def validate_plan_step!(step, loc, endpoints, bound, allow_yield:)
+      unless step.is_a?(Hash)
+        raise UserError, "#{loc}: must be a hash"
+      end
+
+      allowed = PLAN_STEP_VERBS + (allow_yield ? %w[yield] : [])
+      verbs   = step.keys & allowed
+      if verbs.empty?
+        raise UserError, "#{loc}: unknown step (expected one of #{allowed.join(", ")}; " \
+                         "got keys #{step.keys.inspect})"
+      end
+      if verbs.size > 1
+        raise UserError, "#{loc}: a step must declare exactly one verb, found #{verbs.inspect}"
+      end
+
+      case verbs.first
+      when "fetch"    then validate_plan_fetch!(step, loc, endpoints, bound)
+      when "select"   then validate_plan_select!(step, loc, bound)
+      when "for_each" then validate_plan_for_each!(step, loc, endpoints, bound)
+      when "yield"    then validate_plan_yield!(step, loc, bound)
+      end
+    end
+
+    def validate_plan_fetch!(step, loc, endpoints, bound)
+      name = step["fetch"]
+      unless name.is_a?(String) && !name.empty?
+        raise UserError, "#{loc}.fetch: must be a non-empty endpoint name"
+      end
+      unless endpoints.include?(name)
+        raise UserError, "#{loc}.fetch: #{name.inspect} is not a declared api_client endpoint " \
+                         "(known: #{endpoints.empty? ? "none" : endpoints.join(", ")})"
+      end
+      if step.key?("args")
+        unless step["args"].is_a?(Hash)
+          raise UserError, "#{loc}.args: must be a hash"
+        end
+        validate_plan_refs!(step["args"], "#{loc}.args", bound)
+      end
+      bind_plan_as!(step, loc, bound)
+    end
+
+    def validate_plan_select!(step, loc, bound)
+      spec = step["select"]
+      unless spec.is_a?(Hash) && spec["from"] && spec.key?("path")
+        raise UserError, "#{loc}.select: must be a hash with from: and path:"
+      end
+      unless bound.include?(spec["from"].to_s)
+        raise UserError, "#{loc}.select.from: #{spec["from"].inspect} is not bound by an earlier step " \
+                         "(bound: #{bound.join(", ")})"
+      end
+      unless step["as"].is_a?(String) && !step["as"].empty?
+        raise UserError, "#{loc}.select: requires a non-empty as: to bind the result"
+      end
+      bound << step["as"]
+    end
+
+    def validate_plan_for_each!(step, loc, endpoints, bound)
+      spec = step["for_each"]
+      unless spec.is_a?(Hash) && spec["source"]
+        raise UserError, "#{loc}.for_each: must be a hash with source:"
+      end
+      unless bound.include?(spec["source"].to_s)
+        raise UserError, "#{loc}.for_each.source: #{spec["source"].inspect} is not bound by an earlier step " \
+                         "(bound: #{bound.join(", ")})"
+      end
+      unless step["as_item"].is_a?(String) && !step["as_item"].empty?
+        raise UserError, "#{loc}.for_each: requires as_item: (the loop variable name)"
+      end
+      do_steps = step["do"]
+      unless do_steps.is_a?(Array) && !do_steps.empty?
+        raise UserError, "#{loc}.for_each: requires a non-empty do: array"
+      end
+      unless step["as"].is_a?(String) && !step["as"].empty?
+        raise UserError, "#{loc}.for_each: requires a non-empty as: to bind the collected result"
+      end
+      if step.key?("collect") && !%w[array map].include?(step["collect"].to_s)
+        raise UserError, "#{loc}.for_each.collect: must be \"array\" or \"map\" (got #{step["collect"].inspect})"
+      end
+      map_mode = step["collect"].to_s == "map"
+      if map_mode && !(step["key"].is_a?(String) && !step["key"].empty?)
+        raise UserError, "#{loc}.for_each: collect: map requires a key: template"
+      end
+
+      inner     = bound.dup << step["as_item"]
+      saw_yield = false
+      do_steps.each_with_index do |sub, i|
+        validate_plan_step!(sub, "#{loc}.do[#{i}]", endpoints, inner, allow_yield: true)
+        saw_yield ||= sub.is_a?(Hash) && sub.key?("yield")
+      end
+      unless saw_yield
+        raise UserError, "#{loc}.for_each.do: must contain a yield: step"
+      end
+
+      validate_plan_refs!(step["key"], "#{loc}.for_each.key", inner) if map_mode
+      bound << step["as"]
+    end
+
+    def validate_plan_yield!(step, loc, bound)
+      validate_plan_refs!(step["yield"], "#{loc}.yield", bound)
+      return unless step.key?("skip_if_nil")
+
+      ref = step["skip_if_nil"]
+      unless ref.is_a?(String) && bound.include?(ref)
+        raise UserError, "#{loc}.skip_if_nil: #{ref.inspect} is not a bound name"
+      end
+    end
+
+    def bind_plan_as!(step, loc, bound)
+      return unless step.key?("as")
+
+      as = step["as"]
+      unless as.is_a?(String) && !as.empty?
+        raise UserError, "#{loc}.as: must be a non-empty string"
+      end
+      bound << as
+    end
+
+    # Every whole-token {name} / {name.path} in a template value must have
+    # a bound root. Literals, numbers, and partial strings pass through.
+    def validate_plan_refs!(node, loc, bound)
+      case node
+      when String
+        m = /\A\{([^}]+)\}\z/.match(node)
+        return unless m
+        root = m[1].split(".").first
+        unless bound.include?(root)
+          raise UserError, "#{loc}: {#{m[1]}} references unbound name #{root.inspect} " \
+                           "(bound: #{bound.join(", ")})"
+        end
+      when Hash  then node.each_value { |v| validate_plan_refs!(v, loc, bound) }
+      when Array then node.each { |v| validate_plan_refs!(v, loc, bound) }
       end
     end
 

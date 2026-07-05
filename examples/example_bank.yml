@@ -111,6 +111,33 @@ extract:
   ruby: ./extractor.rb
   class: ExampleBank::Extractor
 
+# ── Declarative alternative (docs/extract-plan.md) ──
+# When the extractor is pure orchestration, replace the ruby:/class: block
+# above with a plan: over the endpoints declared in api_client. This one is
+# equivalent to examples/extractor.rb — no extractor.rb needed:
+#
+# extract:
+#   plan:
+#     steps:
+#       - fetch: fetch_accounts
+#         as: accounts
+#       - for_each:
+#           source: accounts
+#         as_item: account
+#         as: movements
+#         collect: map
+#         key: "{account.ref}"
+#         do:
+#           - fetch: fetch_movements
+#             args: { id: "{account.ref}", from_date: "{from_date}" }
+#             as: rows
+#             safe: true
+#             default: []
+#           - yield: "{rows}"
+#     output:
+#       accounts: "{accounts}"
+#       movements: "{movements}"
+
 normalize:
   ruby: ./normalizer.rb
   class: ExampleBank::Normalizer

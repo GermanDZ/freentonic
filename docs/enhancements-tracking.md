@@ -43,7 +43,7 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 
 | # | Item | Status | PR / Commit | Notes |
 | - | --- | --- | --- | --- |
-| 17 | Declarative extractor plan (`extract: plan:`) | Not started | | The one remaining large item; flagship for the zero-provider-Ruby priority |
+| 17 | Declarative extractor plan (`extract: plan:`) | Done | p3-declarative-extract-plan | `ExtractPlan::PlanExtractor` interprets a closed `fetch`/`select`/`for_each`+`yield`/`output` grammar over declarative api_client endpoints — duck-typed like a Ruby extractor, so `context[:raw]` and everything downstream is unchanged. `fetch:` resolves only against declared endpoint names (the security whitelist); `safe:` degrades non-critical fetches but re-raises `SessionExpired`. Fully static-validated at load + `--lint` (endpoint whitelist, binding resolution, one-form-only, yield presence). Ships Revolut → zero extractor Ruby; parity test locks plan ≡ hand-written Ruby. `when`/`dedup_by` (Fintonic/Unicaja) deferred to a follow-up; ING stays the Ruby escape hatch by design. Docs: `docs/extract-plan.md` |
 | 18 | Export resilience (retry, aggregate errors, stream injection) | Done | p3-sweep | Http exporter retries connection-refused/timeout/5xx with exponential backoff (`retries:`/`retry_base_delay:` opts; DNS + 4xx stay permanent); Export stage aggregates multiple failures into one error naming every failed exporter (single failure still verbatim); `Exporters::Base#io` accessor, stage injects the engine stream, http progress/retry/success lines use it not `$stdout` |
 | 19 | Plugin/registry unification (Exporters vs Secrets `build` signatures) | Done | p3-sweep | `Secrets.build(name, options = {})` now matches `Exporters.build`; CLI `plain_file`/`inline_fd` construct via `Secrets.build` (registry-honoring) so third-party backends receive options uniformly; writing-plugins.md documents the options path |
 | 20 | Internal `api_client.rb` split (mechanical) | Done | p3-sweep | Extracted `ApiClient::Interpolation` + `ApiClient::CursorPagination` (included instance-method modules); `TimestampMs.parse` is the single source of truth (ApiClient + `Providers::Helpers#parse_timestamp_ms` were byte-identical dups); `source.rb` uses `workflow.raw` instead of `instance_variable_get`; extract-spec lookup de-duplicated to `source.extract_spec`. No behavior change |
@@ -52,6 +52,11 @@ Status values: `Not started` · `Planned` · `In progress` · `Blocked` ·
 ## Summary
 
 - Total items: 21
-- Done: 20 (all of P0 + P1 + P2; P3 #18–#21)
+- Done: 21 (all of P0 + P1 + P2 + P3)
 - In progress: 0
-- Not started: 1 (P3 #17 — declarative extractor plan, the one large item left)
+- Not started: 0
+
+P3 #17 shipped only the Phase-1 MVP grammar (enough to take Revolut to
+zero extractor Ruby). Conditional (`when:`) and dedup (`dedup_by:`) verbs
+— which Fintonic and Unicaja would need — are a deferred follow-up, not
+part of #17.

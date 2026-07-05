@@ -426,6 +426,37 @@ key under an existing block (`api_client`, `phases`, …).
 - If the key has security implications (loads Ruby, injects into
   Chrome, …) add it to `SECURITY.md`'s invariant list.
 
+### 7. New `extract: plan:` verb
+
+The declarative extractor grammar (`lib/freentonic/extract_plan/`) is a
+closed verb set — `fetch` / `select` / `for_each` / `yield` — interpreted
+by `Interpreter#execute`. Phase 1 shipped only what takes Revolut to zero
+Ruby; a new verb (`when:`, `dedup_by:`, …) is justified only when a real
+provider needs it (Fintonic → `when` + `dedup_by`, Unicaja → same). ING
+is **not** a candidate — it stays the `{ruby:, class:}` escape hatch.
+
+**Implementation:**
+- Add the verb to `Interpreter#execute`'s dispatch and a
+  `do_<verb>` handler in `interpreter.rb`. Keep it pure orchestration
+  over declared endpoints + already-fetched data — no `send` off a YAML
+  string, no reaching past the endpoint whitelist (that is the invariant
+  that makes plans safer than Ruby).
+- Add its validator to `WorkflowSchema#validate_plan_step!` (endpoint
+  whitelist, binding resolution, required keys) so it is caught at load
+  and by `--lint`, not at runtime.
+- Reuse existing evaluators where they exist — e.g. a `when:` gate should
+  reuse the `when_context` operator set already in `workflow_schema.rb`.
+
+**Testing:**
+- `test/extract_plan_test.rb` — interpreter against the `FakeClient`.
+- `test/workflow_schema_extract_plan_test.rb` — a negative test that the
+  malformed verb raises `UserError` from `validate!`.
+- Keep the Revolut parity test green.
+
+**Documentation:**
+- Update `docs/extract-plan.md`'s reference tables and the
+  when-to-use-a-plan boundary.
+
 ## Receiving an Issue + PR draft from a providers-agent
 
 When the user pastes an issue draft that was produced by
