@@ -10,7 +10,15 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
-## Unreleased
+## 0.13.0 — Declarative extract plans + session elevation
+
+Providers can now express extraction and PSD2 session elevation entirely
+in `workflow.yml` — the only Ruby a provider need ship is an optional
+normalizer. Highlights: the `extract: plan:` grammar (Phase 1 + 2 + the
+`index_by`/message/`skip_when`/`on_error` verbs below), the `elevate:`
+session-elevation phase, and request headers + `PUT` on declared
+endpoints. Plus structured run events, export resilience, and the async
+`/invoke` API. All additive to the workflow dialect — no `version:` bump.
 
 ### Extract-plan verbs: `index_by`, `note`/`warn`/`abort`, `skip_when`, fetch `on_error`
 

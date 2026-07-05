@@ -4,8 +4,9 @@ Declarative YAML-driven scraper for personal-data providers (banks,
 brokers, utilities). Drives a real Chrome session over the DevTools
 Protocol, captures credentials the browser collects during login, issues
 authenticated API calls, normalizes the result, and exports it via
-pluggable backends — all from a single YAML file plus a small amount of
-provider-specific Ruby.
+pluggable backends. Login, API endpoints, session elevation (SCA), and
+extraction are all declared in a single YAML file — the only Ruby a
+provider need ship is an optional normalizer.
 
 Freentonic has **zero runtime gem dependencies**. It's pure Ruby stdlib.
 
@@ -179,14 +180,28 @@ api_client:
       json:
         processId: "{process_id}"
 
+# Optional session-elevation phase, run between connect and extract. Use
+# it for a PSD2 SCA handshake — pause for operator approval, then rotate
+# the returned Bearer onto the client — declared over the endpoints above.
+# No-op when omitted. See docs/elevate-phase.md.
+elevate:
+  when: { lookback_days: { gt: 90 } }
+  on_failure: degrade
+  steps:
+    - await_operator_approval: { message: "Approve the SCA push on your phone", timeout: 180 }
+    - fetch: sca_commit
+      args: { process_id: "{challenge.securityProcessId}" }
+    - rebind_credential: { header: Authorization, value: "Bearer {refreshed.accessToken}" }
+
 # The Extract stage loads this Ruby file relative to the YAML directory
 # and instantiates the named class, then calls #call(client:, credentials:,
 # from_date:, stdout:, stderr:).
 #
 # When the extractor is pure orchestration (fetch → loop → assemble), you
 # can drop the Ruby entirely and declare an `extract: plan:` instead — a
-# small fetch/select/for_each/output grammar over the endpoints above.
-# See docs/extract-plan.md.
+# fetch/select/for_each grammar (plus let/concat/dedup_by/index_by,
+# note/warn/abort, when: gates and on_error policies) over the endpoints
+# above. See docs/extract-plan.md.
 extract:
   ruby: ./extractor.rb
   class: ExampleBank::Extractor
