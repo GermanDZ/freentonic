@@ -533,6 +533,163 @@ module Freentonic
         assert_equal [{ "iban" => "A1" }, nil], result["details"]
         assert_equal 1, client.calls.count { |(n, _)| n == :fetch_bank_details }
       end
+
+      # ── Ask 5: index_by, message verbs, skip_when, fetch on_error ───────
+
+      # Run capturing stdout/stderr (message verbs write to them).
+      def run_plan_io(plan, client:, from_date: Date.new(2026, 1, 1))
+        out = StringIO.new
+        err = StringIO.new
+        result = PlanExtractor.new(plan, endpoint_names: ENDPOINTS)
+                              .call(client: client, credentials: {}, from_date: from_date,
+                                    stdout: out, stderr: err)
+        [result, out.string, err.string]
+      end
+
+      def test_index_by_builds_map_via_find_by_field
+        # The ING build_uuid_map shape: LOCAL_UUID value → UUID value.
+        products = [
+          { "identifiers" => [{ "type" => "LOCAL_UUID", "value" => "v1a" },
+                              { "type" => "UUID", "value" => "uuidA" }] },
+          { "identifiers" => [{ "type" => "LOCAL_UUID", "value" => "v1b" },
+                              { "type" => "UUID", "value" => "uuidB" }] }
+        ]
+        plan = {
+          "steps" => [
+            { "let" => "products", "value" => products },
+            { "index_by" => {
+              "from"  => "products",
+              "key"   => { "path" => "identifiers", "where" => { "type" => "LOCAL_UUID" }, "pick" => "value" },
+              "value" => { "path" => "identifiers", "where" => { "type" => "UUID" }, "pick" => "value" }
+            }, "as" => "uuid_map" }
+          ],
+          "output" => { "uuid_map" => "{uuid_map}" }
+        }
+        assert_equal({ "uuid_map" => { "v1a" => "uuidA", "v1b" => "uuidB" } },
+                     run_plan(plan, client: FakeClient.new(responses: {})))
+      end
+
+      def test_index_by_drops_nil_key_and_blank_value
+        products = [
+          { "identifiers" => [{ "type" => "LOCAL_UUID", "value" => "v1" },
+                              { "type" => "UUID", "value" => "u1" }] },
+          { "identifiers" => [{ "type" => "UUID", "value" => "u2" }] },                 # no LOCAL_UUID → nil key, dropped
+          { "identifiers" => [{ "type" => "LOCAL_UUID", "value" => "v3" },
+                              { "type" => "UUID", "value" => "" }] }                     # blank value, dropped
+        ]
+        plan = {
+          "steps" => [
+            { "let" => "products", "value" => products },
+            { "index_by" => {
+              "from"  => "products",
+              "key"   => { "path" => "identifiers", "where" => { "type" => "LOCAL_UUID" }, "pick" => "value" },
+              "value" => { "path" => "identifiers", "where" => { "type" => "UUID" }, "pick" => "value" }
+            }, "as" => "m" }
+          ],
+          "output" => { "m" => "{m}" }
+        }
+        assert_equal({ "m" => { "v1" => "u1" } }, run_plan(plan, client: FakeClient.new(responses: {})))
+      end
+
+      def test_index_by_with_string_path_key_and_value
+        rows = [{ "k" => "a", "v" => 1 }, { "k" => "b", "v" => 2 }]
+        plan = {
+          "steps" => [
+            { "let" => "rows", "value" => rows },
+            { "index_by" => { "from" => "rows", "key" => "k", "value" => "v" }, "as" => "m" }
+          ],
+          "output" => { "m" => "{m}" }
+        }
+        assert_equal({ "m" => { "a" => 1, "b" => 2 } }, run_plan(plan, client: FakeClient.new(responses: {})))
+      end
+
+      def test_note_and_warn_write_to_streams_with_interpolation
+        plan = {
+          "steps" => [
+            { "let" => "who", "value" => "Alice" },
+            { "note" => "serving {who}" },
+            { "warn" => "no uuid for {who}" }
+          ],
+          "output" => {}
+        }
+        _result, out, err = run_plan_io(plan, client: FakeClient.new(responses: {}))
+        assert_includes out, "serving Alice"
+        assert_includes err, "no uuid for Alice"
+      end
+
+      def test_abort_raises_user_error
+        plan = {
+          "steps" => [{ "abort" => "preflight failed: no bearer" }],
+          "output" => {}
+        }
+        err = assert_raises(UserError) { run_plan(plan, client: FakeClient.new(responses: {})) }
+        assert_includes err.message, "preflight failed: no bearer"
+      end
+
+      def test_message_respects_when_gate
+        # lookback_days = 5, gate gt:30 false → abort is skipped.
+        plan = {
+          "steps" => [{ "abort" => "should not fire", "when" => { "lookback_days" => { "gt" => 30 } } }],
+          "output" => {}
+        }
+        run_plan(plan, client: FakeClient.new(responses: {}), from_date: Date.today - 5) # no raise
+      end
+
+      def test_skip_when_drops_iteration_and_warns
+        client = FakeClient.new(responses: {
+          fetch_wallet: { "rows" => [{ "id" => "keep", "kind" => "asset" },
+                                     { "id" => "drop", "kind" => "investment" }] }
+        })
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_wallet", "as" => "wallet" },
+            { "select" => { "from" => "wallet", "path" => "rows" }, "as" => "rows" },
+            {
+              "for_each" => { "source" => "rows" },
+              "as_item" => "row", "as" => "kept",
+              "do" => [
+                { "select" => { "from" => "row", "path" => "kind" }, "as" => "kind" },
+                { "warn" => "skipping {row.id}", "when" => { "kind" => { "eq" => "investment" } } },
+                { "skip_when" => { "kind" => { "eq" => "investment" } } },
+                { "yield" => "{row.id}" }
+              ]
+            }
+          ],
+          "output" => { "kept" => "{kept}" }
+        }
+        result, _out, err = run_plan_io(plan, client: client)
+        assert_equal ["keep"], result["kept"]
+        assert_includes err, "skipping drop"
+      end
+
+      def test_fetch_on_error_abort_raises_custom_message_even_for_session_expired
+        client = FakeClient.new(responses: {},
+                                raise_on: { fetch_wallet: ApiClient::SessionExpired.new("401") })
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_wallet", "as" => "position",
+              "on_error" => { "abort" => "position-keeping failed — re-run after fresh login" } }
+          ],
+          "output" => { "position" => "{position}" }
+        }
+        err = assert_raises(UserError) { run_plan(plan, client: client) }
+        assert_includes err.message, "re-run after fresh login"
+      end
+
+      def test_fetch_on_error_warn_degrades_to_default
+        client = FakeClient.new(responses: {},
+                                raise_on: { fetch_wallet: ApiClient::ApiError.new(500, "boom") })
+        plan = {
+          "steps" => [
+            { "fetch" => "fetch_wallet", "as" => "w",
+              "on_error" => { "warn" => "optional fetch failed" }, "default" => { "fallback" => true } }
+          ],
+          "output" => { "w" => "{w}" }
+        }
+        result, _out, err = run_plan_io(plan, client: client)
+        assert_equal({ "w" => { "fallback" => true } }, result)
+        assert_includes err, "optional fetch failed"
+      end
     end
   end
 end
