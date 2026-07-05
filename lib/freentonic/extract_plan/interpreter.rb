@@ -53,8 +53,14 @@ module Freentonic
         elsif step.key?("let")       then do_let(step, scope)
         elsif step.key?("concat")    then do_concat(step, scope)
         elsif step.key?("dedup_by")  then do_dedup_by(step, scope)
+        elsif step.key?("index_by")  then do_index_by(step, scope)
+        elsif step.key?("note")      then do_message(step, "note", scope)
+        elsif step.key?("warn")      then do_message(step, "warn", scope)
+        elsif step.key?("abort")     then do_message(step, "abort", scope)
         elsif step.key?("yield")
           raise UserError, "extract.plan: yield: is only valid inside a for_each do: block"
+        elsif step.key?("skip_when")
+          raise UserError, "extract.plan: skip_when: is only valid inside a for_each do: block"
         else
           raise UserError, "extract.plan: unknown step #{step.keys.inspect}"
         end
@@ -82,12 +88,31 @@ module Freentonic
 
       def invoke(client, name, args, step)
         args.empty? ? client.public_send(name) : client.public_send(name, **args)
-      rescue ApiClient::SessionExpired
-        raise
       rescue StandardError => e
+        # on_error: gives a fetch a custom fatal/degrade policy that covers
+        # SessionExpired too — a /position-keeping failure must abort with an
+        # operator-actionable message, not surface downstream as "0 products".
+        return apply_on_error(step["on_error"], name, e, step) if step["on_error"]
+
+        # Default policy: SessionExpired always propagates (the Extract stage
+        # re-wraps it as "re-run connect"); `safe:` degrades other errors.
+        raise if e.is_a?(ApiClient::SessionExpired)
         raise unless step["safe"]
         @stderr.puts "    ✗ #{name}: #{e.class}: #{e.message}"
         step.key?("default") ? step["default"] : nil
+      end
+
+      # on_error: { abort: "msg" } → raise UserError with the operator
+      # message; { warn: "msg" } → note it on stderr and degrade to
+      # `default:` (or nil). The message is a static operator string (the
+      # failing fetch's own bindings don't exist).
+      def apply_on_error(policy, _name, _error, step)
+        if policy.key?("abort")
+          raise UserError, policy["abort"].to_s
+        else
+          @stderr.puts "  ⚠ #{policy["warn"]}"
+          step.key?("default") ? step["default"] : nil
+        end
       end
 
       # select: { from:, path:, default: } — dig a sub-value out of an
@@ -202,17 +227,73 @@ module Freentonic
       private_constant :SKIP
 
       def run_iteration(do_steps, client, child)
-        yielded = SKIP
-        do_steps.each do |sub|
-          if sub.key?("yield")
-            skip_ref = sub["skip_if_nil"]
-            next if skip_ref && child.get(skip_ref).nil?
-            yielded = child.resolve(sub["yield"])
-          else
-            execute(sub, client, child)
+        # `skip_when:` drops the whole iteration (a declarative `next`) —
+        # thrown so it also short-circuits any remaining sub-steps. A
+        # skipped iteration contributes nothing to the for_each collection.
+        catch(:skip_iteration) do
+          yielded = SKIP
+          do_steps.each do |sub|
+            if sub.key?("yield")
+              skip_ref = sub["skip_if_nil"]
+              next if skip_ref && child.get(skip_ref).nil?
+              yielded = child.resolve(sub["yield"])
+            elsif sub.key?("skip_when")
+              throw :skip_iteration, SKIP if gate_passes?(sub["skip_when"], child)
+            else
+              execute(sub, client, child)
+            end
+          end
+          yielded
+        end
+      end
+
+      # index_by: { from:, key:, value: } — build a Hash from a bound list,
+      # extracting each entry's key and value per item. `key:`/`value:` are
+      # either a dotted path String or a find-by-field spec
+      # ({ path?, where?, pick? } — dig `path` to a list, find the element
+      # whose fields all match `where`, then `pick` a field). Entries whose
+      # key is nil or whose value is nil/blank are dropped (a missing
+      # identifier must not create a `nil => nil` mapping). The declarative
+      # form of a hand-written `each_with_object({})` lookup build.
+      def do_index_by(step, scope)
+        spec  = step["index_by"]
+        items = Array(scope.get(spec["from"]))
+        result = items.each_with_object({}) do |item, map|
+          key = extract_indexed(spec["key"], item)
+          val = extract_indexed(spec["value"], item)
+          next if key.nil? || val.nil? || val.to_s.empty?
+          map[key] = val
+        end
+        scope.bind(step["as"], result)
+      end
+
+      # Extract one value from an item for index_by. String → dotted path;
+      # Hash → find-by-field ({ path?, where?, pick? }).
+      def extract_indexed(spec, item)
+        return dig_path(item, spec) if spec.is_a?(String)
+
+        source = spec["path"] ? dig_path(item, spec["path"]) : item
+        if (cond = spec["where"])
+          source = Array(source).find do |el|
+            el.is_a?(Hash) && cond.all? { |k, v| el[k] == v }
           end
         end
-        yielded
+        pick = spec["pick"]
+        return source unless pick
+        source.is_a?(Hash) ? source[pick] : nil
+      end
+
+      # note:/warn:/abort: — emit an operator breadcrumb (embedded {token}
+      # interpolation), or, for abort:, raise a UserError. Any of them may
+      # carry a `when:` gate (handled in #execute), so a preflight check is
+      # `abort: "…" when: { bearer: { absent: true } }`.
+      def do_message(step, kind, scope)
+        text = scope.interpolate(step[kind])
+        case kind
+        when "note"  then @stdout.puts "  #{text}"
+        when "warn"  then @stderr.puts "  ⚠ #{text}"
+        when "abort" then raise UserError, text
+        end
       end
 
       # Build the iteration collection: the bound `source`, optionally

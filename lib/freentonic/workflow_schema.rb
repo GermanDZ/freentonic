@@ -338,7 +338,8 @@ module Freentonic
       validate_extract_plan!(ext["plan"]) if has_plan
     end
 
-    PLAN_STEP_VERBS = %w[fetch select for_each let concat dedup_by].freeze
+    PLAN_STEP_VERBS =
+      %w[fetch select for_each let concat dedup_by index_by note warn abort].freeze
 
     # Bindings the interpreter pre-seeds before the first step (see
     # ExtractPlan::PlanExtractor#call / ExtractPlan.seed_scope). Static
@@ -491,7 +492,9 @@ module Freentonic
         raise UserError, "#{loc}: must be a hash"
       end
 
-      allowed = PLAN_STEP_VERBS + (allow_yield ? %w[yield] : [])
+      # yield: and skip_when: are only meaningful inside a for_each do:
+      # block, so they are allowed only when allow_yield is set.
+      allowed = PLAN_STEP_VERBS + (allow_yield ? %w[yield skip_when] : [])
       verbs   = step.keys & allowed
       if verbs.empty?
         raise UserError, "#{loc}: unknown step (expected one of #{allowed.join(", ")}; " \
@@ -506,14 +509,58 @@ module Freentonic
       validate_plan_when!(step["when"], "#{loc}.when", bound) if step.key?("when")
 
       case verbs.first
-      when "fetch"    then validate_plan_fetch!(step, loc, endpoints, bound)
-      when "select"   then validate_plan_select!(step, loc, bound)
-      when "for_each" then validate_plan_for_each!(step, loc, endpoints, bound)
-      when "let"      then validate_plan_let!(step, loc, bound)
-      when "concat"   then validate_plan_concat!(step, loc, bound)
-      when "dedup_by" then validate_plan_dedup_by!(step, loc, bound)
-      when "yield"    then validate_plan_yield!(step, loc, bound)
+      when "fetch"     then validate_plan_fetch!(step, loc, endpoints, bound)
+      when "select"    then validate_plan_select!(step, loc, bound)
+      when "for_each"  then validate_plan_for_each!(step, loc, endpoints, bound)
+      when "let"       then validate_plan_let!(step, loc, bound)
+      when "concat"    then validate_plan_concat!(step, loc, bound)
+      when "dedup_by"  then validate_plan_dedup_by!(step, loc, bound)
+      when "index_by"  then validate_plan_index_by!(step, loc, bound)
+      when "note", "warn", "abort" then validate_plan_message!(step, verbs.first, loc, bound)
+      when "skip_when" then validate_plan_when!(step["skip_when"], "#{loc}.skip_when", bound)
+      when "yield"     then validate_plan_yield!(step, loc, bound)
       end
+    end
+
+    # index_by: { from:, key:, value: } — from must be bound; key/value are
+    # each a dotted-path String or a find-by-field hash ({ path?, where?,
+    # pick? }). Binds `as:`.
+    def validate_plan_index_by!(step, loc, bound)
+      spec = step["index_by"]
+      unless spec.is_a?(Hash)
+        raise UserError, "#{loc}.index_by: must be a hash with from:, key:, value:"
+      end
+      unless bound.include?(spec["from"].to_s)
+        raise UserError, "#{loc}.index_by.from: #{spec["from"].inspect} is not bound by an earlier step " \
+                         "(bound: #{bound.join(", ")})"
+      end
+      %w[key value].each do |field|
+        validate_index_extractor!(spec[field], "#{loc}.index_by.#{field}")
+      end
+      unless step["as"].is_a?(String) && !step["as"].empty?
+        raise UserError, "#{loc}.index_by: requires a non-empty as: to bind the result"
+      end
+      bound << step["as"]
+    end
+
+    def validate_index_extractor!(spec, loc)
+      return if spec.is_a?(String) && !spec.empty?
+      unless spec.is_a?(Hash) && (spec.key?("path") || spec.key?("pick"))
+        raise UserError, "#{loc}: must be a dotted-path string or a hash with path:/where:/pick:"
+      end
+      if spec.key?("where") && !spec["where"].is_a?(Hash)
+        raise UserError, "#{loc}.where: must be a hash of field => value matchers"
+      end
+    end
+
+    # note:/warn:/abort: <message> — an operator breadcrumb; abort: raises.
+    # The message may embed {tokens}; each must reference a bound name.
+    def validate_plan_message!(step, verb, loc, bound)
+      msg = step[verb]
+      unless msg.is_a?(String) && !msg.empty?
+        raise UserError, "#{loc}.#{verb}: must be a non-empty message string"
+      end
+      validate_embedded_refs!(msg, "#{loc}.#{verb}", bound)
     end
 
     # let: <name> — exactly one of value: / coalesce: / days_ago:. Binds
@@ -626,7 +673,26 @@ module Freentonic
         end
         validate_plan_refs!(step["args"], "#{loc}.args", bound)
       end
+      validate_plan_on_error!(step["on_error"], "#{loc}.on_error") if step.key?("on_error")
       bind_plan_as!(step, loc, bound)
+    end
+
+    # on_error: { abort: "msg" } | { warn: "msg" } — exactly one, a
+    # non-empty operator message. abort raises a UserError; warn degrades
+    # to `default:` (or nil).
+    def validate_plan_on_error!(policy, loc)
+      unless policy.is_a?(Hash)
+        raise UserError, "#{loc}: must be a hash with abort: or warn:"
+      end
+      kinds = %w[abort warn].select { |k| policy.key?(k) }
+      unless kinds.size == 1
+        raise UserError, "#{loc}: must declare exactly one of abort:, warn: " \
+                         "(found #{kinds.empty? ? "none" : kinds.inspect})"
+      end
+      msg = policy[kinds.first]
+      unless msg.is_a?(String) && !msg.empty?
+        raise UserError, "#{loc}.#{kinds.first}: must be a non-empty message string"
+      end
     end
 
     def validate_plan_select!(step, loc, bound)

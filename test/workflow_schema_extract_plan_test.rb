@@ -359,5 +359,155 @@ module Freentonic
       YAML
       assert_nil err
     end
+
+    # ── Ask 5: index_by / message verbs / skip_when / on_error ──────────
+
+    def test_index_by_valid_loads
+      assert_nil load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - index_by:
+                  from: wallet
+                  key: { path: identifiers, where: { type: LOCAL_UUID }, pick: value }
+                  value: { path: identifiers, where: { type: UUID }, pick: value }
+                as: uuid_map
+            output: { m: "{uuid_map}" }
+      YAML
+    end
+
+    def test_index_by_from_must_be_bound
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - index_by: { from: nope, key: k, value: v }
+                as: m
+            output: {}
+      YAML
+      assert_includes err, "not bound"
+    end
+
+    def test_index_by_requires_as
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - index_by: { from: wallet, key: k, value: v }
+            output: {}
+      YAML
+      assert_includes err, "as:"
+    end
+
+    def test_index_by_bad_extractor_spec_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - index_by: { from: wallet, key: 3, value: v }
+                as: m
+            output: {}
+      YAML
+      assert_includes err, "dotted-path string or a hash"
+    end
+
+    def test_message_verbs_validate_and_check_refs
+      assert_nil load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - note: "starting up"
+              - warn: "since {from_date}"
+              - abort: "hard stop"
+                when: { lookback_days: { gt: 9999 } }
+            output: {}
+      YAML
+    end
+
+    def test_message_verb_unbound_ref_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - warn: "no uuid for {mystery}"
+            output: {}
+      YAML
+      assert_includes err, "unbound name"
+      assert_includes err, "mystery"
+    end
+
+    def test_skip_when_outside_for_each_is_rejected
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - skip_when: { lookback_days: { gt: 1 } }
+            output: {}
+      YAML
+      assert_includes err, "unknown step"
+    end
+
+    def test_skip_when_inside_for_each_is_valid
+      assert_nil load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: wallet
+              - for_each: { source: wallet }
+                as_item: row
+                as: kept
+                do:
+                  - select: { from: row, path: kind }
+                    as: kind
+                  - skip_when: { kind: { eq: investment } }
+                  - yield: "{row}"
+            output: { kept: "{kept}" }
+      YAML
+    end
+
+    def test_on_error_abort_valid
+      assert_nil load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: position
+                on_error: { abort: "position-keeping failed" }
+            output: { p: "{position}" }
+      YAML
+    end
+
+    def test_on_error_must_declare_exactly_one_of_abort_warn
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: w
+                on_error: { abort: "a", warn: "b" }
+            output: {}
+      YAML
+      assert_includes err, "exactly one"
+    end
+
+    def test_on_error_message_must_be_non_empty
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps:
+              - fetch: fetch_wallet
+                as: w
+                on_error: { abort: "" }
+            output: {}
+      YAML
+      assert_includes err, "non-empty"
+    end
   end
 end

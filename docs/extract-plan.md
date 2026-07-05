@@ -160,7 +160,8 @@ and let the endpoint's `{name|iso}` / `{name|date}` param filter format it
 | `args` | kwargs passed to the endpoint (templates resolved first) |
 | `as` | bind the result |
 | `safe` | `true` → rescue an API error to `default:` (or nil) with an stderr note |
-| `default` | value to bind when a `safe:` fetch fails |
+| `default` | value to bind when a `safe:`/`on_error: warn` fetch fails |
+| `on_error` | `{ abort: "msg" }` or `{ warn: "msg" }` — a custom failure policy (see below) |
 | `extract_batch` | list of keys to unwrap a hash-wrapped array (`Hash` → first matching key) |
 
 `safe:` never swallows a `SessionExpired` (401/403) — that always
@@ -168,9 +169,18 @@ propagates so the Extract stage can re-wrap it as an actionable "re-run
 connect" error. Use `safe:` for non-critical products, not to mask a dead
 session.
 
+**`on_error:`** overrides that default for a *critical* fetch, covering
+`SessionExpired` too. `{ abort: "msg" }` raises a `UserError` with your
+operator message on any failure — for a fetch whose silent failure would
+mislead downstream (an empty `/position-keeping` reads as "all accounts
+deleted"). `{ warn: "msg" }` notes the message on stderr and degrades to
+`default:` (or nil). `on_error:` and `safe:` are alternatives — `on_error`
+takes precedence.
+
 **`select: { from:, path:, default: }`** — dig a sub-value out of a bound
 result. `path` is a single key, a dotted path (`meta.region`), or a list
-(fallback chain — first non-nil wins). `default:` applies when the lookup
+(fallback chain — first non-nil wins). An integer path segment indexes an
+Array (`accessTokens.0.accessToken`). `default:` applies when the lookup
 is nil. Binds via `as:`.
 
 **`for_each:`** — iterate a bound collection.
@@ -231,6 +241,53 @@ the sequence field passes through instead of collapsing rows together.
 - dedup_by: [numMovimiento, nummov]   # cross-endpoint field spellings
   from: merged
   as: movements
+```
+
+### Lookup, routing, and guard verbs
+
+**`index_by: { from:, key:, value: }`** — build a `Hash` from a bound list
+by extracting a key and value from each item. Binds via `as:`. `key:` and
+`value:` are each either a dotted-path String (`uuid`) or a *find-by-field*
+spec: `{ path:, where:, pick: }` — dig `path` to a list, find the element
+whose fields all match `where`, then `pick` a field from it. Entries with a
+nil key or a nil/blank value are dropped (a missing identifier must not
+create a `nil => nil` mapping).
+
+```yaml
+# V1ID → v2 UUID from a products[].identifiers[] list
+- index_by:
+    from: products
+    key:   { path: identifiers, where: { type: LOCAL_UUID }, pick: value }
+    value: { path: identifiers, where: { type: UUID },       pick: value }
+  as: uuid_map
+```
+
+**`note: <msg>` / `warn: <msg>` / `abort: <msg>`** — emit an operator
+breadcrumb: `note` to stdout, `warn` to stderr, `abort` raises a
+`UserError`. The message embeds `{tokens}` (resolved against the current
+scope). Each may carry a `when:` gate, so a preflight guard is just an
+`abort`/`warn` behind a condition:
+
+```yaml
+- abort: "no Bearer captured — re-run connect"
+  when: { bearer: { absent: true } }
+- warn: "XSRF-TOKEN cookie missing; state-changing calls may 200-with-empty"
+  when: { xsrf: { absent: true } }
+```
+
+**`skip_when: <gate>`** (inside `for_each.do` only) — drop the current
+iteration (a declarative `next`) when the gate passes; it contributes
+nothing to the collected result and short-circuits the rest of the
+iteration. Pair it with a `warn:`/`note:` so a skip stays visible:
+
+```yaml
+do:
+  - select: { from: product, path: kind }
+    as: kind
+  - warn: "skipping {product.alias} (kind=investment): poisons the batch"
+    when: { kind: { eq: investment } }
+  - skip_when: { kind: { eq: investment } }
+  - yield: { product: "{product}" }
 ```
 
 ### `when:` — gating a step

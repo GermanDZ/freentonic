@@ -12,6 +12,34 @@ one-release dual-accept window before `version: 2`) is spelled out in
 
 ## Unreleased
 
+### Extract-plan verbs: `index_by`, `note`/`warn`/`abort`, `skip_when`, fetch `on_error`
+
+The last idioms an orchestration-only extractor needed that the plan
+grammar couldn't express — enough that ING's `extractor.rb` can be
+retired. All additive; no `version:` bump.
+
+- **`index_by: { from:, key:, value: }`** — build a `Hash` from a bound
+  list. `key:`/`value:` are a dotted-path String or a *find-by-field* spec
+  (`{ path:, where:, pick: }` — dig to a list, find the element matching
+  `where:`, `pick:` a field). Nil-key / blank-value entries are dropped.
+  The declarative form of a hand-written lookup-map build.
+- **`note:` / `warn:` / `abort:` message verbs.** Emit an operator
+  breadcrumb (stdout / stderr / raise `UserError`), with embedded `{token}`
+  interpolation and an optional `when:` gate — so a preflight guard is
+  `abort: "…" when: { bearer: { absent: true } }`.
+- **`skip_when: <gate>`** (inside `for_each.do`) — drop the current
+  iteration when the gate passes; contributes nothing and short-circuits
+  the rest of the iteration. Pairs with `warn:`/`note:` for loud skips.
+- **`fetch … on_error: { abort: | warn: }`.** A custom failure policy that
+  covers `SessionExpired` too: `abort` raises a `UserError` with an
+  operator message (for a critical fetch whose silent failure would
+  mislead downstream — an empty `/position-keeping` reads as "all accounts
+  deleted"); `warn` notes it and degrades to `default:`.
+- **Array indices in plan paths.** `select:`/`output:` dotted paths now
+  index Arrays with an integer segment (`accessTokens.0.accessToken`).
+- Statically validated at load + `--lint` (binding resolution,
+  find-by-field spec shape, one-of `abort`/`warn`, message refs).
+
 ### Session elevation (`elevate:` phase)
 
 A new lifecycle stage — **Connect → Elevate → Extract → Normalize →
