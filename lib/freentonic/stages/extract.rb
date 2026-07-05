@@ -93,7 +93,7 @@ module Freentonic
       end
 
       def load_extractor
-        spec = source.workflow.config["extract"] || source.extract_spec
+        spec = source.extract_spec
         unless spec.is_a?(Hash) && spec["ruby"] && spec["class"]
           raise UserError, "workflow #{source.workflow.path}: extract: must be a hash with ruby: and class: keys"
         end

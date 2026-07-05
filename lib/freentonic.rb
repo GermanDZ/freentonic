@@ -20,6 +20,7 @@ require_relative "freentonic/workflow_schema"
 require_relative "freentonic/remote_prompt_store"
 require_relative "freentonic/recorder"
 require_relative "freentonic/browser_workflow_runner"
+require_relative "freentonic/timestamp_ms"
 require_relative "freentonic/api_client"
 require_relative "freentonic/source"
 

@@ -1,5 +1,6 @@
 require "date"
 require "time"
+require_relative "../timestamp_ms"
 
 module Freentonic
   module Providers
@@ -143,19 +144,7 @@ module Freentonic
       #   parse_timestamp_ms("2024-03-15T10:00:00.000Z")    #=> 1710504000000
       #
       def parse_timestamp_ms(value)
-        case value
-        when Numeric
-          value > 1_000_000_000_000 ? value.to_i : (value * 1000).to_i
-        when String
-          if value =~ /\A\d+\z/
-            v = value.to_i
-            v > 1_000_000_000_000 ? v : v * 1000
-          else
-            (Time.parse(value).to_f * 1000).to_i
-          end
-        end
-      rescue ArgumentError, TypeError
-        nil
+        TimestampMs.parse(value)
       end
 
       # Return the first candidate that is a non-empty stripped string;
