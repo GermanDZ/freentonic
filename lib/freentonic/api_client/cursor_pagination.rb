@@ -9,6 +9,11 @@ module Freentonic
     # Interpolation (ep_interpolate_*, ep_dig_path, ep_symbolize_keys) and
     # the instance's `pagination_sleep`.
     module CursorPagination
+      # Mixed in as private instance methods (they were private on ApiClient
+      # before the extraction). Depends on Interpolation + pagination_sleep,
+      # all reached via implicit self, so private visibility is preserved.
+      private
+
       # Declarative cursor pagination driven by a YAML spec. Each iteration:
       #
       #   1. Merge initial_kwargs (first call only) or continue_kwargs

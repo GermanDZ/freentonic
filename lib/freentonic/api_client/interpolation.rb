@@ -16,6 +16,11 @@ module Freentonic
     #   {name|date}  → format_date(kwargs[:name])  (workflow's date_format)
     #   {name|iso}   → kwargs[:name] as yyyy-mm-dd, regardless of date_format
     module Interpolation
+      # Mixed in as private instance methods (they were private on ApiClient
+      # before the extraction). Cross-module calls use implicit self, so
+      # private visibility is preserved.
+      private
+
       # Replace {name} tokens in a path template with values from kwargs.
       def ep_interpolate_path(template, kwargs)
         template.gsub(/\{(\w+)\}/) do
