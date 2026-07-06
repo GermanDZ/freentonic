@@ -56,6 +56,7 @@ module Freentonic
         elsif step.key?("dedup_by")  then do_dedup_by(step, scope)
         elsif step.key?("index_by")  then do_index_by(step, scope)
         elsif step.key?("lookup")    then do_lookup(step, scope)
+        elsif step.key?("apply")     then do_apply(step, scope)
         elsif step.key?("note")      then do_message(step, "note", scope)
         elsif step.key?("warn")      then do_message(step, "warn", scope)
         elsif step.key?("abort")     then do_message(step, "abort", scope)
@@ -75,6 +76,14 @@ module Freentonic
       # propagates so the Extract stage can re-wrap it as an actionable
       # "re-run connect" UserError.
       def do_fetch(step, client, scope)
+        # Belt-and-braces: normalize plans validate fetch: away statically
+        # AND run with no client. A fetch that slips through (hand-built
+        # plan hash) fails loud, not NoMethodError-on-nil.
+        if client.nil?
+          raise UserError, "plan: fetch: is not available in this context (no api client — " \
+                           "normalize plans are offline)"
+        end
+
         name = step["fetch"].to_s
         unless @endpoint_names.include?(name)
           raise UserError,
@@ -277,12 +286,20 @@ module Freentonic
         source = spec["path"] ? dig_path(item, spec["path"]) : item
         if (cond = spec["where"])
           source = Array(source).find do |el|
-            el.is_a?(Hash) && cond.all? { |k, v| el[k] == v }
+            el.is_a?(Hash) && cond.all? { |k, v| where_match?(el[k], v) }
           end
         end
         pick = spec["pick"]
         return source unless pick
         source.is_a?(Hash) ? source[pick] : nil
+      end
+
+      # A where: matcher is a literal (equality) or an operator hash
+      # reusing the when: operator set — `{ iban: { present: true } }`
+      # finds the first element carrying an iban, which equality can't say.
+      def where_match?(actual, matcher)
+        return actual == matcher unless matcher.is_a?(Hash)
+        matcher.all? { |op, operand| WhenGate.compare(actual, op, operand, "where") }
       end
 
       # lookup: { from:, key:, default: } — read a bound map with a
@@ -302,6 +319,16 @@ module Freentonic
         value = map.is_a?(Hash) && !key.nil? ? map[key] : nil
         value = spec["default"] if value.nil? && spec.key?("default")
         scope.bind(step["as"], value)
+      end
+
+      # apply: <function> — invoke a registered pure function with resolved
+      # args, binding the result. Dispatch is a registry lookup, never a
+      # `send` off YAML input; Fn.call deep-freezes the resolved args so an
+      # impl that mutates its input raises instead of corrupting a shared
+      # binding. See Freentonic::Fn for the purity contract.
+      def do_apply(step, scope)
+        args = step["args"] ? scope.resolve(step["args"]) : {}
+        scope.bind(step["as"], Fn.call(step["apply"].to_s, args))
       end
 
       # note:/warn:/abort: — emit an operator breadcrumb (embedded {token}
@@ -348,6 +375,12 @@ module Freentonic
             acc[key]
           elsif acc.is_a?(Array) && key.match?(/\A\d+\z/)
             acc[key.to_i]
+          elsif acc.is_a?(Data) && acc.members.include?(key.to_sym)
+            # Canonical entities are frozen Data value objects; digging
+            # their declared members (and nothing else — no arbitrary
+            # send) lets a plan chain builders: build_account, then read
+            # `{account.id}` for the transactions attached to it.
+            acc.public_send(key)
           end
         end
       end

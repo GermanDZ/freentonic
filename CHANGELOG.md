@@ -10,6 +10,100 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.17.0 — `parse_date` timezones (input/output zones)
+
+`parse_date` gains explicit timezone control, and — importantly — its
+default is now **deterministic**. The canonical model stores a calendar
+`Date`, so the only question a timezone answers is *which zone's calendar
+day an instant falls on*. Additive; no `version:` bump.
+
+- **Behavior change (determinism fix):** a Unix timestamp used to reduce
+  to a calendar day via `Time.at(ts).to_date` — the **process's local
+  TZ** — so the same raw payload could normalize to a different `date` on
+  a laptop vs a UTC CI runner, breaking `--from-raw` reproducibility. It
+  now defaults to **UTC**. Only providers parsing absolute instants are
+  affected; every Spanish bank (ING, Unicaja) and Fintonic send date-only
+  strings, which are timezone-immune. Revolut (epoch-ms / Zulu ISO) is the
+  only affected provider, and its dates are unchanged under UTC.
+- **`parse_date` / `Fn` params `input_timezone:` + `output_timezone:`**
+  (both default UTC):
+  - `output_timezone` buckets any absolute instant (Unix timestamp, or an
+    offset-bearing datetime like `…Z` / `…-05:00`) into its calendar day —
+    the display/booking zone.
+  - `input_timezone` interprets an offset-*naive* datetime string
+    (`"2024-03-15 23:30:00"`, no offset) as local time in that zone before
+    bucketing. Date-only inputs and already-instant inputs ignore it.
+- **Zone grammar** — `UTC` (default) and fixed offsets (`"+01:00"`) are
+  pure stdlib; named IANA zones (`"Europe/Madrid"`, DST-correct) use the
+  **optional** `tzinfo` gem. A named zone without tzinfo raises a clear,
+  actionable error (and `--lint` flags a bad/unavailable zone declared in
+  `config.yml`) rather than failing obscurely mid-sync.
+- Providers set `input_timezone:` / `output_timezone:` in `config.yml` and
+  thread them through `apply: parse_date` (see Revolut).
+
+## 0.16.0 — `normalize: plan:` (Ask 8)
+
+Normalization goes declarative ([docs/normalize-plan.md](docs/normalize-plan.md)):
+a provider can now express its whole raw→canonical transform in
+`workflow.yml`, deleting its `normalizer.rb`. Revolut is the proof —
+migrated in freentonic-providers with golden-parity coverage. Additive;
+no `version:` bump.
+
+- **`normalize: plan:`** — the extract-plan step grammar minus `fetch:`
+  (statically excluded AND runtime-guarded: no api_client exists), so a
+  normalize plan is a *total, offline* computation — raw in, canonical
+  out, `--from-raw`-replayable forever. Scope seeds: `raw`, `config`
+  (the provider's config.yml), `today` — deliberately not
+  `now_ms`/`from_ms`, which would silently break replay. `output:` is
+  restricted to `accounts:` / `transactions:` / `liabilities:`; the
+  stage assembles the CanonicalPayload envelope itself with config.yml's
+  `scraper_version`. Mutually exclusive with the `ruby:`/`class:` escape
+  hatch (which Ask 10 deletes).
+- **Verb-set parameterization** — the shared step validator takes an
+  allowed-verbs list; extract plans and elevate keep the full set.
+- **`index_by: where:` operator matchers** — a matcher value may now be
+  an operator hash from the `when:` set (`{ iban: { present: true } }`),
+  expressing "first element carrying this field", which literal equality
+  cannot.
+- **Entity digging** — templates and `select:` paths can walk the
+  declared members of a canonical entity (`{account.id}`), never an
+  arbitrary send, so a plan chains `build_account` into the
+  `build_transaction`s attached to it.
+- **New builtins** — `compact`, `flatten`, `pluck`, `join` (the
+  whole-token-safe form of string interpolation), `strip`.
+
+## 0.15.0 — `Fn` registry + the `apply:` verb (Ask 7)
+
+First step of the pure-functions program
+([docs/pure-functions-plan.md](docs/pure-functions-plan.md)): a registry
+of named **pure functions** and one shared verb to call them from any
+plan context. Groundwork for `normalize: plan:` (Ask 8) — the goal is
+deleting every per-provider `normalizer.rb`. Additive; no `version:` bump.
+
+- **`Freentonic::Fn`** — a closed, freentonic-owned registry of pure
+  functions: args in → value out, no I/O, no client, no clock, no input
+  mutation. Purity is enforced, not asked: `Fn.call` deep-freezes every
+  resolved arg, so a mutating impl raises `FrozenError` instead of
+  corrupting a shared plan binding. Every definition must declare a
+  description, typed params, an impl, and **at least one executable
+  example** — the registry test harness runs all examples (twice each,
+  asserting identical results), so a function cannot exist without being
+  born covered.
+- **`apply: <function> / args: / as:`** — new verb in the shared plan
+  step grammar, usable in `extract: plan:` steps, `for_each do:` blocks,
+  and the `elevate:` phase. Dispatch is a registry lookup (never a `send`
+  off YAML); the registry plays the same whitelist role for `apply:` as
+  the declared-endpoint list does for `fetch:`. Because `args:` is a
+  literal YAML hash, `--lint`/load statically reject an unknown function,
+  an undeclared parameter, a missing required parameter, or an unbound
+  `{ref}`.
+- **Tier A builtins** — registrations over the existing tested
+  helper/builder logic: `cents`, `cents_to_amount`, `parse_date`,
+  `parse_timestamp_ms`, `map_status`, `pick`, `extract_fields`,
+  `first_present`, `pan_last4`, `compact_whitespace`,
+  `spanish_iban_portable_keys`, `card_pan_portable_keys`,
+  `build_account`, `build_transaction`, `build_liability`.
+
 ## 0.14.0 — Extract-plan `lookup:` (dynamic-key map read)
 
 The one idiom the Ask 5 verbs turned out not to cover, and the last thing

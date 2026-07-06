@@ -288,6 +288,31 @@ digs an already-built binding; it computes nothing.
   as: joined
 ```
 
+**`apply: <function>`** — invoke a registered **pure function** from the
+`Freentonic::Fn` registry with `args:`, binding the result via `as:`
+(required). The registry is the whitelist — exactly the declared-endpoint
+pattern `fetch:` uses — and every function is pure by contract *and*
+enforcement: args in → value out, no I/O, no client, no clock, and the
+interpreter deep-freezes the resolved args so a mutating impl raises
+instead of corrupting a shared binding. Because `args:` is a literal YAML
+hash, parameter names are checked at load time: an unknown function, an
+undeclared parameter, or a missing required parameter fails `--lint`, not
+a live sync. See `docs/pure-functions-plan.md` for the registry design and
+the builtin catalog (`cents`, `parse_date`, `map_status`, `pick`,
+`build_account`, `build_transaction`, …).
+
+```yaml
+- for_each: { source: movements }
+  as_item: mv
+  do:
+    - apply: cents
+      args: { amount: "{mv.amount}" }
+      as: amount_cents
+    - skip_when: { amount_cents: { absent: true } }
+    - yield: { id: "{mv.uuid}", cents: "{amount_cents}" }
+  as: rows
+```
+
 **`note: <msg>` / `warn: <msg>` / `abort: <msg>`** — emit an operator
 breadcrumb: `note` to stdout, `warn` to stderr, `abort` raises a
 `UserError`. The message embeds `{tokens}` (resolved against the current
@@ -349,6 +374,8 @@ load) verifies, with no Chrome and no network:
 
 - exactly one of `plan:` / (`ruby:` + `class:`),
 - every `fetch:` names a declared endpoint,
+- every `apply:` names a registered function, with no unknown and no
+  missing required parameters,
 - every `{token}` root and every `select.from` / `for_each.source` /
   `concat:` name / `dedup_by.from` / `index_by.from` / `lookup.from` /
   `when:` key references a name bound earlier (loop variables scoped to

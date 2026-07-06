@@ -24,19 +24,12 @@ module Freentonic
       private
 
       def load_normalizer
-        spec = schema.normalizer
-        return Normalizers::Passthrough.new if spec.nil?
-
-        unless spec.is_a?(Hash) && spec["ruby"] && spec["class"]
-          raise UserError, "workflow #{schema.path}: normalize: must be a hash with ruby: and class: keys"
-        end
-
-        workflow_dir = File.dirname(schema.path)
-        ruby_path = File.expand_path(spec["ruby"], workflow_dir)
-        ruby_path = PathConfinement.resolve_within!(ruby_path, workflow_dir, label: "normalize.ruby")
-        require ruby_path
-        klass = spec["class"].to_s.split("::").inject(Object) { |ns, name| ns.const_get(name, false) }
-        klass.new
+        Normalizers::Builder.build(schema.normalizer,
+                                   workflow_dir: File.dirname(schema.path),
+                                   stdout: stdout, stderr: stderr)
+      rescue UserError => e
+        # Preserve the workflow-scoped message the stage used to emit.
+        raise UserError, "workflow #{schema.path}: #{e.message}"
       end
     end
   end

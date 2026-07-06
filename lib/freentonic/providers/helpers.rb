@@ -1,6 +1,7 @@
 require "date"
 require "time"
 require_relative "../timestamp_ms"
+require_relative "timezone"
 
 module Freentonic
   module Providers
@@ -55,39 +56,39 @@ module Freentonic
       # be mis-parsed — e.g. Spanish-locale "05/06/2024" means 5 June,
       # not the ISO-ish 6 May that Date.parse would infer without a hint.
       # Non-matching patterns are skipped silently; if every pattern
-      # misses, falls through to the generic Date.parse path.
+      # misses, falls through to the generic parse path.
       #
       #   parse_date("05/06/2024", preferred_formats: ["%d/%m/%Y"])
       #   #=> Date.new(2024, 6, 5)
       #
-      def parse_date(value, preferred_formats: nil)
+      # Timezone handling. The canonical model stores a calendar Date, so
+      # the only question a timezone answers is which zone's calendar day an
+      # *instant* falls on. Both zones default to UTC — so absent config the
+      # result is deterministic and machine-independent (never the process's
+      # local TZ, which the old Time.at(ts).to_date silently used):
+      #   - output_timezone: buckets any absolute instant (a Unix timestamp,
+      #     or an offset-bearing datetime like "…Z" / "…-05:00") into its
+      #     calendar day. This is the display/booking zone.
+      #   - input_timezone: interprets an offset-*naive* datetime string
+      #     ("2024-03-15 23:30:00", no offset) as local time in that zone
+      #     before bucketing. Irrelevant to date-only strings and to inputs
+      #     that already carry an instant.
+      # Date-only inputs (a Date, "2024-03-15", a %d/%m/%Y match) have no
+      # time component, so no zone applies — they pass through as written.
+      #
+      #   parse_date(1710457200000, output_timezone: "+01:00") #=> 2024-03-15
+      #   parse_date(1710457200000)                            #=> 2024-03-14 (UTC)
+      #
+      def parse_date(value, preferred_formats: nil, input_timezone: nil, output_timezone: nil)
         return nil if value.nil?
 
         case value
         when Date
           value
         when Numeric
-          # Unix timestamp — detect seconds vs milliseconds.
-          # Timestamps after year 3000 in seconds (~32503680000) are
-          # implausible, so anything above 10^12 is milliseconds.
-          ts = value > 1_000_000_000_000 ? value / 1000.0 : value.to_f
-          Time.at(ts).to_date
+          Timezone.to_date_in(Time.at(unix_seconds(value)), output_timezone)
         when String
-          if value =~ /\A\d{10,13}\z/
-            # Numeric string (Unix timestamp)
-            ts = value.to_i
-            ts = ts / 1000 if ts > 1_000_000_000_000
-            Time.at(ts).to_date
-          else
-            Array(preferred_formats).each do |fmt|
-              begin
-                return Date.strptime(value, fmt)
-              rescue Date::Error, ArgumentError
-                next
-              end
-            end
-            Date.parse(value)
-          end
+          parse_date_string(value, preferred_formats, input_timezone, output_timezone)
         end
       rescue ArgumentError, TypeError
         # Back-compat fallback for callers that don't pass preferred_formats
@@ -235,6 +236,67 @@ module Freentonic
       module_function :pan_last4
 
       private
+
+      # Unix timestamp → seconds (Float). Detect seconds vs milliseconds:
+      # timestamps after year 3000 in seconds (~32_503_680_000) are
+      # implausible, so anything above 10^12 is milliseconds.
+      def unix_seconds(value)
+        n = value.to_f
+        n > 1_000_000_000_000 ? n / 1000.0 : n
+      end
+
+      # Parse a String date, applying timezone rules only to the shapes that
+      # carry an instant. Order: Unix numeric string → preferred strptime
+      # formats (date-only) → generic, classified by Date._parse.
+      def parse_date_string(value, preferred_formats, input_tz, output_tz)
+        if value =~ /\A\d{10,13}\z/
+          return Timezone.to_date_in(Time.at(unix_seconds(value)), output_tz)
+        end
+
+        Array(preferred_formats).each do |fmt|
+          begin
+            return Date.strptime(value, fmt) # date-only pattern → no zone
+          rescue Date::Error, ArgumentError
+            next
+          end
+        end
+
+        parse_generic_date(value, input_tz, output_tz)
+      end
+
+      # Classify an ISO-ish string by what Date._parse recovers:
+      #   - no hour            → date-only; the calendar day as written.
+      #   - hour + offset      → an absolute instant; bucket in output_tz.
+      #   - hour, no offset    → a naive datetime; interpret the wall clock
+      #                          in input_tz, then bucket in output_tz.
+      # A string Date._parse can't place (no year) falls back to Date.parse,
+      # which the outer rescue turns into the DD/MM/YYYY / nil fallback.
+      def parse_generic_date(value, input_tz, output_tz)
+        parts = Date._parse(value)
+        return Date.parse(value) if parts[:year].nil?
+        return Date.new(parts[:year], parts[:mon], parts[:mday]) if parts[:hour].nil?
+
+        y, mo, d = parts[:year], parts[:mon], parts[:mday]
+        h  = parts[:hour] || 0
+        mi = parts[:min]  || 0
+        s  = parts[:sec]  || 0
+
+        instant =
+          if parts[:offset]
+            Time.new(y, mo, d, h, mi, s, format_offset(parts[:offset]))
+          else
+            Timezone.wall_to_utc(y, mo, d, h, mi, s, input_tz)
+          end
+        Timezone.to_date_in(instant, output_tz)
+      end
+
+      # Date._parse gives the offset in seconds; Time.new wants a "+hh:mm"
+      # string (or a Numeric offset — but the string form is unambiguous).
+      def format_offset(seconds)
+        sign = seconds.negative? ? "-" : "+"
+        abs  = seconds.abs
+        format("%s%02d:%02d", sign, abs / 3600, (abs % 3600) / 60)
+      end
 
       # Walk a dotted path into a nested hash, returning nil at the first
       # missing segment. "a.b.c" → source["a"]["b"]["c"], with bail-out

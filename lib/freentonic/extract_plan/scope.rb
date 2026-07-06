@@ -97,6 +97,11 @@ module Freentonic
           value[key]
         elsif value.is_a?(Array) && key.match?(/\A\d+\z/)
           value[key.to_i]
+        elsif value.is_a?(Data) && value.members.include?(key.to_sym)
+          # Canonical entities are frozen Data value objects; digging their
+          # declared members (a closed set — never an arbitrary send) lets
+          # a template read `{account.id}` off a built entity.
+          value.public_send(key)
         end
       end
     end
