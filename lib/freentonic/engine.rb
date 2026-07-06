@@ -33,6 +33,7 @@ module Freentonic
     def run
       load_serialized_inputs!
       planned = stages_to_run
+      ensure_ruby_capability!(planned)
       reporter.event("pipeline.start", stages: planned.map(&:to_s))
       planned.each do |name|
         reporter.stage(name) { run_stage(name) }
@@ -43,6 +44,26 @@ module Freentonic
     end
 
     private
+
+    # Fail fast, before any stage builds or the api_client is constructed, if
+    # this run would execute provider Ruby a declarative-only server has not
+    # opted into. Precise to the planned stages: a --from-normalized replay
+    # that skips normalize won't trip on a normalize: ruby: workflow. See
+    # Freentonic::RubyCapability.
+    def ensure_ruby_capability!(planned)
+      source = @context[:source]
+      return unless source.respond_to?(:workflow?) && source.workflow?
+
+      schema   = source.workflow
+      features = []
+      features << "extract: ruby:"   if planned.include?(:extract)   && schema.extract_uses_ruby?
+      features << "normalize: ruby:" if planned.include?(:normalize) && schema.normalize_uses_ruby?
+      # The api_client (and thus its ext module) is used by any fetching stage.
+      if (planned & %i[connect elevate extract]).any? && schema.api_client_uses_ruby?
+        features << "api_client ext"
+      end
+      RubyCapability.ensure_enabled!(features)
+    end
 
     def reporter
       @context[:reporter] || Reporter.null

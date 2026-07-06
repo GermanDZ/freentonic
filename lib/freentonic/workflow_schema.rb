@@ -69,6 +69,25 @@ module Freentonic
       @raw["elevate"]
     end
 
+    # --- Provider-Ruby detection (for the RubyCapability runtime gate) ------
+    # A stage uses provider Ruby when it declares the {ruby:, class:} escape
+    # hatch rather than a plan:. The api_client uses it via an `ext:` module.
+    def extract_uses_ruby?
+      (e = @raw["extract"]).is_a?(Hash) && !e["plan"] && !!e["ruby"]
+    end
+
+    def normalize_uses_ruby?
+      (n = @raw["normalize"]).is_a?(Hash) && !n["plan"] && !!n["ruby"]
+    end
+
+    def api_client_uses_ruby?
+      (a = @raw["api_client"]).is_a?(Hash) && a["ext"].is_a?(Hash)
+    end
+
+    def uses_provider_ruby?
+      extract_uses_ruby? || normalize_uses_ruby? || api_client_uses_ruby?
+    end
+
     # Builds (and memoizes) the ApiClient subclass from the api_client: YAML
     # without instantiating it. Exposed so `--lint` can validate the
     # endpoint / auth-header / ext translation offline — building the class
