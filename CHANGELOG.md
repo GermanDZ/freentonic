@@ -10,6 +10,25 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.17.1 — ship tzinfo in the Docker image (named-zone fix)
+
+Fixes a 0.17.0 regression: a workflow booking dates in a named IANA
+timezone (`output_timezone: Europe/Madrid`) failed at normalize time in
+the deployed image with `timezone … needs the tzinfo gem`. Root cause: the
+runtime image installs *no* gems (freentonic runs straight off stdlib —
+there's no `bundle install`), so neither repo's Gemfile `tzinfo` reached
+it. Named IANA zones can't be resolved without tzinfo.
+
+- The Docker image now whitelists **tzinfo** + **tzinfo-data** (pure-Ruby,
+  the engine behind Rails' time zones; tzinfo-data bundles the zone DB so
+  there's no floating system-tzdata dependency), gated by a new
+  `INCLUDE_TZINFO` build arg (default `1`). A build-time smoke test fails
+  the build if a named zone can't resolve. Build with
+  `--build-arg INCLUDE_TZINFO=0` for a strictly stdlib image.
+- No gem-code change: freentonic still has no *required* runtime
+  dependency, and UTC / fixed-offset workflows need nothing. Rebuild + 
+  redeploy the image to pick up the fix.
+
 ## 0.17.0 — `parse_date` timezones (input/output zones)
 
 `parse_date` gains explicit timezone control, and — importantly — its

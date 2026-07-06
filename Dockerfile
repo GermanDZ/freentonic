@@ -64,6 +64,23 @@ RUN echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-
   && rm -f /etc/apt/sources.list.d/snapshot-chromium.list /etc/apt/preferences.d/chromium-pin \
   && rm -rf /var/lib/apt/lists/*
 
+# tzinfo — the one runtime gem this image whitelists. freentonic itself is
+# pure stdlib, but a workflow may book dates by a named IANA timezone
+# (e.g. Europe/Madrid, DST-correct), which Ruby's stdlib can't resolve on
+# its own. tzinfo is a small, pure-Ruby, widely-vetted gem (the engine
+# behind Rails' time zones), so it's safe to bundle. tzinfo-data ships the
+# zone database in-gem, so we don't depend on a floating system tzdata
+# package — the same reproducibility stance as the pinned Chromium above.
+# The build-time smoke test fails the build if the install can't resolve a
+# named zone. Build with INCLUDE_TZINFO=0 for a strictly stdlib image:
+# named-zone workflows then error clearly at normalize time; UTC and
+# fixed-offset workflows are unaffected either way.
+ARG INCLUDE_TZINFO=1
+RUN if [ "$INCLUDE_TZINFO" = "1" ]; then \
+      gem install --no-document tzinfo tzinfo-data \
+      && ruby -e 'require "tzinfo"; TZInfo::Timezone.get("Europe/Madrid")'; \
+    fi
+
 # Non-root user for defense-in-depth.
 #
 # Stable explicit uid (vs `useradd -r`'s Debian-dynamic system uid) so
