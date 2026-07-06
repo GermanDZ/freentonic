@@ -41,7 +41,10 @@ module Freentonic
         # escape-hatch {ruby:, class:} form needs the file/class check.
         extract = schema.raw["extract"]
         check_provider_ruby(schema, "extract", extract) unless extract.is_a?(Hash) && extract["plan"]
-        check_provider_ruby(schema, "normalize", schema.normalizer)
+        # Same split for normalize: the declarative plan: form has no
+        # ruby:/class: to resolve — validate! already checked it statically.
+        normalize = schema.normalizer
+        check_provider_ruby(schema, "normalize", normalize) unless normalize.is_a?(Hash) && normalize["plan"]
         check_api_client(schema)
         check_credentials(schema)
         check_secrets(schema)

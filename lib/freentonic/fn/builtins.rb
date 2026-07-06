@@ -135,6 +135,60 @@ module Freentonic
       f.impl { |pan:, bank_code:| BUILDER.card_pan_portable_keys(pan, bank_code: bank_code) }
     end
 
+    define "compact" do |f|
+      f.description "Hash minus nil-valued entries — the declarative `.compact`."
+      f.param :hash, :hash, required: true
+      f.example args: { "hash" => { "a" => 1, "b" => nil, "c" => false } },
+                returns: { "a" => 1, "c" => false }
+      f.impl { |hash:| hash.reject { |_, v| v.nil? } }
+    end
+
+    define "flatten" do |f|
+      f.description "Flatten one level of nesting in a list (nil-safe)."
+      f.param :list, :array, required: true
+      f.example args: { "list" => [[1, 2], [], [3]] }, returns: [1, 2, 3]
+      f.impl { |list:| Array(list).flatten(1) }
+    end
+
+    define "pluck" do |f|
+      f.description "Extract one field from each Hash in a list; non-Hash rows yield nil unless compact:."
+      f.param :list, :array, required: true
+      f.param :key, :string, required: true
+      f.param :compact, :boolean, default: false
+      f.example args: { "list" => [{ "a" => 1 }, { "a" => nil }, "junk"], "key" => "a" },
+                returns: [1, nil, nil]
+      f.example args: { "list" => [{ "a" => 1 }, { "b" => 2 }], "key" => "a", "compact" => true },
+                returns: [1]
+      f.impl do |list:, key:, compact:|
+        values = Array(list).map { |el| el.is_a?(Hash) ? el[key] : nil }
+        compact ? values.compact : values
+      end
+    end
+
+    define "join" do |f|
+      f.description "Join parts into one string — the whole-token-safe form of string " \
+                    "interpolation. nil parts drop; drop_empty: also drops blank parts."
+      f.param :parts, :array, required: true
+      f.param :separator, :string, default: ""
+      f.param :drop_empty, :boolean, default: false
+      f.example args: { "parts" => ["pocket:", "p-1"] }, returns: "pocket:p-1"
+      f.example args: { "parts" => ["Recibo", nil, "  "], "separator" => " — ", "drop_empty" => true },
+                returns: "Recibo"
+      f.impl do |parts:, separator:, drop_empty:|
+        kept = parts.compact.map(&:to_s)
+        kept = kept.reject { |s| s.strip.empty? } if drop_empty
+        kept.join(separator)
+      end
+    end
+
+    define "strip" do |f|
+      f.description "Leading/trailing whitespace strip with to_s coercion; nil → \"\" (matches `.to_s.strip`)."
+      f.param :value
+      f.example args: { "value" => "  Coffee  Shop " }, returns: "Coffee  Shop"
+      f.example args: { "value" => nil }, returns: ""
+      f.impl { |value:| value.to_s.strip }
+    end
+
     define "build_account" do |f|
       f.description "Build a frozen Canonical::Account with a deterministic id."
       f.param :institution, :any, required: true

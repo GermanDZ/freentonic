@@ -37,6 +37,7 @@ require_relative "freentonic/canonical"
 
 require_relative "freentonic/normalizers/base"
 require_relative "freentonic/normalizers/passthrough"
+require_relative "freentonic/normalizers/plan"
 
 require_relative "freentonic/providers/helpers"
 require_relative "freentonic/providers/canonical_builder"

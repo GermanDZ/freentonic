@@ -225,5 +225,43 @@ module Freentonic
         assert_includes out, "not a declared api_client endpoint"
       end
     end
+
+    # ── normalize: plan: (declarative form) ─────────────────────────────
+
+    # Both stages declarative: a plan extractor and a plan normalizer, no
+    # sibling ruby at all.
+    NORMALIZE_PLAN_WORKFLOW = PLAN_WORKFLOW.sub(<<~RUBY, <<~PLAN)
+      normalize:
+        ruby: ./normalizer.rb
+        class: LintTestNormalizer
+    RUBY
+      normalize:
+        plan:
+          steps:
+            - select: { from: raw, path: accounts, default: [] }
+              as: accounts
+            - let: transactions
+              value: []
+          output:
+            accounts: "{accounts}"
+            transactions: "{transactions}"
+    PLAN
+
+    def test_normalize_plan_lints_clean_without_normalizer_ruby
+      with_workflow(NORMALIZE_PLAN_WORKFLOW, extractor: nil, normalizer: nil) do |path|
+        code, out = lint(path)
+        assert_equal 0, code, out
+        assert_includes out, "lints clean"
+      end
+    end
+
+    def test_normalize_plan_unbound_ref_fails_lint
+      yaml = NORMALIZE_PLAN_WORKFLOW.sub("value: []", 'value: "{nope}"')
+      with_workflow(yaml, extractor: nil, normalizer: nil) do |path|
+        code, out = lint(path)
+        assert_equal 1, code
+        assert_includes out, "unbound name"
+      end
+    end
   end
 end

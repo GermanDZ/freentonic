@@ -10,6 +10,37 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.16.0 — `normalize: plan:` (Ask 8)
+
+Normalization goes declarative ([docs/normalize-plan.md](docs/normalize-plan.md)):
+a provider can now express its whole raw→canonical transform in
+`workflow.yml`, deleting its `normalizer.rb`. Revolut is the proof —
+migrated in freentonic-providers with golden-parity coverage. Additive;
+no `version:` bump.
+
+- **`normalize: plan:`** — the extract-plan step grammar minus `fetch:`
+  (statically excluded AND runtime-guarded: no api_client exists), so a
+  normalize plan is a *total, offline* computation — raw in, canonical
+  out, `--from-raw`-replayable forever. Scope seeds: `raw`, `config`
+  (the provider's config.yml), `today` — deliberately not
+  `now_ms`/`from_ms`, which would silently break replay. `output:` is
+  restricted to `accounts:` / `transactions:` / `liabilities:`; the
+  stage assembles the CanonicalPayload envelope itself with config.yml's
+  `scraper_version`. Mutually exclusive with the `ruby:`/`class:` escape
+  hatch (which Ask 10 deletes).
+- **Verb-set parameterization** — the shared step validator takes an
+  allowed-verbs list; extract plans and elevate keep the full set.
+- **`index_by: where:` operator matchers** — a matcher value may now be
+  an operator hash from the `when:` set (`{ iban: { present: true } }`),
+  expressing "first element carrying this field", which literal equality
+  cannot.
+- **Entity digging** — templates and `select:` paths can walk the
+  declared members of a canonical entity (`{account.id}`), never an
+  arbitrary send, so a plan chains `build_account` into the
+  `build_transaction`s attached to it.
+- **New builtins** — `compact`, `flatten`, `pluck`, `join` (the
+  whole-token-safe form of string interpolation), `strip`.
+
 ## 0.15.0 — `Fn` registry + the `apply:` verb (Ask 7)
 
 First step of the pure-functions program

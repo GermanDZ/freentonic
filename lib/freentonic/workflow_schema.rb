@@ -294,6 +294,7 @@ module Freentonic
 
       validate_error_signals!
       validate_extract!
+      validate_normalize!
       validate_elevate!
     end
 
@@ -339,8 +340,86 @@ module Freentonic
       validate_extract_plan!(ext["plan"]) if has_plan
     end
 
+    # ── normalize: validation ──────────────────────────────────────────
+    #
+    # `normalize:` is optional (Passthrough). When present it is exactly
+    # one of the escape-hatch form ({ruby:, class:}) or the declarative
+    # form (plan:). The plan reuses the extract-plan step grammar minus
+    # fetch:, seeded with raw/config/today, and its output: is restricted
+    # to the entity-list contract.
+    def validate_normalize!
+      spec = @raw["normalize"]
+      return if spec.nil?
+
+      loc = "workflow #{@path} normalize"
+      unless spec.is_a?(Hash)
+        raise UserError, "#{loc}: must be a hash"
+      end
+
+      has_plan = spec.key?("plan")
+      has_ruby = spec.key?("ruby") || spec.key?("class")
+      if has_plan && has_ruby
+        raise UserError, "#{loc}: declares both plan: and ruby:/class: — pick one"
+      end
+      unless has_plan || has_ruby
+        raise UserError, "#{loc}: must declare plan: or ruby: and class:"
+      end
+
+      validate_normalize_plan!(spec["plan"]) if has_plan
+    end
+
+    def validate_normalize_plan!(plan)
+      loc = "workflow #{@path} normalize.plan"
+      unless plan.is_a?(Hash)
+        raise UserError, "#{loc}: must be a hash with steps: and output:"
+      end
+
+      steps = plan["steps"]
+      unless steps.is_a?(Array)
+        raise UserError, "#{loc}.steps: must be an array"
+      end
+
+      output = plan["output"]
+      unless output.is_a?(Hash) && !output.empty?
+        raise UserError, "#{loc}.output: must be a hash mapping " \
+                         "#{NORMALIZE_OUTPUT_KEYS.join("/")} to \"{binding}\" values"
+      end
+      unknown = output.keys - NORMALIZE_OUTPUT_KEYS
+      unless unknown.empty?
+        raise UserError, "#{loc}.output: unknown key(s) #{unknown.join(", ")} " \
+                         "(allowed: #{NORMALIZE_OUTPUT_KEYS.join(", ")})"
+      end
+      missing = %w[accounts transactions] - output.keys
+      unless missing.empty?
+        raise UserError, "#{loc}.output: missing required key(s) #{missing.join(", ")}"
+      end
+
+      bound = NORMALIZE_SEED_BINDINGS.dup
+      steps.each_with_index do |step, i|
+        validate_plan_step!(step, "#{loc}.steps[#{i}]", [], bound,
+                            allow_yield: false, verbs: NORMALIZE_PLAN_VERBS)
+      end
+      validate_plan_refs!(output, "#{loc}.output", bound)
+    end
+
     PLAN_STEP_VERBS =
       %w[fetch select for_each let concat dedup_by index_by lookup apply note warn abort].freeze
+
+    # A normalize plan is a total, offline computation over the extract
+    # payload — no api_client exists, so fetch: is excluded from its verb
+    # set (statically; the interpreter also guards at runtime).
+    NORMALIZE_PLAN_VERBS = (PLAN_STEP_VERBS - %w[fetch]).freeze
+
+    # Bindings Normalizers::Plan pre-seeds: the extract payload, the
+    # provider's config.yml, and today's Date (kept deliberately smaller
+    # than PLAN_SEED_BINDINGS — now_ms/from_ms would silently break
+    # --from-raw replayability).
+    NORMALIZE_SEED_BINDINGS = %w[raw config today].freeze
+
+    # The normalize plan's output contract: entity lists only. The stage
+    # assembles the CanonicalPayload envelope itself (scraper_version from
+    # config.yml); plans never build it.
+    NORMALIZE_OUTPUT_KEYS = %w[accounts transactions liabilities].freeze
 
     # Bindings the interpreter pre-seeds before the first step (see
     # ExtractPlan::PlanExtractor#call / ExtractPlan.seed_scope). Static
@@ -488,38 +567,40 @@ module Freentonic
       validate_plan_refs!(plan["output"], "#{loc}.output", bound)
     end
 
-    def validate_plan_step!(step, loc, endpoints, bound, allow_yield:)
+    # `verbs:` parameterizes the allowed verb set per context: extract
+    # plans and elevate get the full set, normalize plans exclude fetch:.
+    def validate_plan_step!(step, loc, endpoints, bound, allow_yield:, verbs: PLAN_STEP_VERBS)
       unless step.is_a?(Hash)
         raise UserError, "#{loc}: must be a hash"
       end
 
       # yield: and skip_when: are only meaningful inside a for_each do:
       # block, so they are allowed only when allow_yield is set.
-      allowed = PLAN_STEP_VERBS + (allow_yield ? %w[yield skip_when] : [])
-      verbs   = step.keys & allowed
-      if verbs.empty?
+      allowed = verbs + (allow_yield ? %w[yield skip_when] : [])
+      matched = step.keys & allowed
+      if matched.empty?
         raise UserError, "#{loc}: unknown step (expected one of #{allowed.join(", ")}; " \
                          "got keys #{step.keys.inspect})"
       end
-      if verbs.size > 1
-        raise UserError, "#{loc}: a step must declare exactly one verb, found #{verbs.inspect}"
+      if matched.size > 1
+        raise UserError, "#{loc}: a step must declare exactly one verb, found #{matched.inspect}"
       end
 
       # A `when:` gate may accompany any verb. Its keys reference bindings
       # visible at this point; its operators are the when_context set.
       validate_plan_when!(step["when"], "#{loc}.when", bound) if step.key?("when")
 
-      case verbs.first
+      case matched.first
       when "fetch"     then validate_plan_fetch!(step, loc, endpoints, bound)
       when "select"    then validate_plan_select!(step, loc, bound)
-      when "for_each"  then validate_plan_for_each!(step, loc, endpoints, bound)
+      when "for_each"  then validate_plan_for_each!(step, loc, endpoints, bound, verbs: verbs)
       when "let"       then validate_plan_let!(step, loc, bound)
       when "concat"    then validate_plan_concat!(step, loc, bound)
       when "dedup_by"  then validate_plan_dedup_by!(step, loc, bound)
       when "index_by"  then validate_plan_index_by!(step, loc, bound)
       when "lookup"    then validate_plan_lookup!(step, loc, bound)
       when "apply"     then validate_plan_apply!(step, loc, bound)
-      when "note", "warn", "abort" then validate_plan_message!(step, verbs.first, loc, bound)
+      when "note", "warn", "abort" then validate_plan_message!(step, matched.first, loc, bound)
       when "skip_when" then validate_plan_when!(step["skip_when"], "#{loc}.skip_when", bound)
       when "yield"     then validate_plan_yield!(step, loc, bound)
       end
@@ -551,8 +632,28 @@ module Freentonic
       unless spec.is_a?(Hash) && (spec.key?("path") || spec.key?("pick"))
         raise UserError, "#{loc}: must be a dotted-path string or a hash with path:/where:/pick:"
       end
-      if spec.key?("where") && !spec["where"].is_a?(Hash)
+      return unless spec.key?("where")
+
+      unless spec["where"].is_a?(Hash)
         raise UserError, "#{loc}.where: must be a hash of field => value matchers"
+      end
+      # A matcher is a literal (equality) or an operator hash reusing the
+      # when: operator set — `{ iban: { present: true } }` finds the first
+      # element carrying an iban, which literal equality cannot express.
+      spec["where"].each do |field, matcher|
+        next unless matcher.is_a?(Hash)
+        matcher.each do |op, operand|
+          unless WHEN_CONTEXT_OPS.include?(op)
+            raise UserError, "#{loc}.where.#{field}: unknown operator #{op.inspect} " \
+                             "(allowed: #{WHEN_CONTEXT_OPS.join(", ")})"
+          end
+          if WHEN_CONTEXT_NUMERIC_OPS.include?(op) && !operand.is_a?(Numeric)
+            raise UserError, "#{loc}.where.#{field}: operator #{op.inspect} requires a numeric operand"
+          end
+          if WHEN_CONTEXT_PRESENCE_OPS.include?(op) && ![true, false].include?(operand)
+            raise UserError, "#{loc}.where.#{field}: operator #{op.inspect} requires a boolean operand"
+          end
+        end
       end
     end
 
@@ -771,7 +872,7 @@ module Freentonic
       bound << step["as"]
     end
 
-    def validate_plan_for_each!(step, loc, endpoints, bound)
+    def validate_plan_for_each!(step, loc, endpoints, bound, verbs: PLAN_STEP_VERBS)
       spec = step["for_each"]
       unless spec.is_a?(Hash) && spec["source"]
         raise UserError, "#{loc}.for_each: must be a hash with source:"
@@ -801,7 +902,7 @@ module Freentonic
       inner     = bound.dup << step["as_item"]
       saw_yield = false
       do_steps.each_with_index do |sub, i|
-        validate_plan_step!(sub, "#{loc}.do[#{i}]", endpoints, inner, allow_yield: true)
+        validate_plan_step!(sub, "#{loc}.do[#{i}]", endpoints, inner, allow_yield: true, verbs: verbs)
         saw_yield ||= sub.is_a?(Hash) && sub.key?("yield")
       end
       unless saw_yield

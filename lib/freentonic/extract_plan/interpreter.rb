@@ -76,6 +76,14 @@ module Freentonic
       # propagates so the Extract stage can re-wrap it as an actionable
       # "re-run connect" UserError.
       def do_fetch(step, client, scope)
+        # Belt-and-braces: normalize plans validate fetch: away statically
+        # AND run with no client. A fetch that slips through (hand-built
+        # plan hash) fails loud, not NoMethodError-on-nil.
+        if client.nil?
+          raise UserError, "plan: fetch: is not available in this context (no api client — " \
+                           "normalize plans are offline)"
+        end
+
         name = step["fetch"].to_s
         unless @endpoint_names.include?(name)
           raise UserError,
@@ -278,12 +286,20 @@ module Freentonic
         source = spec["path"] ? dig_path(item, spec["path"]) : item
         if (cond = spec["where"])
           source = Array(source).find do |el|
-            el.is_a?(Hash) && cond.all? { |k, v| el[k] == v }
+            el.is_a?(Hash) && cond.all? { |k, v| where_match?(el[k], v) }
           end
         end
         pick = spec["pick"]
         return source unless pick
         source.is_a?(Hash) ? source[pick] : nil
+      end
+
+      # A where: matcher is a literal (equality) or an operator hash
+      # reusing the when: operator set — `{ iban: { present: true } }`
+      # finds the first element carrying an iban, which equality can't say.
+      def where_match?(actual, matcher)
+        return actual == matcher unless matcher.is_a?(Hash)
+        matcher.all? { |op, operand| WhenGate.compare(actual, op, operand, "where") }
       end
 
       # lookup: { from:, key:, default: } — read a bound map with a
@@ -359,6 +375,12 @@ module Freentonic
             acc[key]
           elsif acc.is_a?(Array) && key.match?(/\A\d+\z/)
             acc[key.to_i]
+          elsif acc.is_a?(Data) && acc.members.include?(key.to_sym)
+            # Canonical entities are frozen Data value objects; digging
+            # their declared members (and nothing else — no arbitrary
+            # send) lets a plan chain builders: build_account, then read
+            # `{account.id}` for the transactions attached to it.
+            acc.public_send(key)
           end
         end
       end

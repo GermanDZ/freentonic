@@ -27,6 +27,12 @@ module Freentonic
         spec = schema.normalizer
         return Normalizers::Passthrough.new if spec.nil?
 
+        if spec.is_a?(Hash) && spec.key?("plan")
+          config = Providers::Config.load_provider!(File.dirname(schema.path))
+          return Normalizers::Plan.new(spec["plan"], config: config,
+                                       stdout: stdout, stderr: stderr)
+        end
+
         unless spec.is_a?(Hash) && spec["ruby"] && spec["class"]
           raise UserError, "workflow #{schema.path}: normalize: must be a hash with ruby: and class: keys"
         end
