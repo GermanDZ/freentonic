@@ -10,6 +10,37 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.18.0 — Tier B pure functions + provider-Ruby capability gate
+
+Completes the pure-functions program (Asks 9–10). Two changes land together.
+
+**Tier B `apply:` functions for declarative normalizers.** Adds the pure
+functions the last escape-hatch normalizers needed to become
+`normalize: plan:` — `collapse_prefix_dups`, `negate`, `subtract`,
+`join_present`, `reformat_date`, `remove_whitespace`, `append_suffix` —
+plus `Freentonic::PathDig`, the shared Hash/Array/entity dotted-path reader
+now used by the extract-plan interpreter, the template scope, and the Fn
+layer. Each is registered in `Freentonic::Fn` and born covered by the
+purity harness. Workflow-dialect impact is additive: these are new
+`apply:` names, no existing key changes.
+
+**Provider Ruby is now opt-in — `FREENTONIC_ALLOW_PROVIDER_RUBY`.**
+Declarative plans are the default; the `extract: ruby:` / `normalize: ruby:`
+escape hatch and `api_client.ext` are a supported but gated authoring mode.
+A server is declarative-only unless started with
+`FREENTONIC_ALLOW_PROVIDER_RUBY=1`, which makes "no provider-authored code
+runs during a sync" a runtime-enforced invariant. The gate fires at run
+entry (before Chrome launches or the api_client is built), precise to the
+planned stages, so a `--from-normalized` replay that skips a
+`normalize: ruby:` stage isn't blocked. `--lint` stays mode-agnostic and
+notes which stages need the opt-in.
+
+> **BREAKING for servers running a Ruby workflow.** Any workflow still using
+> `extract: ruby:`, `normalize: ruby:`, or `api_client.ext` now **fails at
+> run start** unless `FREENTONIC_ALLOW_PROVIDER_RUBY=1` is set. Fully
+> declarative workflows (Revolut, ING, Unicaja) are unaffected. Set the env
+> var on any deployment that syncs a Ruby-normalizer provider (e.g. Fintonic).
+
 ## 0.17.2 — pass GEM_HOME/GEM_PATH through to the workflow subprocess
 
 Fixes a follow-up to 0.17.1: shipping tzinfo in the image wasn't enough —
