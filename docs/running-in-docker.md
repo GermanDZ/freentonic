@@ -32,6 +32,12 @@ cd freentonic
 docker build -t freentonic:latest .
 ```
 
+The image whitelists one runtime gem, **tzinfo** (+ tzinfo-data), so
+workflows can book dates in a named IANA timezone (e.g.
+`output_timezone: Europe/Madrid`). Pass `--build-arg INCLUDE_TZINFO=0` for
+a strictly stdlib image — named-zone workflows then fail with a clear
+error at normalize time; UTC / fixed-offset workflows are unaffected.
+
 ## Step 2 — Run a workflow once
 
 ```sh

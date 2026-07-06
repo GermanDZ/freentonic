@@ -4,7 +4,10 @@
 #
 # Pipeline: Connect → Extract → Normalize → Export.
 # Each stage is independently runnable. Normalizers, exporters, and secret
-# backends are pluggable. Zero runtime gem dependencies (pure stdlib).
+# backends are pluggable. No *required* runtime gem dependencies (pure
+# stdlib) — the sole optional one is tzinfo, needed only by workflows that
+# book dates in a named IANA timezone (e.g. Europe/Madrid). The official
+# Docker image whitelists it; UTC / fixed-offset workflows need nothing.
 
 module Freentonic
 end

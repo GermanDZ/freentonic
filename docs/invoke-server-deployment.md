@@ -56,8 +56,14 @@ docker build -t freentonic:latest .
 ```
 
 The image is based on `ruby:3.2-slim-bookworm` and bundles Chromium,
-Xvfb, x11vnc, and tini. It weighs ~500 MB. Zero runtime gem
-dependencies are added — freentonic stays pure stdlib.
+Xvfb, x11vnc, and tini. It weighs ~500 MB. The only runtime gem it adds
+is **tzinfo** (+ tzinfo-data) — freentonic is otherwise pure stdlib.
+tzinfo is required for workflows that book dates in a named IANA timezone
+(e.g. `output_timezone: Europe/Madrid`); Ruby's stdlib can't resolve
+named zones on its own. Build with `--build-arg INCLUDE_TZINFO=0` for a
+strictly stdlib image — named-zone workflows then fail with a clear
+`UserError` at normalize time, while UTC / fixed-offset (`+01:00`)
+workflows are unaffected.
 
 ---
 
