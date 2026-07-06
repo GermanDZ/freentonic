@@ -48,6 +48,7 @@ module Freentonic
         check_api_client(schema)
         check_credentials(schema)
         check_secrets(schema)
+        check_timezones(schema)
       end
       report
       @errors.empty? ? 0 : 1
@@ -105,6 +106,30 @@ module Freentonic
       error(e.message)
     rescue ScriptError, StandardError => e
       error("api_client: failed to build client class: #{e.message}")
+    end
+
+    # Statically validate the timezone knobs a provider declares in
+    # config.yml (input_timezone / output_timezone). A named IANA zone that
+    # is misspelled — or that needs tzinfo when tzinfo isn't installed —
+    # would otherwise only blow up mid-sync the first time an instant-shaped
+    # date is parsed. Probing the resolver here surfaces it at lint. UTC and
+    # fixed offsets resolve with no gem. Values sourced dynamically (a
+    # `{config.output_timezone}` passed through an apply: arg) still resolve
+    # against config.yml, which is where a provider sets them.
+    def check_timezones(schema)
+      config = Providers::Config.load_provider!(File.dirname(schema.path))
+      return unless config.is_a?(Hash)
+
+      probe = Time.utc(2024, 1, 1, 12, 0, 0)
+      %i[input_timezone output_timezone].each do |key|
+        zone = config[key]
+        next if zone.nil? || zone.to_s.strip.empty?
+        begin
+          Providers::Timezone.localize(probe, zone)
+        rescue UserError => e
+          error("config.#{key}: #{e.message}")
+        end
+      end
     end
 
     # credentials.require lists context keys that MUST exist after connect;

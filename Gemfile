@@ -12,4 +12,10 @@ group :development, :test do
   gem "base64"
   gem "csv"
   gem "bigdecimal"
+  # tzinfo is an OPTIONAL runtime dep: only named IANA timezones
+  # (Providers::Timezone / parse_date output_timezone: "Europe/Madrid")
+  # need it; UTC and fixed offsets are pure stdlib. Declared here (test
+  # only) so freentonic's own suite exercises the named-zone path — the
+  # gemspec stays runtime-dep-free.
+  gem "tzinfo"
 end

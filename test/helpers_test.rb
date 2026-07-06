@@ -69,6 +69,62 @@ class HelpersTest < Minitest::Test
     assert_equal 3, date.month
   end
 
+  # --- parse_date timezone handling ---
+
+  # A Unix timestamp is an absolute instant; the calendar day it lands on
+  # depends on the bucketing (output) zone. The default is UTC — NOT the
+  # machine's local TZ — so the result is deterministic across machines.
+  def test_parse_date_unix_buckets_in_utc_by_default
+    # 2024-03-14 23:00:00 UTC.
+    assert_equal Date.new(2024, 3, 14), parse_date(1_710_457_200_000)
+  end
+
+  def test_parse_date_unix_buckets_in_output_timezone
+    assert_equal Date.new(2024, 3, 15),
+                 parse_date(1_710_457_200_000, output_timezone: "+01:00")
+    assert_equal Date.new(2024, 3, 15),
+                 parse_date(1_710_457_200_000, output_timezone: "Europe/Madrid")
+  end
+
+  def test_parse_date_offset_bearing_string_is_an_instant_bucketed_in_output_tz
+    # 23:30 at -05:00 is 04:30 next day UTC → 03-16 in UTC.
+    assert_equal Date.new(2024, 3, 16),
+                 parse_date("2024-03-15T23:30:00-05:00", output_timezone: "UTC")
+    # …but its own local calendar day is the 15th.
+    assert_equal Date.new(2024, 3, 15),
+                 parse_date("2024-03-15T23:30:00-05:00", output_timezone: "-05:00")
+  end
+
+  def test_parse_date_naive_datetime_read_in_input_timezone
+    # No offset in the string → interpret the wall clock in input_timezone,
+    # then bucket in output_timezone.
+    assert_equal Date.new(2024, 3, 16),
+                 parse_date("2024-03-15T23:30:00",
+                            input_timezone: "-05:00", output_timezone: "UTC")
+    assert_equal Date.new(2024, 3, 15),
+                 parse_date("2024-03-15T23:30:00",
+                            input_timezone: "-05:00", output_timezone: "-05:00")
+  end
+
+  def test_parse_date_date_only_string_ignores_timezones
+    # No time component → no instant → zones never apply.
+    assert_equal Date.new(2024, 3, 15),
+                 parse_date("2024-03-15", output_timezone: "+05:00", input_timezone: "-08:00")
+    assert_equal Date.new(2024, 6, 5),
+                 parse_date("05/06/2024", preferred_formats: ["%d/%m/%Y"],
+                            output_timezone: "Europe/Madrid")
+  end
+
+  def test_parse_date_bad_timezone_only_raises_when_there_is_an_instant
+    # A date-only value never consults the zone, so a bogus zone is inert…
+    assert_equal Date.new(2024, 3, 15), parse_date("2024-03-15", output_timezone: "No/Where")
+    # …but an instant with a bogus named zone raises a clear error.
+    err = assert_raises(Freentonic::UserError) do
+      parse_date(1_710_457_200_000, output_timezone: "No/Where")
+    end
+    assert_includes err.message, "unknown timezone"
+  end
+
   def test_parse_date_iso_string
     date = parse_date("2024-03-15T10:00:00.000Z")
     assert_equal Date.new(2024, 3, 15), date

@@ -263,5 +263,46 @@ module Freentonic
         assert_includes out, "unbound name"
       end
     end
+
+    # ── config.yml timezone knobs ───────────────────────────────────────
+
+    # Writes a workflow + a config.yml with the given timezone lines, lints,
+    # and returns [code, output]. Config caches by dir basename; mktmpdir
+    # names are unique, so each call gets a fresh config.
+    def lint_with_config(tz_yaml)
+      Dir.mktmpdir do |dir|
+        File.write(File.join(dir, "config.yml"), "institution: tztest\n#{tz_yaml}")
+        path = File.join(dir, "workflow.yml")
+        File.write(path, NORMALIZE_PLAN_WORKFLOW)
+        Providers::Config.__reset_for_tests!
+        lint(path)
+      end
+    end
+
+    def test_utc_and_fixed_offset_timezones_lint_clean
+      code, out = lint_with_config("output_timezone: \"+01:00\"\ninput_timezone: UTC\n")
+      assert_equal 0, code, out
+    end
+
+    def test_valid_named_zone_lints_clean_when_tzinfo_available
+      skip "tzinfo not installed" unless tzinfo_available?
+      code, out = lint_with_config("output_timezone: Europe/Madrid\n")
+      assert_equal 0, code, out
+    end
+
+    def test_unknown_named_zone_fails_lint
+      skip "tzinfo not installed" unless tzinfo_available?
+      code, out = lint_with_config("output_timezone: Europe/Madird\n")
+      assert_equal 1, code
+      assert_includes out, "config.output_timezone"
+      assert_includes out, "unknown timezone"
+    end
+
+    def tzinfo_available?
+      require "tzinfo"
+      true
+    rescue LoadError
+      false
+    end
   end
 end

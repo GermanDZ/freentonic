@@ -40,6 +40,7 @@ require_relative "freentonic/normalizers/passthrough"
 require_relative "freentonic/normalizers/plan"
 require_relative "freentonic/normalizers/builder"
 
+require_relative "freentonic/providers/timezone"
 require_relative "freentonic/providers/helpers"
 require_relative "freentonic/providers/canonical_builder"
 require_relative "freentonic/fn"

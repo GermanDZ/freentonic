@@ -141,6 +141,45 @@ Note `{account.id}` in the inner transaction loop: templates and
 arbitrary method), so a plan chains `build_account` into the
 `build_transaction`s attached to it.
 
+## Timezones (`parse_date`)
+
+The canonical model stores a calendar `Date`, not an instant — so when a
+provider's date field is an *absolute instant* (a Unix timestamp, or an
+offset-bearing datetime like `…Z` / `…-05:00`), the calendar day it lands
+on depends on the timezone you bucket it into. `parse_date` takes two
+zones, both defaulting to **UTC** (so results are deterministic and
+machine-independent — never the process's local TZ):
+
+- **`output_timezone`** — the display/booking zone an instant is bucketed
+  into. This is the one that matters for almost every provider.
+- **`input_timezone`** — only for offset-*naive* datetime strings
+  (`"2024-03-15 23:30:00"`, no offset): the zone the wall clock is read
+  in before bucketing. Date-only strings and offset-bearing instants
+  ignore it.
+
+Set them per provider in `config.yml` and thread them through:
+
+```yaml
+# config.yml
+output_timezone: Europe/Madrid   # book by the user's local day
+input_timezone: UTC
+
+# workflow.yml (inside the normalize plan)
+- apply: parse_date
+  args:
+    value: "{tx.startedDate}"
+    input_timezone: "{config.input_timezone}"
+    output_timezone: "{config.output_timezone}"
+  as: date
+```
+
+`UTC` and fixed offsets (`"+01:00"`) are pure stdlib. Named IANA zones
+(`"Europe/Madrid"`, DST-correct) need the optional `tzinfo` gem — a named
+zone without it fails at `--lint` (for a `config.yml` value) or with a
+clear error at parse time, never silently. Providers whose dates are
+date-only strings (ING, Unicaja, Fintonic) don't need any of this — those
+fields have no instant to zone.
+
 ## `apply:` and the function registry
 
 `apply: <function>` invokes a **pure function** from the

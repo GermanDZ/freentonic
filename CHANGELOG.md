@@ -10,6 +10,37 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.17.0 — `parse_date` timezones (input/output zones)
+
+`parse_date` gains explicit timezone control, and — importantly — its
+default is now **deterministic**. The canonical model stores a calendar
+`Date`, so the only question a timezone answers is *which zone's calendar
+day an instant falls on*. Additive; no `version:` bump.
+
+- **Behavior change (determinism fix):** a Unix timestamp used to reduce
+  to a calendar day via `Time.at(ts).to_date` — the **process's local
+  TZ** — so the same raw payload could normalize to a different `date` on
+  a laptop vs a UTC CI runner, breaking `--from-raw` reproducibility. It
+  now defaults to **UTC**. Only providers parsing absolute instants are
+  affected; every Spanish bank (ING, Unicaja) and Fintonic send date-only
+  strings, which are timezone-immune. Revolut (epoch-ms / Zulu ISO) is the
+  only affected provider, and its dates are unchanged under UTC.
+- **`parse_date` / `Fn` params `input_timezone:` + `output_timezone:`**
+  (both default UTC):
+  - `output_timezone` buckets any absolute instant (Unix timestamp, or an
+    offset-bearing datetime like `…Z` / `…-05:00`) into its calendar day —
+    the display/booking zone.
+  - `input_timezone` interprets an offset-*naive* datetime string
+    (`"2024-03-15 23:30:00"`, no offset) as local time in that zone before
+    bucketing. Date-only inputs and already-instant inputs ignore it.
+- **Zone grammar** — `UTC` (default) and fixed offsets (`"+01:00"`) are
+  pure stdlib; named IANA zones (`"Europe/Madrid"`, DST-correct) use the
+  **optional** `tzinfo` gem. A named zone without tzinfo raises a clear,
+  actionable error (and `--lint` flags a bad/unavailable zone declared in
+  `config.yml`) rather than failing obscurely mid-sync.
+- Providers set `input_timezone:` / `output_timezone:` in `config.yml` and
+  thread them through `apply: parse_date` (see Revolut).
+
 ## 0.16.0 — `normalize: plan:` (Ask 8)
 
 Normalization goes declarative ([docs/normalize-plan.md](docs/normalize-plan.md)):

@@ -39,14 +39,31 @@ module Freentonic
     end
 
     define "parse_date" do |f|
-      f.description "Provider date value (ISO / DD-MM-YYYY / Unix) → Date, trying formats: first."
+      f.description "Provider date value (ISO / DD-MM-YYYY / Unix) → Date, trying formats: " \
+                    "first. An absolute instant (Unix timestamp / offset-bearing datetime) is " \
+                    "bucketed into its calendar day in output_timezone; an offset-naive datetime " \
+                    "is read in input_timezone first. Both default to UTC (deterministic, " \
+                    "machine-independent). Date-only inputs ignore timezones."
       f.param :value
       f.param :formats, :array
+      f.param :input_timezone, :string
+      f.param :output_timezone, :string
       f.example args: { "value" => "2024-03-15" }, returns: Date.new(2024, 3, 15)
       f.example args: { "value" => "05/06/2024", "formats" => ["%d/%m/%Y"] },
                 returns: Date.new(2024, 6, 5)
+      # 1_710_457_200_000 ms = 2024-03-14 23:00 UTC = 2024-03-15 00:00 at +01:00.
+      f.example args: { "value" => 1_710_457_200_000 }, returns: Date.new(2024, 3, 14)
+      f.example args: { "value" => 1_710_457_200_000, "output_timezone" => "+01:00" },
+                returns: Date.new(2024, 3, 15)
+      # Offset-naive datetime read in input_timezone, bucketed in output_timezone.
+      f.example args: { "value" => "2024-03-15T23:30:00", "input_timezone" => "-05:00",
+                        "output_timezone" => "UTC" },
+                returns: Date.new(2024, 3, 16)
       f.example args: { "value" => nil }, returns: nil
-      f.impl { |value:, formats:| HELPERS.parse_date(value, preferred_formats: formats) }
+      f.impl do |value:, formats:, input_timezone:, output_timezone:|
+        HELPERS.parse_date(value, preferred_formats: formats,
+                           input_timezone: input_timezone, output_timezone: output_timezone)
+      end
     end
 
     define "parse_timestamp_ms" do |f|
