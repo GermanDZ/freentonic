@@ -179,6 +179,32 @@ class InvokeRunnerTest < Minitest::Test
     assert_equal 0, result.exit_code
   end
 
+  # Regression: unsetenv_others strips everything not in build_env's
+  # whitelist, including GEM_HOME/GEM_PATH — so a gem installed outside
+  # Ruby's compiled-in default path (e.g. the image's optional tzinfo) was
+  # invisible to the workflow subprocess even though it resolves fine in an
+  # interactive shell or a plain `docker exec`.
+  def test_gem_env_passed_through_to_child_when_set
+    stub = write_stub("exit 0")
+    runner = build_runner(stub)
+    request = build_request
+
+    original_gem_home, original_gem_path = ENV["GEM_HOME"], ENV["GEM_PATH"]
+    ENV["GEM_HOME"] = "/usr/local/bundle"
+    ENV["GEM_PATH"] = "/usr/local/bundle"
+    begin
+      runner.run(request)
+    ensure
+      ENV["GEM_HOME"] = original_gem_home
+      ENV["GEM_PATH"] = original_gem_path
+    end
+    run_dir = File.join(@runs_dir, request.run_id)
+
+    env = read_stub(run_dir, "env")
+    assert_includes env, "GEM_HOME=/usr/local/bundle"
+    assert_includes env, "GEM_PATH=/usr/local/bundle"
+  end
+
   def test_inline_secrets_handed_over_fd3_to_child
     stub = write_stub("exit 0")
     runner = build_runner(stub)
