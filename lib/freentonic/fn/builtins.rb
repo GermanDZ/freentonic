@@ -132,6 +132,38 @@ module Freentonic
       f.impl { |value:| value.nil? ? nil : value.to_s.gsub(/\s+/, " ").strip }
     end
 
+    define "append_suffix" do |f|
+      f.description "Append separator+suffix to base, unless suffix is blank or base already " \
+                    "contains it. For disambiguating a display name with a discriminator " \
+                    "(e.g. a shared card alias + its PAN last-4)."
+      f.param :base, :string, required: true
+      f.param :suffix
+      f.param :separator, :string, default: " "
+      f.example args: { "base" => "Tarjeta Crédito", "suffix" => "1087", "separator" => " ·" },
+                returns: "Tarjeta Crédito ·1087"
+      f.example args: { "base" => "Tarjeta ·1087", "suffix" => "1087", "separator" => " ·" },
+                returns: "Tarjeta ·1087"
+      f.example args: { "base" => "ING", "suffix" => nil, "separator" => " ·" }, returns: "ING"
+      f.impl do |base:, suffix:, separator:|
+        s = suffix.to_s
+        s.empty? || base.include?(s) ? base : "#{base}#{separator}#{s}"
+      end
+    end
+
+    define "remove_whitespace" do |f|
+      f.description "Strip ALL whitespace from a string (not just collapse — for IBANs / PANs " \
+                    "that arrive space-grouped); blank or nil → nil (matches the `.gsub(/\\s/, \"\")` " \
+                    "then nil-if-empty idiom)."
+      f.param :value
+      f.example args: { "value" => "ES59 1465 0100 9817 1439 1272" }, returns: "ES5914650100981714391272"
+      f.example args: { "value" => "   " }, returns: nil
+      f.example args: { "value" => nil }, returns: nil
+      f.impl do |value:|
+        stripped = value.to_s.gsub(/\s/, "")
+        stripped.empty? ? nil : stripped
+      end
+    end
+
     define "spanish_iban_portable_keys" do |f|
       f.description "Spanish IBAN → [portable_ref, portable_id] (\"BANK:LAST4\", \"bank:BANK:LAST4\"); [nil, nil] otherwise."
       f.param :iban
@@ -204,6 +236,107 @@ module Freentonic
       f.example args: { "value" => "  Coffee  Shop " }, returns: "Coffee  Shop"
       f.example args: { "value" => nil }, returns: ""
       f.impl { |value:| value.to_s.strip }
+    end
+
+    define "negate" do |f|
+      f.description "Arithmetic negation of a number; nil passes through. For flipping a " \
+                    "positive outstanding into the canonical negative liability balance."
+      f.param :value, :number
+      f.example args: { "value" => 1234 }, returns: -1234
+      f.example args: { "value" => BigDecimal("-42.5") }, returns: BigDecimal("42.5")
+      f.example args: { "value" => nil }, returns: nil
+      f.impl { |value:| value.nil? ? nil : -value }
+    end
+
+    define "subtract" do |f|
+      f.description "a − b for two numbers; nil if either operand is nil (a missing operand " \
+                    "means no result, not zero). E.g. a credit line's limit − available."
+      f.param :a, :number
+      f.param :b, :number
+      f.example args: { "a" => 3000, "b" => 2200 }, returns: 800
+      f.example args: { "a" => 3000, "b" => nil }, returns: nil
+      f.impl { |a:, b:| a.nil? || b.nil? ? nil : a - b }
+    end
+
+    define "join_present" do |f|
+      f.description "Join parts with a separator, but return nil if ANY part is nil or blank — " \
+                    "the all-or-nothing form of join:, for a composite id that must not form " \
+                    "from a missing component (e.g. v2-seq:<productId>:<sequence>)."
+      f.param :parts, :array, required: true
+      f.param :separator, :string, default: ""
+      f.example args: { "parts" => ["v2-seq", "abc", "4509"], "separator" => ":" },
+                returns: "v2-seq:abc:4509"
+      f.example args: { "parts" => ["v2-seq", "abc", nil], "separator" => ":" }, returns: nil
+      f.example args: { "parts" => ["v2-seq", "abc", ""], "separator" => ":" }, returns: nil
+      f.impl do |parts:, separator:|
+        strs = parts.map { |p| p.nil? ? nil : p.to_s }
+        next nil if strs.any? { |s| s.nil? || s.strip.empty? }
+
+        strs.join(separator)
+      end
+    end
+
+    define "reformat_date" do |f|
+      f.description "Rewrite a date string from one strftime format to another; nil or " \
+                    "unparseable → nil. For normalizing a provider's alternate date format " \
+                    "(e.g. ISO YYYY-MM-DD → DD/MM/YYYY) into its canonical feed format."
+      f.param :value
+      f.param :from, :string, required: true
+      f.param :to, :string, required: true
+      f.example args: { "value" => "2026-05-14", "from" => "%Y-%m-%d", "to" => "%d/%m/%Y" },
+                returns: "14/05/2026"
+      f.example args: { "value" => "garbage", "from" => "%Y-%m-%d", "to" => "%d/%m/%Y" },
+                returns: nil
+      f.example args: { "value" => nil, "from" => "%Y-%m-%d", "to" => "%d/%m/%Y" }, returns: nil
+      f.impl do |value:, from:, to:|
+        next nil if value.nil?
+
+        parsed = begin
+          Date.strptime(value.to_s, from)
+        rescue ArgumentError
+          nil
+        end
+        parsed&.strftime(to)
+      end
+    end
+
+    define "collapse_prefix_dups" do |f|
+      f.description "Within each group (keyed by the group_by paths), drop rows whose " \
+                    "whitespace-normalized text is a STRICT prefix of the group's longest — " \
+                    "but only when EVERY non-longest row is such a prefix. Identical texts " \
+                    "(real twins) and any mid-string divergence keep the whole group intact. " \
+                    "group_by/text paths read off Hashes or canonical Data entities (via PathDig), " \
+                    "so it runs on built transactions. Output preserves group-first-appearance order."
+      f.param :rows,     :array,  required: true
+      f.param :group_by, :array,  required: true
+      f.param :text,     :string, required: true
+      f.example args: { "rows" => [{ "a" => "x", "n" => -26, "d" => "WWW.AMAZON" },
+                                   { "a" => "x", "n" => -26, "d" => "WWW.AMAZON*NO3 LUXEMBOURG" }],
+                        "group_by" => %w[a n], "text" => "d" },
+                returns: [{ "a" => "x", "n" => -26, "d" => "WWW.AMAZON*NO3 LUXEMBOURG" }]
+      f.example args: { "rows" => [{ "a" => "x", "n" => -80, "d" => "AYTO ALCOBENDAS" },
+                                   { "a" => "x", "n" => -80, "d" => "AYTO ALCOBENDAS" }],
+                        "group_by" => %w[a n], "text" => "d" },
+                returns: [{ "a" => "x", "n" => -80, "d" => "AYTO ALCOBENDAS" },
+                          { "a" => "x", "n" => -80, "d" => "AYTO ALCOBENDAS" }]
+      f.impl do |rows:, group_by:, text:|
+        norm = ->(row) { PathDig.dig(row, text).to_s.gsub(/\s+/, " ").strip }
+        rows.group_by { |row| group_by.map { |path| PathDig.dig(row, path) } }
+            .flat_map do |_key, group|
+              next group if group.size <= 1
+
+              pairs = group.map { |row| [row, norm.call(row)] }
+              next group if pairs.map(&:last).uniq.size == 1 # real twins / identical
+
+              longest = pairs.max_by { |_, d| d.length }
+              others  = pairs - [longest]
+              if others.all? { |_, d| longest.last.start_with?(d) && d.length < longest.last.length }
+                [longest.first]
+              else
+                group
+              end
+            end
+      end
     end
 
     define "build_account" do |f|
