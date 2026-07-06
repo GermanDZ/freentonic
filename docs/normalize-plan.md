@@ -51,7 +51,7 @@ normalize:
       transactions: "{transactions}"
       liabilities:  "{liabilities}"   # optional
 
-# Escape hatch (deleted in Ask 10)
+# Provider Ruby — a supported, opt-in mode (gated by FREENTONIC_ALLOW_PROVIDER_RUBY)
 normalize:
   ruby:  ./normalizer.rb
   class: Freentonic::Providers::Foo::Normalizer

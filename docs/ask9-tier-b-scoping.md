@@ -127,7 +127,15 @@ string-match filters:
   grammar) with string logic. More faithful, one more function.
 - (C) leave Unicaja on ruby — rejected (defeats "plan only").
 
-## Ask 10 (revised) — provider-Ruby capability gate
+## Ask 10 (revised) — provider-Ruby capability gate — ✅ SHIPPED
+
+Implemented: `Freentonic::RubyCapability` (env `FREENTONIC_ALLOW_PROVIDER_RUBY`,
+default off = declarative-only). Gate fires in `Engine#run` before any stage
+builds, precise to the planned stages (`schema.{extract,normalize}_uses_ruby?`
+/ `api_client_uses_ruby?`). `--lint` stays mode-agnostic + emits an `ℹ` note.
+Covered by `test/ruby_capability_test.rb` + a linter-note test; the example
+integration test opts in. Design notes below.
+
 
 Replaces "burn the boats." Instead of deleting the ruby hatch, **gate it
 behind an explicit operator opt-in**. Default = declarative-only, which

@@ -72,6 +72,17 @@ module Freentonic
       end
     end
 
+    # A provider-Ruby workflow lints fine (mode-agnostic) but gets an
+    # informational note that it won't run on a declarative-only server.
+    def test_provider_ruby_gets_informational_note_not_an_error
+      with_workflow(CLEAN) do |path|
+        code, out = lint(path)
+        assert_equal 0, code, out
+        assert_includes out, "uses provider Ruby (extract, normalize)"
+        assert_includes out, RubyCapability::ENV_VAR
+      end
+    end
+
     def test_unknown_action_fails
       yaml = CLEAN.sub("action: navigate", "action: navigat")
       with_workflow(yaml) do |path|

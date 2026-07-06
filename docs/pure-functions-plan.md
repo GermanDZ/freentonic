@@ -105,7 +105,8 @@ end
 ### 3. `normalize: plan:`
 
 The `normalize:` key grows a plan form, mutually exclusive with the
-`ruby:`/`class:` escape hatch (which Ask 10 deletes):
+`ruby:`/`class:` escape hatch (kept as an opt-in mode — Ask 10 gates it
+behind `FREENTONIC_ALLOW_PROVIDER_RUBY`, it doesn't delete it):
 
 ```yaml
 normalize:
@@ -197,10 +198,19 @@ unit tests porting the edge cases the ING/Fintonic normalizer tests
 encode today. Migrate **Fintonic**, **Unicaja**, then **ING**; delete
 their normalizer.rb files.
 
-**Ask 10 (freentonic v0.18.0) — burn the boats.**
-Delete the `normalize: ruby:/class:` escape hatch, `NormalizerBase`,
-and the scaffold's normalizer.rb template (scaffold emits a plan
-skeleton instead). Providers repo is YAML + config + tests only.
+**Ask 10 — provider-Ruby capability gate (SHIPPED, supersedes "burn the
+boats").** Rather than *deleting* the `ruby:/class:` escape hatch,
+provider Ruby is kept as a supported but OPT-IN authoring mode. A server
+is declarative-only by default; `FREENTONIC_ALLOW_PROVIDER_RUBY=1` enables
+Ruby. A declarative-only server refuses a Ruby workflow at run entry
+(`Engine#run` → `Freentonic::RubyCapability`), before any stage builds or
+the api_client is constructed — precise to the planned stages, so a
+`--from-normalized` replay that skips a `normalize: ruby:` stage isn't
+blocked. `--lint` stays mode-agnostic (it validates provider Ruby fully)
+and just notes which stages need the opt-in. This makes "no
+provider-authored code runs during a sync" a runtime-enforced invariant
+while leaving the dual authoring model permanent. See
+`ask9-tier-b-scoping.md` for the design rationale.
 
 ## Testing strategy
 

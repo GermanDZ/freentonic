@@ -20,6 +20,17 @@ module Freentonic
     WORKFLOW    = File.join(EXAMPLE_DIR, "example_bank.yml")
     RAW_FIXTURE = File.join(EXAMPLE_DIR, "raw.example.json")
 
+    # The example workflow uses provider Ruby (extract/normalize), so this
+    # end-to-end run must opt into it past the Ask 10 capability gate.
+    def setup
+      @prev_ruby_gate = ENV[RubyCapability::ENV_VAR]
+      ENV[RubyCapability::ENV_VAR] = "1"
+    end
+
+    def teardown
+      @prev_ruby_gate.nil? ? ENV.delete(RubyCapability::ENV_VAR) : ENV[RubyCapability::ENV_VAR] = @prev_ruby_gate
+    end
+
     def run_cli(extra_args)
       stdout = StringIO.new
       stderr = StringIO.new

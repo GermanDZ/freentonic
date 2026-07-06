@@ -29,6 +29,7 @@ module Freentonic
       @stderr = stderr
       @errors = []
       @warnings = []
+      @notes = []
     end
 
     # Returns a process exit code: 0 = clean (warnings allowed), 1 = errors.
@@ -49,6 +50,7 @@ module Freentonic
         check_credentials(schema)
         check_secrets(schema)
         check_timezones(schema)
+        note_provider_ruby(schema)
       end
       report
       @errors.empty? ? 0 : 1
@@ -199,6 +201,21 @@ module Freentonic
       nil
     end
 
+    # --lint is mode-agnostic: it validates provider Ruby fully (loaded
+    # above) regardless of the runtime gate. But a workflow that declares
+    # provider Ruby won't RUN on a declarative-only server, so surface that
+    # as a pre-deploy signal — which stages need the opt-in, and how.
+    def note_provider_ruby(schema)
+      features = []
+      features << "extract"    if schema.extract_uses_ruby?
+      features << "normalize"  if schema.normalize_uses_ruby?
+      features << "api_client" if schema.api_client_uses_ruby?
+      return if features.empty?
+
+      @notes << "uses provider Ruby (#{features.join(", ")}) — runs only with " \
+                "#{RubyCapability::ENV_VAR}=1; a declarative-only server refuses it"
+    end
+
     def error(msg)
       @errors << msg
       nil
@@ -211,6 +228,7 @@ module Freentonic
 
     def report
       rel = @workflow_path
+      @notes.each    { |n| @stdout.puts "  ℹ #{n}" }
       @warnings.each { |w| @stdout.puts "  ⚠ #{w}" }
       @errors.each   { |e| @stdout.puts "  ✗ #{e}" }
 
