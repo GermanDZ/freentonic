@@ -10,6 +10,20 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.17.2 — pass GEM_HOME/GEM_PATH through to the workflow subprocess
+
+Fixes a follow-up to 0.17.1: shipping tzinfo in the image wasn't enough —
+named-zone workflows *still* failed with the same "needs the tzinfo gem"
+error. Root cause: `InvokeRunner#build_env` spawns the workflow subprocess
+with `Process.spawn(env, ..., unsetenv_others: true)`, and its `env`
+whitelist (`PATH`/`HOME`/`LANG`/`DISPLAY`/`FREENTONIC_*`) didn't include
+`GEM_HOME`/`GEM_PATH`/`BUNDLE_APP_CONFIG`. So gems installed outside
+Ruby's compiled-in default path — like the image's gem-installed tzinfo —
+were invisible to the child even though `gem list` and an interactive
+shell found them fine. `build_env` now forwards `GEM_HOME`, `GEM_PATH`,
+and `BUNDLE_APP_CONFIG` from the server process's own environment when
+they're set.
+
 ## 0.17.1 — ship tzinfo in the Docker image (named-zone fix)
 
 Fixes a 0.17.0 regression: a workflow booking dates in a named IANA

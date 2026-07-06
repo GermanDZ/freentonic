@@ -205,6 +205,17 @@ module Freentonic
         "FREENTONIC_RUN_DIR"             => run_dir,
         "FREENTONIC_CHROME_PROFILE_DIR"  => chrome_profile_dir
       }
+      # spawn_and_wait uses unsetenv_others, so anything not listed here is
+      # invisible to the workflow subprocess. GEM_HOME/GEM_PATH/BUNDLE_APP_CONFIG
+      # aren't given defaults (unlike PATH/HOME above) because their correct
+      # value is whatever RubyGems resolved for *this* process — hardcoding a
+      # fallback would silently diverge from it. Without them, gems installed
+      # outside Ruby's compiled-in default path (e.g. the image's optional
+      # tzinfo, gem-installed to GEM_HOME) are invisible to the child even
+      # though `gem list` and an interactive shell find them fine.
+      %w[GEM_HOME GEM_PATH BUNDLE_APP_CONFIG].each do |key|
+        env[key] = ENV[key] if ENV[key]
+      end
       if request.export && request.export["mode"] == "http" && request.export["token"]
         env["FREENTONIC_HTTP_TOKEN"] = request.export["token"]
       end
