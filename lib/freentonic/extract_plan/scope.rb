@@ -92,18 +92,9 @@ module Freentonic
         path.inject(@bindings[root]) { |value, key| step_into(value, key) }
       end
 
-      def step_into(value, key)
-        if value.is_a?(Hash)
-          value[key]
-        elsif value.is_a?(Array) && key.match?(/\A\d+\z/)
-          value[key.to_i]
-        elsif value.is_a?(Data) && value.members.include?(key.to_sym)
-          # Canonical entities are frozen Data value objects; digging their
-          # declared members (a closed set — never an arbitrary send) lets
-          # a template read `{account.id}` off a built entity.
-          value.public_send(key)
-        end
-      end
+      # One path segment over Hash / Array / canonical Data entity. Shared
+      # with the interpreter and the Fn layer — see Freentonic::PathDig.
+      def step_into(value, key) = PathDig.step(value, key)
     end
   end
 end

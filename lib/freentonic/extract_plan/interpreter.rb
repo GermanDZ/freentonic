@@ -368,22 +368,9 @@ module Freentonic
         end
       end
 
-      def dig_path(source, path)
-        return nil if path.nil? || source.nil?
-        path.to_s.split(".").inject(source) do |acc, key|
-          if acc.is_a?(Hash)
-            acc[key]
-          elsif acc.is_a?(Array) && key.match?(/\A\d+\z/)
-            acc[key.to_i]
-          elsif acc.is_a?(Data) && acc.members.include?(key.to_sym)
-            # Canonical entities are frozen Data value objects; digging
-            # their declared members (and nothing else — no arbitrary
-            # send) lets a plan chain builders: build_account, then read
-            # `{account.id}` for the transactions attached to it.
-            acc.public_send(key)
-          end
-        end
-      end
+      # Dotted-path read over Hash / Array / canonical Data entity. Shared
+      # with the template scope and the Fn layer — see Freentonic::PathDig.
+      def dig_path(source, path) = PathDig.dig(source, path)
 
       # Mirror of ApiClient#ep_extract_batch for the plan's optional
       # endpoint-level unwrap: Array → as-is, Hash → first matching key,

@@ -207,5 +207,55 @@ module Freentonic
       assert_match(/\Atxn_\h{16}\z/, txn.id)
       assert_match(/\Aliab_\h{16}\z/, liab.id)
     end
+
+    # ── collapse_prefix_dups: the ING pre-clearing edge cases, incl. the
+    #    entity-reading path PathDig exists for ─────────────────────────────
+
+    # Helper: a canonical transaction with a given account/date/amount/desc.
+    def txn(acc, date, amount, desc)
+      Fn.call("build_transaction",
+              { "account_id" => acc, "amount" => amount, "currency" => "EUR",
+                "source_id" => desc, "date" => date, "description" => desc })
+    end
+
+    def collapse(rows)
+      Fn.call("collapse_prefix_dups",
+              { "rows" => rows, "group_by" => %w[account_id date amount], "text" => "description" })
+    end
+
+    def test_collapse_reads_entity_members_and_drops_terse_prefix
+      d = Date.new(2026, 5, 21)
+      terse    = txn("acc_1", d, BigDecimal("-26.38"), "WWW.AMAZON")
+      enriched = txn("acc_1", d, BigDecimal("-26.38"), "WWW.AMAZON*NO3CS7J44 LUXEMBOURG")
+      survivors = collapse([terse, enriched])
+      assert_equal [enriched.id], survivors.map(&:id),
+                   "terse row is a strict prefix → collapse to the enriched row"
+    end
+
+    def test_collapse_keeps_identical_twins_and_mid_string_divergence
+      d = Date.new(2026, 5, 20)
+      twin_a = txn("acc_1", d, BigDecimal("-80"), "AYUNTAMIENTO ALCOBENDAS")
+      twin_b = txn("acc_1", d, BigDecimal("-80"), "AYUNTAMIENTO ALCOBENDAS")
+      assert_equal 2, collapse([twin_a, twin_b]).size, "identical twins both survive"
+
+      cafe  = txn("acc_1", d, BigDecimal("-60"), "CAFE DE SAN MILLAN")
+      petro = txn("acc_1", d, BigDecimal("-60"), "PETROPRIX ALCOBENDAS")
+      assert_equal 2, collapse([cafe, petro]).size, "mid-string divergence keeps both"
+    end
+
+    def test_collapse_three_way_mixed_group_keeps_all_and_scopes_by_account
+      d = Date.new(2026, 5, 21)
+      terse     = txn("acc_1", d, BigDecimal("-26.38"), "WWW.AMAZON")
+      enriched  = txn("acc_1", d, BigDecimal("-26.38"), "WWW.AMAZON*NO3 LUXEMBOURG")
+      unrelated = txn("acc_1", d, BigDecimal("-26.38"), "WWW.AMAZON GIFT CARD")
+      assert_equal 3, collapse([terse, enriched, unrelated]).size,
+                   "a third non-prefix row leaves the whole group for review"
+
+      # Same date+amount+desc on two accounts must not collapse — group key
+      # includes account_id.
+      a = txn("acc_1", d, BigDecimal("-10"), "STARBUCKS MADRID")
+      b = txn("acc_2", d, BigDecimal("-10"), "STARBUCKS MADRID")
+      assert_equal 2, collapse([a, b]).size, "collapse is scoped per account"
+    end
   end
 end
