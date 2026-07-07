@@ -85,15 +85,32 @@ start_vnc_stack_if_enabled() {
   fi
 }
 
+# Start Xvfb on display :99, clearing stale lock/socket first.
+#
+# `--restart unless-stopped` means a host reboot does a `docker restart`,
+# which REUSES the container's writable layer — it does not recreate it.
+# `/tmp` is not a volume, so the previous session's `/tmp/.X99-lock` and
+# `/tmp/.X11-unix/X99` survive the restart. Xvfb then refuses to claim
+# display :99 ("Server is already active for display 99") and exits. It's
+# backgrounded here, so `set -e` doesn't catch it: the invoke-server comes
+# up and reports healthy while there is NO display — Chrome can't launch and
+# x11vnc has nothing to mirror. Removing the stale files pre-launch makes the
+# post-reboot restart behave like a fresh container. Safe because a running
+# Xvfb never leaves these behind, and no second X server shares this netns.
+start_xvfb() {
+  rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+  Xvfb :99 -screen 0 "${XVFB_GEOMETRY}" &>/dev/null &
+  export DISPLAY=:99
+  sleep 0.3
+}
+
 # Backward-compat escape hatch: `docker run freentonic:latest cli --workflow ...`
 # runs the single-shot CLI exactly like before the server refactor. Handy for
 # local debugging; the default mode is the long-running invoke server.
 if [ "${1:-}" = "cli" ]; then
   shift
   # Xvfb is still needed for the CLI's Chrome.
-  Xvfb :99 -screen 0 "${XVFB_GEOMETRY}" &>/dev/null &
-  export DISPLAY=:99
-  sleep 0.3
+  start_xvfb
   start_vnc_stack_if_enabled cli
   exec ruby -I/opt/freentonic/lib /opt/freentonic/bin/freentonic --no-sandbox "$@"
 fi
@@ -110,9 +127,7 @@ fi
 
 # Always use Xvfb virtual display — gives Chrome a real display context so
 # behavioral captchas don't reject it. Lightweight (~8MB RAM).
-Xvfb :99 -screen 0 "${XVFB_GEOMETRY}" &>/dev/null &
-export DISPLAY=:99
-sleep 0.3
+start_xvfb
 
 start_vnc_stack_if_enabled server
 

@@ -10,6 +10,24 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.18.1 — Clear stale X lock on boot (reboot resilience)
+
+Operational fix. The accessory runs with `--restart unless-stopped`, so a
+host reboot does a `docker restart` that **reuses the container's writable
+layer** rather than recreating it. `/tmp` is not a volume, so the previous
+session's `/tmp/.X99-lock` and `/tmp/.X11-unix/X99` survive; on restart
+`Xvfb` refuses to claim display :99 and exits. Because Xvfb is backgrounded,
+`set -e` doesn't catch it — the invoke-server comes up and reports
+**healthy while there is no display**: Chrome can't launch (syncs hang at
+"Launching Chrome…" with an empty log) and x11vnc has nothing to mirror
+("Failed to connect to server" in noVNC). Until now the only recovery was a
+manual `kamal accessory reboot`.
+
+`docker-entrypoint.sh` now removes any stale `:99` lock/socket immediately
+before launching Xvfb (in both the server and `cli` paths, via a shared
+`start_xvfb` helper), so a post-reboot restart behaves like a fresh
+container. No API or workflow-dialect change.
+
 ## 0.18.0 — Tier B pure functions + provider-Ruby capability gate
 
 Completes the pure-functions program (Asks 9–10). Two changes land together.
