@@ -1,0 +1,11 @@
+{"kind":"recorder_started","t":1710000000000}
+{"kind":"probe_ready","url":"https://bank.example/login","t":1710000000100}
+{"kind":"navigate","url":"https://bank.example/login","t":1710000000200}
+{"kind":"navigate","url":"https://bank.example/login","t":1710000000210}
+{"kind":"fill","tag":"input","selector":"input[name='username']","selector_strategy":"name","needs_review":false,"input_type":"text","url":"https://bank.example/login","value":"demo-user"}
+{"kind":"fill","tag":"input","selector":"input[type='password']","selector_strategy":"name","needs_review":false,"input_type":"password","url":"https://bank.example/login","mask":true}
+{"kind":"click","tag":"button","selector":"#login-submit","selector_strategy":"id","needs_review":false,"text":"Sign in","url":"https://bank.example/login"}
+{"kind":"navigate","url":"https://bank.example/dashboard","t":1710000001000}
+{"kind":"fill","tag":"input","selector":"div > form > input:nth-of-type(2)","selector_strategy":"nth-child","needs_review":true,"input_type":"text","url":"https://bank.example/2fa","mask":true}
+{"kind":"submit","tag":"form","selector":"","selector_strategy":"none","needs_review":true,"url":"https://bank.example/2fa"}
+{"kind":"recorder_stopped","t":1710000002000}

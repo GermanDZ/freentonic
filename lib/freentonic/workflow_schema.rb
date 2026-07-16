@@ -13,6 +13,12 @@ module Freentonic
     PIPELINE_KEY = "pipeline"
     SECRETS_KEY = "secrets"
 
+    # The one and only workflow dialect version. A workflow must declare
+    # `version: 1`; there is no other value. Exposed as a constant so
+    # SchemaExport can version-lock its emitted document to the installed
+    # gem's dialect.
+    DIALECT_VERSION = 1
+
     def self.load(path)
       raw = YAML.safe_load(File.read(path), permitted_classes: [], aliases: false) || {}
       new(path: path, raw: raw)
@@ -278,9 +284,9 @@ module Freentonic
 
     def validate!
       version = @raw["version"]
-      unless version == 1
+      unless version == DIALECT_VERSION
         raise UserError,
-              "workflow #{@path} must declare version: 1 " \
+              "workflow #{@path} must declare version: #{DIALECT_VERSION} " \
               "(the only dialect version; see docs/workflow-schema-versioning.md)"
       end
 

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "optparse"
+require "open3"
 
 module Freentonic
   # Command-line entry point. Drives the Engine from argv.
@@ -27,6 +28,8 @@ module Freentonic
     def run(argv)
       argv = pre_process_requires(argv.dup)
       options = parse(argv)
+      return run_schema_json(options) if options[:schema_json] # before validate!; needs no --workflow
+      return run_compile_recording(options) if options[:compile_recording] # before validate!; needs no --workflow
       validate!(options)
       return run_lint(options) if options[:lint]
       execute(options)
@@ -86,7 +89,10 @@ module Freentonic
         force: false,
         interactive: false,
         recording: false,
-        lint: false
+        lint: false,
+        schema_json: false,
+        compile_recording: nil,
+        out: nil
       }
 
       parser = OptionParser.new do |opts|
@@ -129,6 +135,11 @@ module Freentonic
         end
 
         opts.on("--lint", "Statically validate the --workflow (schema, extract/normalize/ext ruby, api_client, credential + secret references) without launching Chrome") { options[:lint] = true }
+
+        opts.on("--schema-json", "Print the workflow dialect (actions, keys, plan verbs) as JSON and exit") { options[:schema_json] = true }
+
+        opts.on("--compile-recording PATH", "Compile a recording.jsonl into a draft connect: pipeline (YAML to stdout). A DRAFT, not a finished provider — read, edit, then --lint it.") { |v| options[:compile_recording] = v }
+        opts.on("--out PATH", "Write --compile-recording output to PATH instead of stdout (refused inside a git work tree)") { |v| options[:out] = v }
 
         opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
         opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }
@@ -230,6 +241,85 @@ module Freentonic
          options[:dump_raw].nil? && options[:dump_normalized].nil?
         raise UserError, "no exporters configured — pass --export NAME or --dump-raw / --dump-normalized"
       end
+    end
+
+    def run_schema_json(_options)
+      require_relative "schema_export"
+      @stdout.puts Freentonic::SchemaExport.to_json
+      0
+    end
+
+    def run_compile_recording(options)
+      require_relative "recording_compiler"
+
+      recording_path = File.expand_path(options[:compile_recording])
+      # A typo'd path is a common user error. Surface it as a friendly
+      # UserError (exit 1) like every other CLI file-input path, rather than
+      # letting Errno::ENOENT/EACCES escape run's rescue as a raw backtrace.
+      unless File.file?(recording_path)
+        raise UserError, "--compile-recording: no such file: #{recording_path}"
+      end
+      unless File.readable?(recording_path)
+        raise UserError, "--compile-recording: cannot read file: #{recording_path}"
+      end
+
+      if (out = options[:out]) && inside_git_worktree?(out)
+        raise UserError,
+              "--compile-recording: refusing to write --out #{File.expand_path(out).inspect} — " \
+              "it is inside a git work tree. The draft can contain a username literal from the " \
+              "recording; write it to /tmp (or another dir outside the repo), review it, then copy it in."
+      end
+
+      yaml = RecordingCompiler.new(
+        recording_path: recording_path,
+        stdout: @stdout,
+        stderr: @stderr
+      ).compile
+
+      if (out = options[:out])
+        # 0600: the draft can carry a captured username literal — match the
+        # secret-file discipline used for recordings and request dumps. The
+        # mode argument only fixes permissions on files this open *creates*,
+        # so we also chmod after opening to force 0600 on a pre-existing
+        # (possibly world-readable) target, and pass NOFOLLOW so a symlink
+        # planted at the path is not followed and overwritten.
+        File.open(File.expand_path(out), secure_write_flags(File::TRUNC), 0o600) do |f|
+          f.chmod(0o600)
+          f.write(yaml)
+        end
+        @stdout.puts "Wrote draft workflow to #{File.expand_path(out)} — review it, then `freentonic --lint` it."
+      else
+        @stdout.print(yaml)
+      end
+      0
+    end
+
+    # Base open flags for writing a file that may hold PII/secrets: write-only,
+    # create if absent, plus O_NOFOLLOW where the platform provides it so a
+    # symlink planted at the target is refused instead of followed. Callers add
+    # the mode-specific flag (TRUNC to overwrite, APPEND to append).
+    def secure_write_flags(mode_flag)
+      flags = File::WRONLY | File::CREAT | mode_flag
+      flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+      flags
+    end
+
+    # True when `path` would land inside a git work tree (linked worktrees
+    # included). Uses `git rev-parse --is-inside-work-tree` via array-form
+    # Open3 (no shell string, invariant 3) run from the nearest existing
+    # ancestor of the target path. Any failure (git absent, path unresolvable)
+    # is treated as "not inside a repo" — the check is a speed bump.
+    def inside_git_worktree?(path)
+      dir = File.expand_path(path)
+      dir = File.dirname(dir) until File.directory?(dir) || File.dirname(dir) == dir
+      return false unless File.directory?(dir)
+
+      stdout_str, _stderr_str, status = Open3.capture3(
+        "git", "rev-parse", "--is-inside-work-tree", chdir: dir
+      )
+      status.success? && stdout_str.strip == "true"
+    rescue StandardError
+      false
     end
 
     def run_lint(options)

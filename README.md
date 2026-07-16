@@ -85,6 +85,40 @@ to the front of the loop instead of discovering them after a live login:
 Exit code is `0` when clean (warnings allowed) and `1` on any error. Like
 a real run, it `require`s the provider's ruby — only lint what you'd run.
 
+### Exporting the workflow dialect
+
+`freentonic --schema-json` prints the whole workflow dialect as a single
+version-locked JSON document to stdout and exits `0`. It needs no
+`--workflow`, no Chrome, and no network. The document lists every action
+with its required/optional keys and a one-line summary, plus the universal
+step keys, the `when_context` operator set, and the extract/normalize/
+elevate plan-verb names — always in lockstep with the installed gem. It is
+the machine-readable contract for tooling and workflow-authoring agents.
+
+### Compiling a recording into a draft workflow
+
+`freentonic --compile-recording PATH` turns a `recording.jsonl` (the file
+`--recording` mode writes while you walk the bank's login by hand) into a
+draft `connect:` pipeline, printed as YAML to stdout. It is a deterministic,
+no-Chrome, no-network data transform:
+
+- the first navigation becomes `navigate:`, later navigations become
+  `wait_url:` expectations;
+- each click/submit becomes a `wait_for_selector:` then a `click:`;
+- masked credential fields become `fill: … value: secret(NAME)` with a
+  matching `secrets:` entry, so credentials are correct by construction;
+- unmasked field values are kept literally but flagged
+  `# REVIEW: literal from recording` (they can be usernames/PII), and a
+  fragile or missing selector is flagged with its own `# REVIEW:` line.
+
+The output is a **draft, not a finished provider** — read it, edit the
+selectors and REVIEW lines, then `freentonic --lint` it before use.
+
+Add `--out PATH` to write the draft to a file instead of stdout. Because the
+draft can contain a captured username literal, `--out` **refuses to write
+inside a git work tree** (linked worktrees included). Write it to `/tmp`,
+review it, then copy it into your provider repo.
+
 ## Workflow YAML reference
 
 The `version:` line is the dialect contract — see
@@ -225,6 +259,7 @@ list, or jump directly to the most commonly used actions:
 - [`capture_header`](docs/workflow-action-capture-header.md) / [`capture_cookie_header`](docs/workflow-action-capture-cookie-header.md) — extract credentials
 - [`prompt_stdin_and_fill`](docs/workflow-action-prompt-stdin-and-fill.md) — read SMS OTP from terminal
 - [`record_requests`](docs/workflow-action-record-requests.md) / [`dump_requests`](docs/workflow-action-dump-requests.md) — capture network traffic during investigation
+- [`inspect_page`](docs/workflow-action-inspect-page.md) — inventory the page's interactive elements as structured text (selectors/labels, never values)
 - [`when_context`](docs/workflow-when-context.md) — conditional step execution
 - [`error_signals`](docs/workflow-error-signals.md) — early abort when the bank blocks the session
 

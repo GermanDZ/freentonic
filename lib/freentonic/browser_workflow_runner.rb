@@ -267,6 +267,8 @@ module Freentonic
           label = step.fetch("label", "manual")
           @stdout.puts "    [yml] screenshot: #{label}"
           save_screenshot(label)
+        when "inspect_page"
+          inspect_page(step)
         else
           raise UserError, "unknown workflow action #{action.inspect} for #{@source.key}"
         end
@@ -1158,10 +1160,65 @@ module Freentonic
       end
 
       # Best-effort screenshot on timeout — never raises.
+      #
+      # After the screenshot, append a machine-actionable failure record to
+      # <run_dir>/failures.ndjson so an authoring loop can read WHY a wait
+      # timed out (which selectors were actually on the page) instead of
+      # diffing PNGs. `description` — ignored before — is now the record's
+      # label. append_failure_observation is self-guarding, so a failed
+      # observation never masks the original timeout error.
       def save_timeout_screenshot(description)
         save_screenshot("timeout")
       rescue StandardError => e
         @stderr.puts "    (screenshot failed: #{e.message})"
+      ensure
+        append_failure_observation(description)
+      end
+
+      # Append one JSON line describing the near-miss page to
+      # <run_dir>/failures.ndjson (mode 0600). Records t, the timeout
+      # description, the current url/title, and the interactive inventory —
+      # selectors/labels only, NO field values (PageObserver guarantees
+      # this). Only writes when a real run dir is available; otherwise it is
+      # a no-op (an ndjson artifact without a run dir is just noise). Fully
+      # rescued so it can never raise out of the ensure that calls it.
+      def append_failure_observation(description)
+        run_dir = failure_run_dir
+        return unless run_dir
+
+        observation = PageObserver.observe(@session)
+        entry = {
+          "t"           => (Time.now.to_f * 1000).to_i,
+          "description" => description.to_s,
+          "url"         => observation["url"],
+          "title"       => observation["title"],
+          "interactive" => Array(observation["interactive"])
+        }
+        path = File.join(run_dir, "failures.ndjson")
+        # The mode argument only fixes permissions on a file this open
+        # *creates*; chmod after opening forces 0600 on a pre-existing
+        # (possibly world-readable) target, and NOFOLLOW (where available)
+        # refuses a symlink planted at the path instead of following it.
+        flags = File::WRONLY | File::CREAT | File::APPEND
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(path, flags, 0o600) do |f|
+          f.chmod(0o600)
+          f.puts(JSON.generate(entry))
+        end
+      rescue StandardError => e
+        @stderr.puts "    (failure observation skipped: #{e.message})"
+      end
+
+      # Same run-dir selection as save_screenshot's primary branch: the
+      # explicit FREENTONIC_RUN_DIR when it exists and is writable. Unlike
+      # the screenshot path we do NOT fall back to /workspace or the cwd —
+      # failures.ndjson is a run artifact and shouldn't litter an arbitrary
+      # working directory.
+      def failure_run_dir
+        run_dir = ENV["FREENTONIC_RUN_DIR"]
+        return run_dir if run_dir && File.directory?(run_dir) && File.writable?(run_dir)
+
+        nil
       end
 
       SAFE_LABEL_PATTERN = /[^A-Za-z0-9_.\-]/.freeze
@@ -1466,6 +1523,21 @@ module Freentonic
         @stdout.puts "    [yml] capture_url: → ctx.#{as_key}"
       end
 
+      # Observe the live page's visible interactive elements (selectors +
+      # labels, never values). Optionally store the inventory in context
+      # under `as:`. The log line reports the element COUNT only — never any
+      # element metadata, and certainly never a value.
+      def inspect_page(step)
+        as_key = step["as"]
+        observation = PageObserver.observe(@session)
+        count = Array(observation["interactive"]).size
+
+        @context[as_key.to_s] = observation if as_key
+
+        destination = as_key ? " → ctx.#{as_key}" : ""
+        @stdout.puts "    [yml] inspect_page: #{count} interactive element(s)#{destination}"
+      end
+
       def resolved(value)
         @secret_resolver.resolve_value(source: @source, schema: @schema, value: value)
       end
@@ -1529,6 +1601,9 @@ module Freentonic
       end
 
       def compare_context(actual, op, operand, key)
+        unless WhenContext::OPERATORS.include?(op)
+          raise UserError, "when_context: unknown operator #{op.inspect} on key #{key.inspect}"
+        end
         case op
         when "gt"      then numeric!(actual, key) >  numeric!(operand, key)
         when "gte"     then numeric!(actual, key) >= numeric!(operand, key)

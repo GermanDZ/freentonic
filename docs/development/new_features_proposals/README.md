@@ -8,25 +8,31 @@ implements these; on completion they move to
 
 ## Open drafts
 
-The three below form the MVP of the **autonomous workflow-authoring
+The four below form the MVP of the **autonomous workflow-authoring
 loop** analyzed in
-[`docs/llm-workflow-authoring-review.md`](../../llm-workflow-authoring-review.md).
+[`docs/llm-workflow-authoring-review.md`](../../llm-workflow-authoring-review.md)
+and sequenced in [`plans/README.md`](plans/README.md). **Status
+(2026-07-16):** #1, #2, and #3's **Tier 1** are implemented on branch
+`feat/authoring-loop-schema-compile-inspect`; #3's Tier 2 and #4 remain open.
 They are independently shippable; the suggested order is:
 
-1. [`proposal-schema-json-export.md`](proposal-schema-json-export.md) —
+1. **✅ Shipped.** [`proposal-schema-json-export.md`](proposal-schema-json-export.md) —
    `--schema-json`. Emit the action dialect (names, keys, plan verbs,
    `when_context` operators) as version-locked JSON. The system-prompt
    payload for any authoring agent. Smallest diff; unblocks the rest.
-2. [`proposal-recording-to-workflow-compiler.md`](proposal-recording-to-workflow-compiler.md) —
+2. **✅ Shipped** (fresh-draft; graft mode deferred).
+   [`proposal-recording-to-workflow-compiler.md`](proposal-recording-to-workflow-compiler.md) —
    `--compile-recording`. Deterministically translate a
    `recording.jsonl` into a `--lint`-clean draft `connect:` pipeline,
    masking credentials into `secret(...)` by construction.
-3. [`proposal-incremental-step-session.md`](proposal-incremental-step-session.md) —
+3. **🚧 Tier 1 shipped** (`inspect_page` + `PageObserver` +
+   `failures.ndjson`); **Tier 2 open** (`--step` / `/sessions`).
+   [`proposal-incremental-step-session.md`](proposal-incremental-step-session.md) —
    `inspect_page` + held-open step execution (CLI `--step` and server
    `/sessions`). The closed `observe → act → observe` loop: try one
    action against a live session, get structured page observation back,
    iterate — instead of paying a full re-login per guess.
-4. [`proposal-authoring-container.md`](proposal-authoring-container.md) —
+4. **⏳ Open.** [`proposal-authoring-container.md`](proposal-authoring-container.md) —
    an `author` container mode: one command mounts a writable workspace,
    serves noVNC on a fixed loopback port with a known password, and drops
    into an iterate loop where `--recording` / `--compile-recording` /
@@ -38,5 +44,7 @@ They are independently shippable; the suggested order is:
 
 See [`completed/`](completed/) — `pause`, `record_requests` /
 `dump_requests`, `prompt_stdin_and_fill`, and the `inline_fd` secret
-backend. The three drafts above build directly on that debug/record
-plumbing.
+backend. The drafts above build directly on that debug/record plumbing.
+Proposals #1 and #2 (fully shipped) move here once
+`feat/authoring-loop-schema-compile-inspect` merges to `main`; #3 stays open
+until its Tier 2 lands.

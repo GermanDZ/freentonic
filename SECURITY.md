@@ -101,6 +101,37 @@ as HAR captures:
    the information you need, the same way you would rotate cookies after
    a manual HAR investigation.
 
+## Page observation (`inspect_page` / `failures.ndjson`)
+
+The `inspect_page` action and the `failures.ndjson` file written on a wait
+timeout both persist a structured inventory of the page's visible
+interactive elements. They carry element **metadata only — never element
+values**.
+
+1. **Metadata, not values.** Each entry is a selector candidate plus a
+   label/role/href and, for inputs, a `type` and a `masked` boolean.
+   `masked: true` records that an input *is* sensitive (a password/OTP/CVV
+   field, by type/name/autocomplete heuristics) — it never carries the
+   field's contents. Even a non-sensitive input's typed value is dropped.
+   The observer reads only the `mask` flag from the shared selector code,
+   and a Ruby-side key whitelist (`PageObserver::ALLOWED_ELEMENT_KEYS`)
+   strips anything else as defense in depth.
+2. **Counts, not contents, in logs.** The `[yml] inspect_page` log line
+   prints only the element count and the optional context key — never a
+   selector, label, or value.
+3. **`failures.ndjson` is a run artifact.** On a wait timeout the runner
+   appends one JSON line (timestamp, the timeout description, current
+   URL/title, and the interactive inventory) to `<run_dir>/failures.ndjson`
+   at mode `0600`, next to the timeout screenshot. It is written **only**
+   when `FREENTONIC_RUN_DIR` points at a writable directory — there is no
+   fallback to the current working directory, so it can't litter an
+   arbitrary tree. The observation is fully wrapped in a rescue: a failed
+   observation never masks the original timeout error.
+4. **Same handling as screenshots.** A run dir holds screenshots of bank
+   pages (balances, transactions, mid-flow codes). `failures.ndjson` sits
+   alongside them and deserves the same care — it's URL + selectors, no
+   secrets, but delete the run dir after use all the same.
+
 ## The `plain_file` secret backend is insecure
 
 `--secrets plain_file --secrets-file PATH` reads secrets from a dotenv-

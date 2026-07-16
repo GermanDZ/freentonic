@@ -22,6 +22,9 @@ module Freentonic
       end
 
       def compare(actual, op, operand, key)
+        unless WhenContext::OPERATORS.include?(op)
+          raise UserError, "when: unknown operator #{op.inspect} on key #{key.inspect}"
+        end
         case op
         when "gt"      then numeric!(actual, key) >  operand
         when "gte"     then numeric!(actual, key) >= operand

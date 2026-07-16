@@ -25,6 +25,12 @@ module Freentonic
   class Recorder
     PROBE_PATH = File.expand_path("recorder/probe.js", __dir__)
 
+    # Shared selector heuristics, concatenated into the probe in place of
+    # the `__FREENTONIC_SHARED_SELECTORS__` marker so the recorder and the
+    # page observer derive selectors from byte-identical source.
+    SHARED_SELECTORS_PATH = File.expand_path("recorder/selectors.js", __dir__)
+    SHARED_SELECTORS_MARKER = "// __FREENTONIC_SHARED_SELECTORS__"
+
     # Name of the CDP binding the probe calls to ship events. Has to
     # be unique enough that a page script can't accidentally call it
     # before the probe captures the reference (Chrome exposes the
@@ -44,7 +50,11 @@ module Freentonic
       @stdout = stdout
       @file = nil
       @installed = false
-      @probe_source = File.read(PROBE_PATH)
+      # Block form of sub so the shared source (which contains backslash
+      # escapes in cssEscape) isn't reinterpreted as replacement
+      # backreferences.
+      shared = File.read(SHARED_SELECTORS_PATH)
+      @probe_source = File.read(PROBE_PATH).sub(SHARED_SELECTORS_MARKER) { shared }
     end
 
     # Open the JSONL sink, enable the CDP domains we need, register
