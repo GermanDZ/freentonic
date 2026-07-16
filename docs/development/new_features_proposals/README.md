@@ -26,6 +26,13 @@ They are independently shippable; the suggested order is:
    `/sessions`). The closed `observe → act → observe` loop: try one
    action against a live session, get structured page observation back,
    iterate — instead of paying a full re-login per guess.
+4. [`proposal-authoring-container.md`](proposal-authoring-container.md) —
+   an `author` container mode: one command mounts a writable workspace,
+   serves noVNC on a fixed loopback port with a known password, and drops
+   into an iterate loop where `--recording` / `--compile-recording` /
+   `--lint` / `--step` all run against the mounted dir. The environment
+   the three tools above run in; extends the existing
+   `docker-run-freentonic.sh` and `docker-entrypoint.sh`.
 
 ## Completed
 
