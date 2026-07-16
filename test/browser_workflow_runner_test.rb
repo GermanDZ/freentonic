@@ -1,5 +1,8 @@
 require_relative "test_helper"
 require "stringio"
+require "tmpdir"
+require "base64"
+require "json"
 
 module Freentonic
     class BrowserWorkflowRunnerTest < Minitest::Test
@@ -1903,6 +1906,180 @@ module Freentonic
           })
         end
         assert_match(/on_match: sca but the step has no on_sca:/, err.message)
+      end
+
+      # --- inspect_page action + failures.ndjson ---------------------------
+
+      INSPECT_INVENTORY = {
+        "url"   => "https://bank.example/login",
+        "title" => "Login",
+        "interactive" => [
+          { "tag" => "input", "selector" => "#dni", "selector_strategy" => "id",
+            "needs_review" => false, "type" => "text", "label" => "DNI", "masked" => false },
+          { "tag" => "input", "selector" => "#pwd", "selector_strategy" => "id",
+            "needs_review" => false, "type" => "password", "label" => "Password",
+            "masked" => true },
+          { "tag" => "button", "selector" => "#submit", "selector_strategy" => "id",
+            "needs_review" => false, "text" => "Entrar" }
+        ]
+      }.freeze
+
+      # A FakeSession whose Runtime.evaluate returns the observe.js JSON
+      # string. Any non-observe Runtime.evaluate (e.g. a wait_for_selector
+      # deepQuery probe) returns `not_found` so waits can be made to time out.
+      def observe_session(inventory, not_found: true, screenshot: true)
+        session = FakeSession.new
+        json = JSON.generate(inventory)
+        session.define_singleton_method(:send_command) do |method, params = {}, timeout: 30|
+          @commands << { method: method, params: params, timeout: timeout }
+          case method
+          when "Runtime.evaluate"
+            if params[:expression].to_s.include?("JSON.stringify")
+              { "result" => { "value" => json } }
+            else
+              { "result" => { "value" => !not_found } }
+            end
+          when "Page.captureScreenshot"
+            screenshot ? { "data" => Base64.strict_encode64("png-bytes") } : {}
+          else
+            {}
+          end
+        end
+        session
+      end
+
+      def run_inspect(step, session:, context: {}, stdout: StringIO.new)
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: PromptSchemaDouble.new([step]),
+          context: context,
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_s, iterations:, sleep_seconds:) {},
+          stdout: stdout,
+          stderr: StringIO.new
+        ).execute_phase("login")
+        context
+      end
+
+      def test_inspect_page_returns_interactive_inventory
+        session = observe_session(INSPECT_INVENTORY)
+        stdout = StringIO.new
+        context = run_inspect(
+          { "action" => "inspect_page", "as" => "inventory" },
+          session: session, stdout: stdout
+        )
+
+        inv = context["inventory"]
+        refute_nil inv
+        assert_equal 3, inv["interactive"].size
+        assert_equal "#dni", inv["interactive"].first["selector"]
+        assert_includes stdout.string, "inspect_page: 3 interactive element(s)"
+        assert_includes stdout.string, "→ ctx.inventory"
+      end
+
+      def test_inspect_page_without_as_still_logs_count
+        session = observe_session(INSPECT_INVENTORY)
+        stdout = StringIO.new
+        context = run_inspect(
+          { "action" => "inspect_page" }, session: session, stdout: stdout
+        )
+        assert_empty context
+        assert_includes stdout.string, "inspect_page: 3 interactive element(s)"
+        refute_includes stdout.string, "→ ctx."
+      end
+
+      def test_inspect_page_marks_sensitive_inputs_masked_without_value
+        inventory = Marshal.load(Marshal.dump(INSPECT_INVENTORY))
+        inventory["interactive"][1]["value"] = "SUPERSECRET" # rogue value
+
+        session = observe_session(inventory)
+        context = run_inspect(
+          { "action" => "inspect_page", "as" => "inv" }, session: session
+        )
+
+        pwd = context["inv"]["interactive"].find { |e| e["type"] == "password" }
+        assert_equal true, pwd["masked"]
+        refute pwd.key?("value"), "masked input must not carry a value"
+        refute_includes JSON.generate(context["inv"]), "SUPERSECRET"
+      end
+
+      def test_inspect_page_logs_counts_not_values
+        inventory = Marshal.load(Marshal.dump(INSPECT_INVENTORY))
+        inventory["interactive"][0]["value"] = "12345678A"
+
+        session = observe_session(inventory)
+        stdout = StringIO.new
+        run_inspect(
+          { "action" => "inspect_page", "as" => "inv" }, session: session, stdout: stdout
+        )
+
+        # The log line reports a count, never selectors/labels/values.
+        assert_includes stdout.string, "inspect_page: 3 interactive element(s)"
+        refute_includes stdout.string, "12345678A"
+        refute_includes stdout.string, "#dni"
+        refute_includes stdout.string, "DNI"
+      end
+
+      def test_timeout_writes_failure_observation
+        Dir.mktmpdir do |dir|
+          old = ENV["FREENTONIC_RUN_DIR"]
+          ENV["FREENTONIC_RUN_DIR"] = dir
+          begin
+            inventory = Marshal.load(Marshal.dump(INSPECT_INVENTORY))
+            inventory["interactive"][1]["value"] = "SUPERSECRET" # would-be leak
+            session = observe_session(inventory, not_found: true)
+
+            steps = { "action" => "wait_for_selector", "selector" => "#never", "timeout" => 1 }
+            err = assert_raises(UserError) do
+              run_inspect(steps, session: session)
+            end
+            assert_includes err.message, "timed out"
+
+            path = File.join(dir, "failures.ndjson")
+            assert File.exist?(path), "expected failures.ndjson to be written"
+            assert_equal "600", format("%o", File.stat(path).mode & 0o777)
+
+            lines = File.readlines(path)
+            assert_equal 1, lines.size
+            rec = JSON.parse(lines.last)
+            assert_equal "wait_for_selector \"#never\"", rec["description"]
+            assert_equal "https://bank.example/login", rec["url"]
+            assert_equal "Login", rec["title"]
+            assert_equal 3, rec["interactive"].size
+            assert_operator rec["t"], :>, 0
+            # metadata only — never a field value
+            refute_includes lines.last, "SUPERSECRET"
+            rec["interactive"].each { |e| refute e.key?("value") }
+          ensure
+            if old.nil?
+              ENV.delete("FREENTONIC_RUN_DIR")
+            else
+              ENV["FREENTONIC_RUN_DIR"] = old
+            end
+          end
+        end
+      end
+
+      def test_timeout_without_run_dir_writes_no_failures_file
+        old = ENV["FREENTONIC_RUN_DIR"]
+        ENV.delete("FREENTONIC_RUN_DIR")
+        begin
+          session = observe_session(INSPECT_INVENTORY, not_found: true)
+          Dir.chdir(Dir.tmpdir) do
+            err = assert_raises(UserError) do
+              run_inspect(
+                { "action" => "wait_for_selector", "selector" => "#never", "timeout" => 1 },
+                session: session
+              )
+            end
+            assert_includes err.message, "timed out"
+            refute File.exist?(File.join(Dir.tmpdir, "failures.ndjson")),
+                   "must not write failures.ndjson without a run dir"
+          end
+        ensure
+          ENV["FREENTONIC_RUN_DIR"] = old if old
+        end
       end
     end
   end

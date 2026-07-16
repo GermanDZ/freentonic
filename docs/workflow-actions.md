@@ -53,6 +53,7 @@ option tables, behaviour notes, and examples.
 | `record_requests` | Start recording matching network traffic | [workflow-action-record-requests.md](workflow-action-record-requests.md) |
 | `dump_requests` | Flush recorded traffic to a file | [workflow-action-dump-requests.md](workflow-action-dump-requests.md) |
 | `pause` | Wait for the user to press Enter (manual exploration) | [workflow-action-pause.md](workflow-action-pause.md) |
+| `inspect_page` | Inventory visible interactive elements (selectors/labels, never values) | [workflow-action-inspect-page.md](workflow-action-inspect-page.md) |
 
 ### Other
 
