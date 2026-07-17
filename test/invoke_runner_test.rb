@@ -146,6 +146,83 @@ class InvokeRunnerTest < Minitest::Test
       "token value must not appear on argv"
   end
 
+  # ─── step session (open/close over real pipes, no Chrome) ───
+
+  # A trivial ruby "--step child": announces ready, then echoes an envelope per
+  # stdin line and exits on EOF. Stands in for `freentonic --step` so the real
+  # Process.spawn pipe wiring + close/reap are exercised without a browser.
+  def write_ruby_step_stub(behavior)
+    path = File.join(@root, "step-stub-#{rand(1_000_000)}.rb")
+    File.write(path, <<~RUBY)
+      require "json"
+      $stdout.sync = true
+      File.write(File.join(ENV.fetch("FREENTONIC_RUN_DIR"), "argv"), ARGV.join("\\n"))
+      puts JSON.generate("ready" => true, "url" => "https://stub/login")
+      #{behavior}
+    RUBY
+    path
+  end
+
+  def build_step_runner(stub_path)
+    Freentonic::InvokeRunner.new(
+      workflows_dir:       @workflows_dir,
+      runs_dir:            @runs_dir,
+      chrome_profile_root: @chrome_profile_root,
+      freentonic_cmd:      [RbConfig.ruby, stub_path],
+      artifact_root:       @root,
+      vnc_password_file:   @vnc_password_file
+    )
+  end
+
+  def test_open_step_session_returns_a_working_handle_and_close_reaps_it
+    stub = write_ruby_step_stub(<<~'RUBY')
+      while (line = $stdin.gets)
+        step = (JSON.parse(line) rescue { "raw" => line.strip })
+        puts JSON.generate("ok" => true, "got" => step)
+      end
+    RUBY
+    runner  = build_step_runner(stub)
+    request = build_request("step" => true)
+
+    started = nil
+    handle = runner.open_step_session(request) { |pid, pgid| started = [pid, pgid] }
+    begin
+      ready = JSON.parse(handle.stdout.gets)
+      assert_equal true, ready["ready"]
+      assert_equal [handle.pid, handle.pgid], started
+
+      handle.stdin.puts(JSON.generate("action" => "click"))
+      handle.stdin.flush
+      env = JSON.parse(handle.stdout.gets)
+      assert_equal true, env["ok"]
+      assert_equal({ "action" => "click" }, env["got"])
+    ensure
+      runner.close_step_session(handle)
+    end
+
+    # Graceful close: stdin EOF ended the child's loop; it is reaped and gone.
+    assert_raises(Errno::ESRCH) { Process.kill(0, handle.pid) }
+    # And VNC was relocked to an unreachable sentinel on close.
+    assert_equal 64, File.read(@vnc_password_file).length
+  end
+
+  def test_open_step_session_passes_step_and_omits_export_on_argv
+    stub = write_ruby_step_stub("$stdin.gets") # block on one line, don't spin
+    runner  = build_step_runner(stub)
+    request = build_request("step" => true) # build_request's body includes an export block
+    handle  = runner.open_step_session(request)
+    begin
+      handle.stdout.gets # consume ready (also flushes after the argv write)
+      argv = File.read(File.join(@runs_dir, request.run_id, "argv")).split("\n")
+      assert_includes argv, "--step"
+      refute_includes argv, "--export", "step mode short-circuits at Connect — no exporter"
+      assert_includes argv, "--workflow"
+    ensure
+      handle.stdin.close rescue nil
+      runner.close_step_session(handle)
+    end
+  end
+
   # Defense in depth: even if a malformed run_id slipped past InvokeRequest's
   # pattern (which now rejects "."/".."), the runner must refuse to mkdir
   # outside @runs_dir rather than truncate the workspace or glob other tenants.

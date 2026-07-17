@@ -19,6 +19,10 @@ For deployment and container setup, see
 | `GET` | `/runs/{run_id}/log` | Stream (or `Range`-poll) a run's log file. |
 | `GET` | `/runs/{run_id}/prompts` | List interactive prompts (2FA / SMS) waiting for a value. |
 | `POST` | `/runs/{run_id}/prompts/{prompt_id}` | Submit the value for a pending prompt. |
+| `POST` | `/sessions` | Open+hold a Chrome session for step-by-step authoring. Returns `201` + `session_id`. |
+| `POST` | `/sessions/{session_id}/step` | Run one action against the held session; returns the result envelope. |
+| `GET` | `/sessions/{session_id}/page` | Observe the held session's page (selectors/labels, never values). |
+| `DELETE` | `/sessions/{session_id}` | Close the held session and free the slot. |
 | `POST` | `/profiles/prune` | Delete one or more Chrome profile directories. |
 
 Base URL on the host that runs the container: `http://127.0.0.1:7878`
@@ -678,6 +682,143 @@ After the `202`, poll every ~500 ms:
 
 Combine with `Range`-polling on `/runs/{run_id}/log` if you want to
 stream the run's progress to the operator at the same time.
+
+---
+
+## Step sessions (`/sessions`)
+
+A **step session** holds one Chrome+CDP login open and drives it a single
+action at a time — the `observe → act → observe` loop an authoring agent uses
+to write or repair a workflow. Where `/invoke` runs a whole pipeline start to
+finish, a step session lets a caller run one action, read the outcome (with a
+page observation attached when it fails), and decide the next action — so a
+wrong selector costs one step, not a full re-login.
+
+Under the hood the server spawns `freentonic --step` as a child (the same
+isolated-subprocess model as `/invoke`: scoped env, secrets over an inherited
+fd, own process group) and proxies line-delimited JSON over its
+stdin/stdout. The child validates every action against the workflow dialect
+before running it — a session is arbitrary **registered-action** execution
+against a live bank login, never arbitrary Ruby.
+
+**Concurrency.** At most **one** step session at a time, and it is mutually
+exclusive with `/invoke`: opening a session while an invoke is in flight (or
+vice-versa) returns `409`. This preserves the server's one-bank-interaction-
+at-a-time guarantee.
+
+**Idle timeout.** A session that receives no `/step` or `/page` for
+`session_idle_timeout` seconds (default 300) is closed by a watchdog, so an
+abandoned session can't pin a bank Chrome open forever. A graceful server
+shutdown also closes any held session.
+
+**VNC.** Like `/invoke`, a session may carry a `vnc_password`; it stays valid
+for the session's lifetime (so an operator can attach noVNC to solve SCA) and
+is relocked to an unreachable sentinel on close.
+
+All four endpoints require auth when a token is set.
+
+### `POST /sessions`
+
+Open and hold a session. The request body is the **same shape as `/invoke`
+minus `export`** (a step session short-circuits at Connect, so no exporter
+runs); `step` is forced on. `run_id` is the session id.
+
+```
+POST /sessions
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "run_id": "authoring-acme-01",
+  "workflow": "acme/workflow.yml",
+  "credentials": { "inline": { "USER": "…", "PW": "…" } },
+  "chrome": { "isolated": true }
+}
+```
+
+**Response — opened (HTTP 201):**
+
+```json
+{ "session_id": "authoring-acme-01", "status": "open" }
+```
+
+**Errors:** `400` invalid body / request, `401` bad token, `404`/`422`
+workflow or credentials resolution (same rules as `/invoke`), `409` a session
+is already open **or** an invoke is in flight, `500` the session failed to
+launch, `503` shutting down.
+
+### `POST /sessions/{session_id}/step`
+
+Run one action. **The request body is the action step itself** — the same
+mapping you would write as a workflow step. It is forwarded to the child,
+which validates it (registered action name + required keys) before dispatch.
+
+```
+POST /sessions/authoring-acme-01/step
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "action": "fill", "selector": "#dni", "value": "secret(USER_DNI)" }
+```
+
+**Response (HTTP 200)** — the action's outcome envelope:
+
+```json
+{ "ok": true, "action": "fill" }
+```
+
+On a failed action the envelope carries the error and a Tier-1 page
+observation (selectors/labels, **never values**) so the next guess is
+informed:
+
+```json
+{
+  "ok": false,
+  "action": "click",
+  "error": "click: selector not found: #wrong",
+  "observation": {
+    "url": "https://bank.example/login",
+    "title": "…",
+    "interactive": [ { "tag": "button", "selector": "#entrar", "text": "Entrar" } ]
+  }
+}
+```
+
+Note the envelope is always `200` — `ok:false` describes a *bank-page*
+failure, not an HTTP one. HTTP error statuses are reserved for the session
+itself: `401` bad token, `404` no such open session, `410` the session closed
+underneath the call, `504` the action did not return in time (a wedged child).
+
+### `GET /sessions/{session_id}/page`
+
+Observe the current page without acting — a fresh Tier-1 inventory.
+
+```json
+{ "ok": true, "page": { "url": "…", "title": "…", "interactive": [ … ] } }
+```
+
+Same element-metadata-only guarantee as `inspect_page` / `failures.ndjson`:
+selectors, labels, roles, and a `masked` flag for inputs — never a field's
+value.
+
+### `DELETE /sessions/{session_id}`
+
+Close the session and free the slot. Waits for any in-flight `/step` to
+finish, then tears Chrome down.
+
+```json
+{ "session_id": "authoring-acme-01", "status": "closed" }
+```
+
+Returns `404` if there is no session with that id.
+
+### Mid-session 2FA / SCA
+
+A step session opened under the server has a run dir, so the same
+`/runs/{run_id}/prompts` rendezvous (documented above) works: an
+`elevate_session` / `prompt_stdin_and_fill` action that
+needs an operator code surfaces a prompt you answer over that endpoint, keyed
+by the session id (which is the run id).
 
 ---
 

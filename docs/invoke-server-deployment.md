@@ -242,6 +242,7 @@ what makes zero-downtime rotation possible — see the rotation note in
 | `FREENTONIC_RUNS_DIR` | `/workspace/runs` | Per-run artifact root inside the container. |
 | `FREENTONIC_CHROME_PROFILE_ROOT` | `/home/freentonic/.cache/freentonic/chrome` | Chrome profile parent. Subdirectories are created per `profile_key`. |
 | `FREENTONIC_VNC_PASSWORD_FILE` | `/dev/shm/freentonic/vnc-password` | Tmpfs path that x11vnc reads with `-passwdfile read:` and the server rotates per-invoke. Rarely worth overriding. |
+| `FREENTONIC_SESSION_IDLE_TIMEOUT` | `300` | Seconds a held `/sessions` step session may sit idle (no `/step` or `/page`) before the server's watchdog closes it and frees its Chrome. Also settable with `--session-idle-timeout`. |
 | `FREENTONIC_VNC` | `1` | Starts x11vnc on `:5900` and noVNC on `:6080`. No container-wide default password — in server mode the password comes from each `/invoke`'s `vnc_password`; in `cli` mode it comes from `FREENTONIC_VNC_PASSWORD` (below) or a random value printed on startup. See [Step 8](#step-8--debugging-with-vnc). |
 | `FREENTONIC_VNC_PASSWORD` | *(none — random if unset)* | **cli mode only.** Static VNC password for the `cli` container's lifetime. Ignored in server mode. |
 

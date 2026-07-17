@@ -17,6 +17,7 @@ options = {
   chrome_profile_root: ENV["FREENTONIC_CHROME_PROFILE_ROOT"] || Freentonic::InvokeRunner::DEFAULT_CHROME_PROFILE_ROOT,
   secrets_dir:         ENV["FREENTONIC_SECRETS_DIR"]  || Freentonic::InvokeRunner::DEFAULT_SECRETS_DIR,
   vnc_password_file:   ENV["FREENTONIC_VNC_PASSWORD_FILE"]   || Freentonic::InvokeRunner::DEFAULT_VNC_PASSWORD_FILE,
+  session_idle_timeout: (ENV["FREENTONIC_SESSION_IDLE_TIMEOUT"] || Freentonic::InvokeServer::DEFAULT_SESSION_IDLE_TIMEOUT).to_i,
   invoke_tokens:       [],
   invoke_token_files:  []
 }
@@ -30,6 +31,7 @@ OptionParser.new do |opts|
   opts.on("--chrome-profile-root DIR", "Chrome profile root (default #{options[:chrome_profile_root]})") { |v| options[:chrome_profile_root] = v }
   opts.on("--secrets-dir DIR",       "credentials.file root (default #{options[:secrets_dir]})") { |v| options[:secrets_dir] = v }
   opts.on("--vnc-password-file PATH", "x11vnc passwdfile, rotated per invoke (default #{options[:vnc_password_file]})") { |v| options[:vnc_password_file] = v }
+  opts.on("--session-idle-timeout SEC", Integer, "Close a held /sessions step session idle for this many seconds (default #{options[:session_idle_timeout]})") { |v| options[:session_idle_timeout] = v }
   opts.on("--invoke-token TOKEN",    "Bearer token (repeatable; or FREENTONIC_INVOKE_TOKEN, comma-separated)") { |v| options[:invoke_tokens] << v }
   opts.on("--invoke-token-file PATH", "File of bearer tokens, one per line (repeatable; or FREENTONIC_INVOKE_TOKEN_FILE)") { |v| options[:invoke_token_files] << v }
   opts.on("-h", "--help") { puts opts; exit 0 }
@@ -58,11 +60,12 @@ runner = Freentonic::InvokeRunner.new(
 )
 
 server = Freentonic::InvokeServer.new(
-  runner:       runner,
-  invoke_tokens: invoke_tokens,
-  listen_addr:  options[:listen_addr],
-  listen_port:  options[:listen_port],
-  logger:       $stdout
+  runner:               runner,
+  invoke_tokens:        invoke_tokens,
+  listen_addr:          options[:listen_addr],
+  listen_port:          options[:listen_port],
+  session_idle_timeout: options[:session_idle_timeout],
+  logger:               $stdout
 )
 
 %w[TERM INT].each do |sig|

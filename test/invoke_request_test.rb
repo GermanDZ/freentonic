@@ -350,6 +350,44 @@ class InvokeRequestTest < Minitest::Test
     assert_nil req.export
   end
 
+  # ─── step ───
+
+  def test_step_defaults_to_false
+    assert_equal false, parse(base_body).step
+  end
+
+  def test_step_accepts_true
+    assert_equal true, parse(base_body.merge("step" => true)).step
+  end
+
+  def test_step_rejects_non_boolean
+    err = assert_raises(Freentonic::InvokeError) { parse(base_body.merge("step" => "yes")) }
+    assert_equal 400, err.status_code
+  end
+
+  def test_step_skips_export_validation_entirely
+    req = parse(base_body.merge(
+      "step" => true,
+      "export" => { "mode" => "http" } # missing url+token; would normally raise
+    ))
+    assert_nil req.export
+  end
+
+  def test_step_and_recording_are_mutually_exclusive
+    err = assert_raises(Freentonic::InvokeError) do
+      parse(base_body.merge("step" => true, "recording" => true))
+    end
+    assert_equal 400, err.status_code
+    assert_includes err.message, "mutually exclusive"
+  end
+
+  def test_step_and_interactive_are_mutually_exclusive
+    err = assert_raises(Freentonic::InvokeError) do
+      parse(base_body.merge("step" => true, "interactive" => true))
+    end
+    assert_equal 400, err.status_code
+  end
+
   # ─── timeout / lookback ───
 
   def test_timeout_default
