@@ -8,13 +8,16 @@ diverges from its proposal.
 
 ## Status
 
-_Updated 2026-07-16._ Deliverables **1–3 are implemented** on branch
-`feat/authoring-loop-schema-compile-inspect` (code commit `affc168`; +42
-tests, full suite green, `../freentonic-providers` green): `--schema-json`,
-`--compile-recording` (fresh-draft), and `inspect_page` + `failures.ndjson`
-(step-session **Tier 1**). Deliverables **4–5** — the held-open step session
-(step Tier 2) and the `author` container — plus every fast-follow remain
-**open**. See the ✅ / ⏳ column below.
+_Updated 2026-07-17._ Deliverables **1–4 are implemented**. 1–3 landed on
+branch `feat/authoring-loop-schema-compile-inspect` (code commit `affc168`):
+`--schema-json`, `--compile-recording` (fresh-draft), and `inspect_page` +
+`failures.ndjson` (step-session **Tier 1**). **Deliverable 4 — the held-open
+step session (step Tier 2)** — is on branch `feat/authoring-loop-step-session`
+in two commits: **4a** the CLI `--step` REPL (`run_action` + `StepSession` +
+Connect step mode) and **4b** the server `/sessions` endpoints + per-session
+idle watchdog. +62 tests, full suite green (1173 runs), `../freentonic-providers`
+green. Only deliverable **5** — the `author` container — plus the fast-follows
+remain **open**. See the ✅ / ⏳ column below.
 
 | Plan | Proposal | Depends on | Rough effort |
 | --- | --- | --- | --- |
@@ -38,13 +41,14 @@ until its prerequisite (Tier 1 observation) exists.
 | 1 | **`--schema-json`** | ✅ shipped | schema-json | ~0.5d | P0. Smallest diff; the machine-readable dialect contract every other feature (and any authoring agent) reads. No dependencies — unblocks the rest. |
 | 2 | **`--compile-recording`** (fresh-draft) | ✅ shipped | compile-recording | ~1d | P0, highest value-per-diff: turns a `recording.jsonl` freentonic *already* writes into a `--lint`-clean draft. Soft-depends on #1, no hard dep. Defer graft mode (see fast-follows). |
 | 3 | **`inspect_page` + `failures.ndjson`** (step Tier 1) | ✅ shipped | incremental-step-session | ~1–1.5d | P0/P1 boundary. `PageObserver` backs everything downstream, and `failures.ndjson` is P0-value machine-actionable output on its own. Tier 2 hard-depends on it — so it ships as its own slot, not bundled with the REPL. |
-| 4 | **Held-open step session** (`--step` + `/sessions`, step Tier 2) | ⏳ pending | incremental-step-session | ~3–4d | P1. The architectural centerpiece — closes `observe → act → observe`. Depends on #3. Carries the single biggest net-new infra: the per-session idle watchdog. |
+| 4 | **Held-open step session** (`--step` + `/sessions`, step Tier 2) | ✅ shipped | incremental-step-session | ~3–4d | P1. The architectural centerpiece — closes `observe → act → observe`. Depends on #3. Carries the single biggest net-new infra: the per-session idle watchdog. |
 | 5 | **`author` container** (Tier 1) | ⏳ pending | authoring-container | ~1d | Pure packaging; works with today's flags the day it lands, but *most* useful once #2/#4 exist (its inner loop calls `--compile-recording` / `--step`). Slot it here so its docs only promise shipped commands. |
 
-**Critical path ≈ 6–8 days** (#1→#5). **#1–#3 are now done** — they landed
-together on `feat/authoring-loop-schema-compile-inspect` rather than as three
-separate branches. **Remaining:** #4 (~3–4d, the long pole, builds directly on
-#3's `PageObserver`) and #5 (~1d).
+**Critical path ≈ 6–8 days** (#1→#5). **#1–#4 are now done** — #1–#3 landed
+together on `feat/authoring-loop-schema-compile-inspect`; #4 (the long pole)
+on `feat/authoring-loop-step-session`, in two commits (4a CLI `--step`, 4b
+server `/sessions`). **Remaining:** only #5 (~1d, the `author` container) plus
+the fast-follows.
 
 ### Fast-follows (off the critical path, land opportunistically)
 
