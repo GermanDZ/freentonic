@@ -42,6 +42,21 @@ module Freentonic
           install_recorder
           navigate_to_initial_url
           run_recording_idle
+        elsif @context[:step]
+          # Step mode: launch Chrome exactly as the normal sync path does
+          # (same anti-detection posture — launch flags plus the headless UA
+          # fix), navigate to the workflow's initial URL, then hold the one
+          # CDP session open and drive it a single action at a time from a
+          # JSONL REPL (see #run_step_session). This is the observe → act →
+          # observe authoring loop; the session survives a failed action so a
+          # wrong selector costs one step, not a full re-login.
+          launch_chrome
+          @chrome_started = true
+          open_login_session
+          mask_webdriver
+          apply_headless_stealth if @context[:headless]
+          navigate_to_initial_url(label: "Step")
+          run_step_session
         else
           launch_chrome
           @chrome_started = true
@@ -229,6 +244,48 @@ module Freentonic
             stderr: stderr
           ).execute_phase(phase)
         end
+      end
+
+      # Hold the one CDP session open and drive it a single action at a time
+      # from a JSONL REPL. Builds ONE long-lived BrowserWorkflowRunner (the
+      # per-runner state — @recording_installed, the debug recorder — must not
+      # reset between actions, so it cannot be rebuilt per step) and hands it,
+      # plus the step input/output IOs, to a StepSession.
+      #
+      # Under the CLI the CLI routes the runner's human log lines to stderr and
+      # the JSONL envelope channel to stdout, so the two never interleave; the
+      # server passes the same IOs down its child's pipes. Teardown (session,
+      # Chrome, isolated profile) is the shared `ensure` at the top of #call —
+      # the REPL just returns when stdin hits EOF / `quit`.
+      def run_step_session
+        raise UserError, "--step requires a --workflow" unless source.workflow?
+
+        workflow_context = (@context[:workflow_context] ||= {})
+        runtime_context = {
+          lookback_days: @context[:lookback_days],
+          only_stage:    @context[:only_stage],
+          through_stage: @context[:through_stage],
+          isolated:      @context[:isolated],
+          source_key:    source.key
+        }.compact
+
+        runner = BrowserWorkflowRunner.new(
+          source: source,
+          session: @session,
+          schema: source.workflow,
+          context: workflow_context,
+          runtime_context: runtime_context,
+          secret_resolver: @context.fetch(:secret_resolver),
+          session_drainer: @context[:session_drainer] || SourceHelpers.method(:drain_session_events),
+          stdout: stdout,
+          stderr: stderr
+        )
+
+        StepSession.new(
+          runner: runner,
+          input:  @context[:step_input]  || $stdin,
+          output: @context[:step_output] || $stdout
+        ).run(initial_url: initial_url_from_workflow)
       end
 
       # Browse-mode user-agent override. Banks fingerprint:
@@ -484,10 +541,10 @@ module Freentonic
         @recorder.install(@session)
       end
 
-      def navigate_to_initial_url
+      def navigate_to_initial_url(label: "Recording")
         url = initial_url_from_workflow
         return unless url
-        stdout.puts "Recording: navigating to #{url}"
+        stdout.puts "#{label}: navigating to #{url}"
         @session.send_command("Page.navigate", { url: url })
       end
 

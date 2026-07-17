@@ -72,13 +72,13 @@ module Freentonic
     def stages_to_run
       only = @context[:only_stage]
       through = @context[:through_stage]
-      # Interactive (browse) and recording modes both short-circuit the
+      # Interactive (browse), recording, and step modes all short-circuit the
       # pipeline at Connect: the operator just wants Chrome open at the
-      # bank URL so they can interact via VNC. Extract/Normalize/Export
-      # have nothing to do — and Connect doesn't populate credentials
-      # in those modes, so Extract would NoMethodError on a nil creds
-      # hash if it ran.
-      only = :connect if @context[:interactive] || @context[:recording]
+      # bank URL so they can interact via VNC (or drive it a step at a time
+      # via the JSONL REPL). Extract/Normalize/Export have nothing to do —
+      # and Connect doesn't populate credentials in those modes, so Extract
+      # would NoMethodError on a nil creds hash if it ran.
+      only = :connect if @context[:interactive] || @context[:recording] || @context[:step]
 
       skip = Set.new
       skip << :connect   if @context[:from_raw] || @context[:from_normalized]

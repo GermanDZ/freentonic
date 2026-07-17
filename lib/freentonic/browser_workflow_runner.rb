@@ -62,7 +62,80 @@ module Freentonic
         @context
       end
 
+      # Public single-step entry for held-open step sessions (`--step`, and the
+      # invoke server's /sessions endpoints). Runs ONE action through the same
+      # private #execute_step the phase runner uses — so a step behaves
+      # identically whether it comes from a YAML phase or a REPL line — and
+      # returns an outcome envelope instead of raising.
+      #
+      #   { "ok" => true,  "action" => "click" }
+      #   { "ok" => false, "action" => "click", "error" => "...",
+      #     "observation" => { url:, title:, interactive: [...] } }
+      #
+      # The action is validated against WorkflowActions (registered name +
+      # required keys present) BEFORE dispatch — an unregistered or malformed
+      # action is never executed. This is the security boundary of a step
+      # session: it is arbitrary *registered-action* execution against a live
+      # bank session, never arbitrary Ruby.
+      #
+      # On failure a Tier-1 PageObserver observation of the current page is
+      # attached (selectors/labels, never values) so the next guess is informed
+      # — a wrong selector costs one step, not a full re-login.
+      def run_action(step)
+        action = step.is_a?(Hash) ? step["action"] : nil
+
+        if (problem = action_validation_error(step))
+          return { "ok" => false, "action" => action, "error" => problem }
+        end
+
+        execute_step(step)
+        { "ok" => true, "action" => action }
+      rescue UserError, Freentonic::ChromeCdp::Error, KeyError => e
+        { "ok" => false, "action" => action, "error" => e.message, "observation" => safe_observe }
+      end
+
+      # Public Tier-1 page observation for a step session's page query
+      # (`page` REPL command / GET /sessions/:id/page). Selectors and labels
+      # only, never element values (PageObserver guarantees this). Returns a
+      # normalized observation Hash, or an { "error" => msg } Hash if the eval
+      # itself fails — never raises.
+      def observe_page
+        PageObserver.observe(@session)
+      rescue StandardError => e
+        { "error" => e.message }
+      end
+
       private
+
+      # nil when `step` is a well-formed, dispatchable action; otherwise a
+      # human-readable reason. Mirrors the load-time validation WorkflowSchema
+      # applies to phase steps (unknown-action + required-key presence), so a
+      # REPL line is held to exactly the same contract as a YAML step.
+      def action_validation_error(step)
+        return "step is not a mapping" unless step.is_a?(Hash)
+
+        action = step["action"]
+        return "missing action:" if action.nil? || action.to_s.empty?
+        return "unknown action #{action.inspect}" unless WorkflowActions.known?(action)
+
+        missing = WorkflowActions.required_keys(action).reject { |k| step.key?(k) }
+        return nil if missing.empty?
+
+        "#{action} requires #{missing.map { |k| "#{k}:" }.join(", ")}"
+      end
+
+      # Best-effort observation for a failed step's envelope — never raises, so
+      # a broken page (or a Chrome that just died) can't turn an error envelope
+      # into an exception. nil when even the observation fails.
+      def safe_observe
+        PageObserver.observe(@session)
+      rescue StandardError
+        nil
+      end
+
+      def reporter
+        @context[:reporter] || Reporter.null
+      end
 
       def reporter
         @context[:reporter] || Reporter.null

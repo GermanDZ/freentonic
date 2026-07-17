@@ -188,6 +188,55 @@ module Freentonic
       assert_match(/--interactive cannot be combined with --dump-normalized/, err.message)
     end
 
+    # --- Step mode ------------------------------------------------------
+    # `--step` holds Chrome open and drives it a step at a time, short-
+    # circuiting the pipeline at Connect like --interactive/--recording. It
+    # needs --workflow (for the initial URL + secret/error-signal context) and
+    # rejects the same output-producing / stage-isolation flags.
+
+    def test_step_accepts_workflow_without_exporter
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--step"])
+      Cli.new(stderr: StringIO.new).send(:validate!, opts)
+    end
+
+    def test_step_requires_workflow
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--step"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--workflow/, err.message)
+    end
+
+    def test_step_rejects_recording
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--step", "--recording"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--step cannot be combined with --recording/, err.message)
+    end
+
+    def test_step_rejects_interactive
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--step", "--interactive"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      # --interactive is validated before --step and also rejects --step's
+      # sibling flags; either message is a correct rejection of the combo.
+      assert_match(/cannot be combined/, err.message)
+    end
+
+    def test_step_rejects_export
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--step", "--export", "json", "--export-path", "out.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--step cannot be combined with --export/, err.message)
+    end
+
+    def test_step_rejects_from_raw
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--step", "--from-raw", "/tmp/raw.json"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--step cannot be combined with --from-raw/, err.message)
+    end
+
+    def test_step_rejects_only_stage
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--step", "--only-stage", "extract"])
+      err = assert_raises(UserError) { Cli.new(stderr: StringIO.new).send(:validate!, opts) }
+      assert_match(/--step cannot be combined with --only-stage/, err.message)
+    end
+
     # --- Secret-backend option matrix --------------------------------------
 
     def secret_options(overrides = {})

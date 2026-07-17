@@ -89,6 +89,7 @@ module Freentonic
         force: false,
         interactive: false,
         recording: false,
+        step: false,
         lint: false,
         schema_json: false,
         compile_recording: nil,
@@ -146,6 +147,8 @@ module Freentonic
 
         opts.on("--interactive", "Browse mode: run only the workflow's `connect` phase (URL navigation), then idle until SIGTERM. Lets the operator interact with the bank manually via VNC to warm a fresh fingerprint or solve 2FA.") { options[:interactive] = true }
         opts.on("--recording", "Recording mode: launch CDP Chrome at the workflow's initial URL, idle until SIGTERM, and capture click/change/submit/navigate events to <run_dir>/recording.jsonl. Used to bootstrap or repair a workflow YAML by walking the bank's UI by hand. Mutually exclusive with --interactive.") { options[:recording] = true }
+
+        opts.on("--step", "Step mode: launch Chrome at the workflow's initial URL and hold it open, then read one action per line (JSONL) from stdin, run each, and print a result envelope to stdout (a failed action attaches a page observation). The observe→act→observe authoring loop. Closes on EOF/`quit`. Mutually exclusive with --interactive/--recording.") { options[:step] = true }
 
         opts.on("-h", "--help") { puts opts; exit 0 }
         opts.on("--version") { puts "freentonic #{Freentonic::VERSION}"; exit 0 }
@@ -227,6 +230,28 @@ module Freentonic
         end
       end
 
+      # --step holds Chrome open and drives it a step at a time from the
+      # workflow's secret/error-signal context, so it needs --workflow and,
+      # like --interactive/--recording, stops the pipeline at Connect — the
+      # same output-producing / stage-isolation flags contradict it.
+      if options[:step]
+        raise UserError, "--step requires --workflow PATH" unless options[:workflow]
+        if options[:interactive]
+          raise UserError, "--step cannot be combined with --interactive (pick one)"
+        end
+        if options[:recording]
+          raise UserError, "--step cannot be combined with --recording (pick one)"
+        end
+        conflicting = %i[only_stage through_stage from_raw from_normalized dump_raw dump_normalized].find { |f| options[f] }
+        if conflicting
+          raise UserError,
+            "--step cannot be combined with --#{conflicting.to_s.tr('_', '-')}"
+        end
+        unless options[:exporters].empty?
+          raise UserError, "--step cannot be combined with --export"
+        end
+      end
+
       # Stage-isolation flags that legitimately stop the pipeline before
       # the Export stage runs — no exporter is needed for these because
       # there's nothing to export. Both --only-stage and --through count.
@@ -235,7 +260,8 @@ module Freentonic
       stops_before_export = pre_export_stage.call(options[:only_stage]) ||
                             pre_export_stage.call(options[:through_stage]) ||
                             options[:interactive] ||
-                            options[:recording]
+                            options[:recording] ||
+                            options[:step]
 
       if options[:exporters].empty? && !stops_before_export &&
          options[:dump_raw].nil? && options[:dump_normalized].nil?
@@ -364,8 +390,20 @@ module Freentonic
         from_normalized: options[:from_normalized],
         exporters: exporters,
         interactive: options[:interactive],
-        recording: options[:recording]
+        recording: options[:recording],
+        step: options[:step]
       }
+
+      # Step mode speaks JSONL: every result envelope must land on stdout with
+      # nothing else. Route the runner's / stage's human log lines to stderr
+      # (context[:stdout]) and silence the pretty reporter, leaving stdout as a
+      # pristine one-envelope-per-line channel the server proxy can read. The
+      # StepSession writes envelopes to context[:step_output].
+      if options[:step]
+        context[:step_output] = @stdout
+        context[:stdout]      = @stderr
+        context[:reporter]    = Reporter.null
+      end
 
       Engine.new(context: context).run
     end

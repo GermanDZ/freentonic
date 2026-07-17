@@ -104,6 +104,16 @@ module Freentonic
       assert_equal [:connect], stages(recording: true)
     end
 
+    def test_step_forces_connect_only
+      # Step mode holds Chrome open at Connect and drives it a step at a time;
+      # the downstream stages have nothing to do (and no credentials hash).
+      assert_equal [:connect], stages(step: true)
+    end
+
+    def test_step_wins_over_through_stage
+      assert_equal [:connect], stages(step: true, through_stage: :export)
+    end
+
     def test_interactive_wins_over_through_stage
       # interactive/recording override an explicit --through.
       assert_equal [:connect], stages(interactive: true, through_stage: :export)

@@ -2081,5 +2081,127 @@ module Freentonic
           ENV["FREENTONIC_RUN_DIR"] = old if old
         end
       end
+
+      # --- run_action / observe_page (held-open step session engine) -------
+
+      def build_step_runner(session:, context: {}, stdout: StringIO.new)
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new,
+          session: session,
+          schema: PromptSchemaDouble.new([]),
+          context: context,
+          secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_s, iterations:, sleep_seconds:) {},
+          stdout: stdout,
+          stderr: StringIO.new
+        )
+      end
+
+      def test_run_action_ok_envelope
+        runner = build_step_runner(session: FakeSession.new)
+        result = runner.run_action({ "action" => "note", "message" => "hello" })
+        assert_equal({ "ok" => true, "action" => "note" }, result)
+      end
+
+      def test_run_action_error_envelope_attaches_observation
+        # A wait timeout writes a fallback screenshot into the cwd when no run
+        # dir is set; run in a tmpdir so it doesn't litter the repo.
+        Dir.chdir(Dir.tmpdir) do
+          session = observe_session(INSPECT_INVENTORY, not_found: true)
+          runner = build_step_runner(session: session)
+          result = runner.run_action(
+            { "action" => "wait_for_selector", "selector" => "#never", "timeout" => 1 }
+          )
+          assert_equal false, result["ok"]
+          assert_equal "wait_for_selector", result["action"]
+          assert_includes result["error"], "timed out"
+          # A failed step attaches a Tier-1 observation so the next guess is
+          # informed — selectors only, never values.
+          refute_nil result["observation"]
+          assert_equal 3, result["observation"]["interactive"].size
+        end
+      end
+
+      def test_run_action_never_raises
+        Dir.chdir(Dir.tmpdir) do
+          session = observe_session(INSPECT_INVENTORY, not_found: true)
+          runner = build_step_runner(session: session)
+          # A missing-selector click would raise UserError inside execute_step;
+          # run_action must convert it to an envelope, not propagate.
+          result = runner.run_action({ "action" => "click", "selector" => "#never" })
+          assert_equal false, result["ok"]
+        end
+      end
+
+      def test_run_action_rejects_unknown_action_without_dispatch
+        session = FakeSession.new
+        runner = build_step_runner(session: session)
+        result = runner.run_action({ "action" => "frobnicate", "x" => 1 })
+        assert_equal false, result["ok"]
+        assert_includes result["error"], "unknown action"
+        # SECURITY: an unregistered action must never reach the browser.
+        assert_empty session.commands, "unknown action must not dispatch any CDP command"
+      end
+
+      def test_run_action_rejects_missing_required_key_without_dispatch
+        session = FakeSession.new
+        runner = build_step_runner(session: session)
+        result = runner.run_action({ "action" => "navigate" }) # url: missing
+        assert_equal false, result["ok"]
+        assert_includes result["error"], "url:"
+        assert_empty session.commands, "malformed action must not dispatch"
+      end
+
+      def test_run_action_rejects_non_mapping
+        runner = build_step_runner(session: FakeSession.new)
+        assert_equal false, runner.run_action("not a hash")["ok"]
+        assert_includes runner.run_action(nil)["error"], "not a mapping"
+      end
+
+      def test_run_action_reuses_one_context_across_actions
+        # Two actions through ONE runner share @context: capture_url writes it,
+        # a later inspect_page stores alongside. Proves the step session holds a
+        # single long-lived runner (state doesn't reset per action).
+        json = JSON.generate(INSPECT_INVENTORY)
+        session = FakeSession.new
+        session.define_singleton_method(:send_command) do |method, params = {}, timeout: 30|
+          @commands << { method: method, params: params, timeout: timeout }
+          next {} unless method == "Runtime.evaluate"
+
+          expr = params[:expression].to_s
+          if expr.include?("JSON.stringify")
+            { "result" => { "value" => json } }        # observe.js inventory
+          elsif expr.include?("window.location.href")
+            { "result" => { "value" => "https://bank.example/dash" } }
+          else
+            { "result" => { "value" => true } }
+          end
+        end
+
+        context = {}
+        runner = build_step_runner(session: session, context: context)
+
+        runner.run_action({ "action" => "capture_url", "as" => "landing" })
+        runner.run_action({ "action" => "inspect_page", "as" => "inv" })
+
+        assert_equal "https://bank.example/dash", context["landing"]
+        refute_nil context["inv"], "second action saw the same @context as the first"
+      end
+
+      def test_observe_page_returns_observation
+        session = observe_session(INSPECT_INVENTORY)
+        runner = build_step_runner(session: session)
+        obs = runner.observe_page
+        assert_equal "https://bank.example/login", obs["url"]
+        assert_equal 3, obs["interactive"].size
+      end
+
+      def test_observe_page_never_raises
+        session = FakeSession.new
+        session.define_singleton_method(:send_command) { |*| raise ChromeCdp::Error, "socket closed" }
+        runner = build_step_runner(session: session)
+        obs = runner.observe_page
+        assert_includes obs["error"], "socket closed"
+      end
     end
   end
