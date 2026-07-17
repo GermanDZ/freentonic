@@ -132,6 +132,36 @@ values**.
    alongside them and deserves the same care — it's URL + selectors, no
    secrets, but delete the run dir after use all the same.
 
+## Held-open step sessions (`--step`)
+
+`freentonic --step` (and the invoke server's `/sessions` endpoints, which
+spawn `--step` as a child) hold one Chrome+CDP session open against a live
+bank login and run one action per stdin line. This is the same trust level as
+running a workflow — a step session executes bank-facing actions in an
+authenticated session — with these bounds:
+
+1. **Registered actions only, never arbitrary Ruby.** Every line is validated
+   against `WorkflowActions` (a known action name with its required keys
+   present) *before* dispatch and run through the exact same `execute_step`
+   the YAML pipeline uses. An unknown or malformed action is rejected with an
+   error envelope and **never reaches the browser** — the step channel is not
+   an eval channel. `secret(...)` references resolve from the workflow's
+   configured secrets exactly as in a normal run; the plaintext is typed into
+   the page and never echoed back in an envelope.
+2. **Observations carry metadata, not values.** A failed action and the
+   `page` command both attach a `PageObserver` inventory — the same
+   selectors/labels/roles-only contract as `inspect_page` above. No field
+   value ever appears in an envelope.
+3. **Clean channel separation.** Result envelopes go to stdout; all human/log
+   output (including the runner's step logs) goes to stderr. A caller reading
+   the JSONL channel never sees a log line, and a log line never carries an
+   action's resolved value.
+4. **Bounded under the server.** The invoke server accepts a step session only
+   behind the same bearer auth as `/invoke`, holds **at most one at a time**
+   (a held session counts against the single-run guarantee), and closes an
+   idle session on its own watchdog so an abandoned session can't pin a bank
+   Chrome open indefinitely. See the invoke-server API doc.
+
 ## The `plain_file` secret backend is insecure
 
 `--secrets plain_file --secrets-file PATH` reads secrets from a dotenv-

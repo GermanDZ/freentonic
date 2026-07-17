@@ -119,6 +119,44 @@ draft can contain a captured username literal, `--out` **refuses to write
 inside a git work tree** (linked worktrees included). Write it to `/tmp`,
 review it, then copy it into your provider repo.
 
+### Stepping through a workflow one action at a time
+
+`freentonic --step --workflow PATH` launches Chrome at the workflow's initial
+URL and **holds the one session open**, then reads one action per line from
+stdin, runs it, and prints a result envelope to stdout — the
+`observe → act → observe` authoring loop. A failed action does not tear the
+session down: it returns an error envelope with a page observation attached,
+so a wrong selector costs one step, not a full re-login. It ends on EOF or a
+`quit`/`exit` line.
+
+Lines are JSON (the wire format the invoke server's `/sessions` endpoints
+speak) or a single-line YAML flow mapping for typing by hand. Two control
+words are recognised: `page` emits a fresh page observation, and
+`quit`/`exit` closes the session.
+
+```
+$ freentonic --step --workflow providers/acme/workflow.yml
+{"ok":true,"ready":true,"url":"https://bank.example/login"}      # ← printed by --step
+{"action":"fill","selector":"#dni","value":"secret(USER_DNI)"}   # ← you type this
+{"ok":true,"action":"fill"}
+{"action":"click","selector":"#wrong"}
+{"ok":false,"action":"click","error":"click: selector not found: #wrong","observation":{"url":"…","interactive":[{"tag":"button","selector":"#entrar","text":"Entrar",…}]}}
+page
+{"ok":true,"page":{"url":"…","title":"…","interactive":[…]}}
+quit
+```
+
+Only **registered actions** run, validated (name + required keys) before
+dispatch — a step session is arbitrary *action* execution against a live bank
+session, never arbitrary Ruby. `secret(...)` references resolve from the
+workflow's secrets exactly as they do in a normal run. Result envelopes go to
+**stdout**; all human/log output goes to **stderr**, so stdout stays a clean
+one-envelope-per-line channel. Under the invoke server the same loop is driven
+over HTTP — see the [`/sessions` endpoints](docs/invoke-server-api.md).
+
+`inspect_page` and the `page` command surface element **metadata only**
+(selectors, labels, roles), never a field's value.
+
 ## Workflow YAML reference
 
 The `version:` line is the dialect contract — see

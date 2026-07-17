@@ -57,7 +57,7 @@ module Freentonic
 
     attr_reader :run_id, :profile_key, :timeout_sec, :lookback, :workflow_path,
                 :credentials_inline, :credentials_file, :export, :chrome,
-                :vnc_password, :interactive, :recording
+                :vnc_password, :interactive, :recording, :step
 
     # @param body [Hash] parsed JSON request
     # @param workflows_dir [String] absolute path to the workflows root
@@ -84,15 +84,16 @@ module Freentonic
       @credentials_inline, @credentials_file = parse_credentials
       @interactive = parse_interactive
       @recording   = parse_recording
-      if @recording && @interactive
-        raise InvokeError.new(:bad_request, "recording and interactive are mutually exclusive — pick one")
+      @step        = parse_step
+      if [@interactive, @recording, @step].count(true) > 1
+        raise InvokeError.new(:bad_request, "interactive, recording, and step are mutually exclusive — pick one")
       end
-      # Interactive (browse) and recording modes both short-circuit the
+      # Interactive (browse), recording, and step modes all short-circuit the
       # engine at Connect, so no exporter ever runs. Skip export parsing
       # entirely so a client that always ships an `export` block (e.g.
-      # simplefreen) can flip either flag without also having to scrub
+      # simplefreen) can flip any of these flags without also having to scrub
       # the otherwise-required exporter fields.
-      @export = (@interactive || @recording) ? nil : parse_export
+      @export = (@interactive || @recording || @step) ? nil : parse_export
       @timeout_sec = parse_timeout
       @lookback = parse_lookback
       @chrome = parse_chrome
@@ -377,6 +378,21 @@ module Freentonic
       return false if value.nil?
       unless [true, false].include?(value)
         raise InvokeError.new(:bad_request, "recording must be boolean")
+      end
+      value
+    end
+
+    # Step-mode flag. Like interactive/recording, the engine short-circuits at
+    # Connect — but instead of idling until SIGTERM, Chrome is held open and
+    # driven one registered action at a time over the child's stdin/stdout
+    # (JSONL), which the invoke server proxies through its /sessions endpoints.
+    # No exporters fire; the request's `export` block is ignored (validate!
+    # skips parse_export when step is true).
+    def parse_step
+      value = @body["step"]
+      return false if value.nil?
+      unless [true, false].include?(value)
+        raise InvokeError.new(:bad_request, "step must be boolean")
       end
       value
     end

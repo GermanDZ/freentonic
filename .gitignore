@@ -7,3 +7,6 @@ tmp/
 .tmp/
 .DS_Store
 .claude/
+# Stray screenshots a no-run-dir screenshot/timeout falls back to writing
+# into the cwd (see BrowserWorkflowRunner#save_screenshot).
+/freentonic-*.png

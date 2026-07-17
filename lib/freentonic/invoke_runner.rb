@@ -147,7 +147,123 @@ module Freentonic
       write_vnc_password(self.class.random_unreachable_password)
     end
 
+    # Handle over a long-lived `freentonic --step` child. `stdin`/`stdout` are
+    # the parent-side pipe ends carrying the JSONL step protocol.
+    StepHandle = Struct.new(
+      :request, :pid, :pgid, :stdin, :stdout, :run_dir, :chrome_profile_dir,
+      keyword_init: true
+    )
+
+    # Spawn `freentonic --step` as a long-lived child and return a StepHandle
+    # whose stdin/stdout pipes carry the JSONL step protocol. Unlike #run this
+    # does NOT wait for the child — the caller (the invoke server's /sessions
+    # layer, via StepSessionSupervisor) drives it a line at a time and calls
+    # #close_step_session for teardown. Same isolation as #run: scoped env
+    # (unsetenv_others), secrets over an inherited fd, own process group.
+    #
+    # VNC is held open (the caller's password, or an unreachable sentinel) for
+    # the session's lifetime so an operator can attach noVNC to solve SCA;
+    # #close_step_session relocks it.
+    def open_step_session(request, &on_start)
+      run_dir = File.join(@runs_dir, request.run_id)
+      ensure_contained!(run_dir, @runs_dir, "run_id")
+      FileUtils.mkdir_p(run_dir, mode: 0o750)
+      FileUtils.mkdir_p(File.join(run_dir, "prompts"), mode: 0o700)
+
+      chrome_profile_dir = File.join(@chrome_profile_root, request.profile_key)
+      ensure_contained!(chrome_profile_dir, @chrome_profile_root, "profile_key")
+      FileUtils.mkdir_p(chrome_profile_dir, mode: 0o750)
+
+      secrets_arg, extra_fds = build_secrets_handoff(request)
+      env  = build_env(request, chrome_profile_dir: chrome_profile_dir, run_dir: run_dir)
+      argv = build_argv(request, secrets_arg: secrets_arg, run_dir: run_dir)
+
+      write_vnc_password(request.vnc_password || self.class.random_unreachable_password)
+
+      log_fd            = File.open(File.join(run_dir, "log"), File::WRONLY | File::CREAT | File::TRUNC, 0o600)
+      stdin_r, stdin_w  = IO.pipe
+      stdout_r, stdout_w = IO.pipe
+      begin
+        pid = Process.spawn(
+          env, *argv,
+          unsetenv_others: true,
+          close_others:    true,
+          pgroup:          true,
+          in:              stdin_r,
+          out:             stdout_w,
+          err:             log_fd,
+          **extra_fds
+        )
+      ensure
+        # Parent keeps only the write end of the child's stdin and the read
+        # end of its stdout; the child owns the mirror ends.
+        stdin_r.close  rescue nil
+        stdout_w.close rescue nil
+        log_fd.close   rescue nil
+        extra_fds.each_value { |io| io.close rescue nil }
+      end
+
+      pgid = begin
+        Process.getpgid(pid)
+      rescue Errno::ESRCH
+        pid
+      end
+      on_start&.call(pid, pgid)
+
+      StepHandle.new(
+        request: request, pid: pid, pgid: pgid,
+        stdin: stdin_w, stdout: stdout_r,
+        run_dir: run_dir, chrome_profile_dir: chrome_profile_dir
+      )
+    rescue StandardError
+      # Setup/spawn blew up after we may have set the VNC password — relock it
+      # so a failed open doesn't leave VNC reachable.
+      write_vnc_password(self.class.random_unreachable_password) rescue nil
+      raise
+    end
+
+    # Tear a step session down. Closing the child's stdin ends its REPL loop on
+    # EOF, and Connect's `ensure` closes Chrome + the CDP session cleanly; we
+    # then escalate SIGTERM→SIGKILL to the whole process group in case it
+    # didn't. Idempotent and best-effort: always cleans the Chrome profile and
+    # relocks VNC, safe to call twice (double DELETE, or DELETE racing the
+    # idle watchdog).
+    def close_step_session(handle)
+      return unless handle
+      handle.stdin.close rescue nil
+      reap_child(handle.pid, handle.pgid)
+      handle.stdout.close rescue nil
+    ensure
+      cleanup_chrome(handle.chrome_profile_dir) if handle
+      write_vnc_password(self.class.random_unreachable_password)
+    end
+
     private
+
+    # Reap `pid`: after stdin-close, wait a grace for a clean exit, then TERM
+    # the group, wait again, then KILL. Returns true once reaped or already
+    # gone (ECHILD from a prior reap is treated as gone).
+    def reap_child(pid, pgid)
+      return true if wait_gone?(pid, SIGTERM_GRACE_SECONDS)
+      send_signal_to_group(pgid, "TERM")
+      return true if wait_gone?(pid, SIGTERM_GRACE_SECONDS)
+      send_signal_to_group(pgid, "KILL")
+      wait_gone?(pid, SIGTERM_GRACE_SECONDS)
+    end
+
+    def wait_gone?(pid, timeout)
+      deadline = Time.now + timeout
+      loop do
+        begin
+          result = Process.wait2(pid, Process::WNOHANG)
+        rescue Errno::ECHILD
+          return true
+        end
+        return true if result
+        return false if Time.now >= deadline
+        sleep 0.1
+      end
+    end
 
     # Overwrite the x11vnc passwdfile. The file is picked up on every
     # new VNC client connection (x11vnc's `-passwdfile read:` re-reads
@@ -235,12 +351,13 @@ module Freentonic
       argv << "--headless" if request.chrome["headless"]
       argv << "--interactive" if request.interactive
       argv << "--recording"   if request.recording
+      argv << "--step"        if request.step
 
-      # Skip exporter argv plumbing in interactive (browse) and
-      # recording modes — both short-circuit the engine at Connect, so
+      # Skip exporter argv plumbing in interactive (browse), recording, and
+      # step modes — all three short-circuit the engine at Connect, so
       # no exporter ever fires. Pushing --export with no scrape output
       # would fail CLI validation downstream.
-      if (export = request.export) && !request.interactive && !request.recording
+      if (export = request.export) && !request.interactive && !request.recording && !request.step
         argv.push("--export", export["mode"])
         case export["mode"]
         when "http"

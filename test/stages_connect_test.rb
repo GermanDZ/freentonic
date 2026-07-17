@@ -2,6 +2,7 @@
 
 require_relative "test_helper"
 require "stringio"
+require "json"
 
 module Freentonic
   # Coverage for the parts of the Connect stage that don't need a real
@@ -116,6 +117,60 @@ module Freentonic
         chrome_cdp:  FailingChromeCdp.new(RuntimeError.new("boom"))
       )
       assert_raises(RuntimeError) { stage.call }
+    end
+
+    # ─── step mode wiring (#run_step_session) ───
+    #
+    # Drives the step branch's driver directly (bypassing launch_chrome) to
+    # prove the Connect → one long-lived runner → StepSession wiring holds
+    # without a browser: it navigates the ready envelope to the initial URL and
+    # flows an action through to an envelope on the JSONL output IO.
+
+    class StepWorkflowDouble
+      def initialize(connect_steps)
+        @connect_steps = connect_steps
+      end
+
+      def phase(name) = name == "connect" ? @connect_steps : []
+      def error_signals = []
+    end
+
+    class StepSourceDouble
+      def initialize(connect_steps)
+        @workflow = StepWorkflowDouble.new(connect_steps)
+      end
+
+      def key = "test"
+      def workflow? = true
+      def workflow = @workflow
+    end
+
+    def test_run_step_session_drives_a_jsonl_repl_without_chrome
+      input  = StringIO.new(%({"action":"note","message":"hi"}\nquit\n))
+      output = StringIO.new
+      source = StepSourceDouble.new(
+        [{ "action" => "navigate", "url" => "https://bank.example/login" }]
+      )
+
+      stage = Stages::Connect.new(context: {
+        source:          source,
+        stdout:          StringIO.new,
+        stderr:          StringIO.new,
+        secret_resolver: Object.new,   # `note` never resolves a secret
+        session_drainer: ->(*) {},
+        step_input:      input,
+        step_output:     output
+      })
+      # A step session holds ONE CDP session; `note` never touches it, so a
+      # bare object is enough to stand in without launching Chrome.
+      stage.instance_variable_set(:@session, Object.new)
+
+      stage.send(:run_step_session)
+
+      envelopes = output.string.each_line.map { |l| JSON.parse(l) }
+      assert_equal true, envelopes.first["ready"]
+      assert_equal "https://bank.example/login", envelopes.first["url"]
+      assert_equal({ "ok" => true, "action" => "note" }, envelopes.last)
     end
   end
 end

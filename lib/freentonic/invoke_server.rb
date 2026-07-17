@@ -6,6 +6,7 @@ require "time"
 require "fileutils"
 
 require_relative "invoke_request"
+require_relative "step_session_supervisor"
 
 module Freentonic
   # Long-running HTTP server that accepts /invoke requests and hands each one
@@ -57,6 +58,13 @@ module Freentonic
 
     # Pushed onto @run_queue by drain to make the worker exit its pop loop.
     WORKER_SHUTDOWN = :__worker_shutdown__
+
+    # A held-open step session (/sessions) that sees no /step or /page for this
+    # many seconds is closed by the watchdog, so an abandoned session can't pin
+    # a bank Chrome open forever. The watchdog wakes every SESSION_WATCHDOG_TICK
+    # seconds to check.
+    DEFAULT_SESSION_IDLE_TIMEOUT = 300
+    SESSION_WATCHDOG_TICK        = 1
 
     STATUS_REASONS = {
       200 => "OK",
@@ -131,7 +139,9 @@ module Freentonic
       logger: $stdout,
       max_concurrent_connections: MAX_CONCURRENT_CONNECTIONS,
       max_queued_runs:   MAX_QUEUED_RUNS,
-      max_retained_runs: MAX_RETAINED_RUNS
+      max_retained_runs: MAX_RETAINED_RUNS,
+      step_supervisor:      nil,
+      session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT
     )
       @runner          = runner
       # Normalize to a frozen list of non-empty tokens. Empty ⇒ auth disabled.
@@ -173,11 +183,23 @@ module Freentonic
       # Live handler threads, guarded by @connection_mutex. Tracked so shutdown
       # can join in-flight work instead of abandoning it when start() returns.
       @handler_threads     = []
+
+      # Held-open step session (/sessions). At most one at a time — a session
+      # counts as one bank interaction, mutually exclusive with an in-flight
+      # /invoke. @session (a Hash or nil) is guarded by @session_state_mutex
+      # for lifecycle transitions; its per-session :io_mutex serialises the
+      # JSONL proxy so concurrent /step calls can't scramble the pipe.
+      @step_supervisor      = step_supervisor || StepSessionSupervisor.new(runner: runner)
+      @session_idle_timeout = session_idle_timeout
+      @session_state_mutex  = Mutex.new
+      @session              = nil
+      @session_watchdog     = nil
     end
 
     def start
-      @server_socket = TCPServer.new(@listen_addr, @listen_port)
-      @worker        = Thread.new { run_worker }
+      @server_socket    = TCPServer.new(@listen_addr, @listen_port)
+      @worker           = Thread.new { run_worker }
+      @session_watchdog = Thread.new { run_session_watchdog }
       log "listening on http://#{@listen_addr}:#{@listen_port}" \
           "#{@invoke_tokens.empty? ? " (auth: OPEN — no token set)" : " (auth: #{@invoke_tokens.size} bearer token#{@invoke_tokens.size == 1 ? "" : "s"})"}"
 
@@ -257,6 +279,11 @@ module Freentonic
         t.join(remaining)
       end
 
+      # Close any held step session (its group was already SIGTERM'd above) and
+      # stop the idle watchdog.
+      close_session_for_shutdown
+      @session_watchdog&.join(2)
+
       # Any run still queued (worker abandoned mid-drain, or never got to it)
       # is reported as aborted rather than left dangling in "queued" forever.
       abort_pending_runs("server shutting down")
@@ -266,6 +293,10 @@ module Freentonic
       pgids = @in_flight_mutex.synchronize do
         @in_flight.values.map { |e| e[:pgid] }.compact
       end
+      # A held step session's child runs in its own group too; TERM it so it
+      # tears down alongside the in-flight invokes.
+      session_pgid = @session_state_mutex.synchronize { @session && @session[:pgid] }
+      pgids << session_pgid if session_pgid
       pgids.each do |pgid|
         begin
           Process.kill("-TERM", pgid)
@@ -571,6 +602,18 @@ module Freentonic
         handle_metrics(request)
       when method == "POST" && path == "/invoke"
         handle_invoke(request)
+      when path == "/sessions"
+        return method_not_allowed unless method == "POST"
+        handle_open_session(request)
+      when (session_step_match = path.match(%r{\A/sessions/([^/]+)/step\z}))
+        return method_not_allowed unless method == "POST"
+        handle_session_step(request, session_step_match[1])
+      when (session_page_match = path.match(%r{\A/sessions/([^/]+)/page\z}))
+        return method_not_allowed unless method == "GET"
+        handle_session_page(request, session_page_match[1])
+      when (session_id_match = path.match(%r{\A/sessions/([^/]+)\z}))
+        return method_not_allowed unless method == "DELETE"
+        handle_delete_session(request, session_id_match[1])
       when method == "POST" && path == "/profiles/prune"
         handle_prune_profiles(request)
       when run_status_match
@@ -719,6 +762,12 @@ module Freentonic
     def handle_invoke(req)
       return [503, { "error" => "server shutting down" }] if @shutting_down
       return unauthorized unless authenticated?(req)
+
+      # One bank interaction at a time: a held step session blocks new invokes
+      # (and vice-versa — see handle_open_session).
+      if session_active?
+        return [409, { "error" => "a step session is open; close it (DELETE /sessions/:id) before invoking" }]
+      end
 
       body = parse_json_body(req)
       return [400, { "error" => "invalid or missing JSON body" }] if body.nil?
@@ -1383,6 +1432,216 @@ module Freentonic
       end
 
       [202, { "accepted" => true, "run_id" => run_id }]
+    end
+
+    # ─── held-open step sessions (/sessions) ───
+
+    # POST /sessions {workflow, credentials, ...} → 201 {session_id, status}.
+    # Opens and holds a Chrome+CDP session (a `freentonic --step` child) that
+    # subsequent /step and /page calls drive. Same request shape as /invoke
+    # minus export (step short-circuits at Connect); `step:true` is forced on.
+    # Rejects with 409 when a session is already open OR an invoke is in flight
+    # — one bank interaction at a time.
+    def handle_open_session(req)
+      return [503, { "error" => "server shutting down" }] if @shutting_down
+      return unauthorized unless authenticated?(req)
+
+      body = parse_json_body(req)
+      return [400, { "error" => "invalid or missing JSON body" }] if body.nil?
+      return [400, { "error" => "request body must be a JSON object" }] unless body.is_a?(Hash)
+
+      begin
+        request = InvokeRequest.from_hash(
+          body.merge("step" => true),
+          workflows_dir: @runner.workflows_dir, secrets_dir: @runner.secrets_dir
+        )
+      rescue InvokeError => e
+        return [e.status_code, { "error" => e.message }]
+      end
+
+      # Reserve the single session slot atomically, before the slow open.
+      reservation = @session_state_mutex.synchronize do
+        if @session
+          :session_busy
+        elsif current_in_flight_count.positive?
+          :invoke_busy
+        else
+          @session = {
+            session_id:    request.run_id,
+            status:        :opening,
+            handle:        nil,
+            pgid:          nil,
+            io_mutex:      Mutex.new,
+            last_activity: monotonic_now
+          }
+          :ok
+        end
+      end
+      return [409, { "error" => "a step session is already open" }] if reservation == :session_busy
+      return [409, { "error" => "an invoke is in flight; retry after it finishes" }] if reservation == :invoke_busy
+
+      begin
+        handle = @step_supervisor.open(request) do |pid, pgid|
+          @session_state_mutex.synchronize { @session[:pgid] = pgid if @session }
+        end
+      rescue InvokeError => e
+        @session_state_mutex.synchronize { @session = nil }
+        return [e.status_code, { "error" => e.message }]
+      end
+
+      # A DELETE could have cleared the slot while we were opening; if so, the
+      # child we just spawned is an orphan — tear it down.
+      claimed = @session_state_mutex.synchronize do
+        if @session && @session[:session_id] == request.run_id && @session[:status] == :opening
+          @session[:handle]        = handle
+          @session[:status]        = :open
+          @session[:last_activity] = monotonic_now
+          true
+        else
+          false
+        end
+      end
+      unless claimed
+        @step_supervisor.close(handle) rescue nil
+        return [410, { "error" => "session was closed during open" }]
+      end
+
+      log "step session opened: #{request.run_id}"
+      [201, { "session_id" => request.run_id, "status" => "open" }]
+    end
+
+    # POST /sessions/:id/step {action, ...} → 200 envelope. The body IS the
+    # action step; it is forwarded verbatim to the child, which validates it
+    # against WorkflowActions before dispatch (never arbitrary Ruby) and
+    # returns { ok:, action:, [error:, observation:] }.
+    def handle_session_step(req, session_id)
+      return unauthorized unless authenticated?(req)
+      body = parse_json_body(req)
+      return [400, { "error" => "step body must be a JSON object" }] unless body.is_a?(Hash)
+
+      with_session(session_id) do |sess|
+        [200, @step_supervisor.send(sess[:handle], JSON.generate(body))]
+      end
+    end
+
+    # GET /sessions/:id/page → 200 { ok:true, page: {url, title, interactive} }.
+    # A fresh Tier-1 observation (selectors/labels, never values).
+    def handle_session_page(req, session_id)
+      return unauthorized unless authenticated?(req)
+      with_session(session_id) do |sess|
+        [200, @step_supervisor.send(sess[:handle], "page")]
+      end
+    end
+
+    # DELETE /sessions/:id → 200 {status:"closed"}. Detaches the slot, then
+    # closes the child (waiting for any in-flight step to finish first).
+    def handle_delete_session(req, session_id)
+      return unauthorized unless authenticated?(req)
+
+      sess = @session_state_mutex.synchronize do
+        s = @session
+        if s && s[:session_id] == session_id
+          @session = nil
+          s
+        end
+      end
+      return [404, { "error" => "no such session" }] unless sess
+
+      sess[:io_mutex].synchronize { @step_supervisor.close(sess[:handle]) if sess[:handle] }
+      log "step session closed: #{session_id}"
+      [200, { "session_id" => session_id, "status" => "closed" }]
+    end
+
+    # Look up the open session by id, run the block under its io_mutex (so the
+    # JSONL proxy stays serialised), and refresh its idle clock on completion.
+    # Returns 404 if there is no matching open session, and maps a supervisor
+    # InvokeError (timeout / dead child) to its HTTP status.
+    def with_session(session_id)
+      sess = lookup_open_session(session_id)
+      return [404, { "error" => "no such open session" }] unless sess
+
+      sess[:io_mutex].synchronize do
+        # Re-check under the io lock: a DELETE/watchdog could have closed it
+        # between the lookup and acquiring the lock.
+        return [410, { "error" => "session closed" }] unless lookup_open_session(session_id).equal?(sess)
+
+        result = yield sess
+        @session_state_mutex.synchronize { sess[:last_activity] = monotonic_now if @session.equal?(sess) }
+        result
+      end
+    rescue InvokeError => e
+      [e.status_code, { "error" => e.message }]
+    end
+
+    def lookup_open_session(session_id)
+      @session_state_mutex.synchronize do
+        s = @session
+        (s && s[:session_id] == session_id && s[:status] == :open) ? s : nil
+      end
+    end
+
+    def session_active?
+      @session_state_mutex.synchronize { !@session.nil? }
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    # Watchdog thread: close a session that has been idle (no /step or /page)
+    # for @session_idle_timeout seconds, so an abandoned session can't pin a
+    # bank Chrome forever. Net-new infra — the server has no other idle timer.
+    def run_session_watchdog
+      until @shutting_down
+        sleep SESSION_WATCHDOG_TICK
+        begin
+          close_if_idle
+        rescue StandardError => e
+          log_exception("session-watchdog", e)
+        end
+      end
+    end
+
+    def close_if_idle
+      sess = @session_state_mutex.synchronize do
+        s = @session
+        (s && s[:status] == :open) ? s : nil
+      end
+      return unless sess
+      return if (monotonic_now - sess[:last_activity]) < @session_idle_timeout
+
+      # A step in progress holds :io_mutex → the session is not idle; skip
+      # rather than block the watchdog (or, worse, close mid-step).
+      return unless sess[:io_mutex].try_lock
+      begin
+        detached = @session_state_mutex.synchronize do
+          if @session.equal?(sess) && (monotonic_now - sess[:last_activity]) >= @session_idle_timeout
+            @session = nil
+            true
+          end
+        end
+        if detached
+          @step_supervisor.close(sess[:handle]) if sess[:handle]
+          log "step session closed (idle > #{@session_idle_timeout}s): #{sess[:session_id]}"
+        end
+      ensure
+        sess[:io_mutex].unlock
+      end
+    end
+
+    # Close any active session during shutdown drain. The group was already
+    # SIGTERM'd by terminate_in_flight_groups, so the child is on its way out;
+    # this reaps it and cleans up the Chrome profile / VNC.
+    def close_session_for_shutdown
+      sess = @session_state_mutex.synchronize do
+        s = @session
+        @session = nil
+        s
+      end
+      return unless sess && sess[:handle]
+      @step_supervisor.close(sess[:handle])
+    rescue StandardError => e
+      log_exception("session-shutdown", e)
     end
 
     # ─── helpers ───
