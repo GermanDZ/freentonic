@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "date"
 require "timeout"
 require "io/console"
 require "base64"
@@ -265,7 +266,11 @@ module Freentonic
           field = step.fetch("field")
           as_key = step.fetch("as")
           exclude_url = step.fetch("exclude_url", nil)
-          @stdout.puts "    [yml] capture_response_json: #{url_includes} .#{field} → ctx.#{as_key}"
+          all = step.fetch("all", false)
+          unless [true, false].include?(all)
+            raise UserError, "workflow capture_response_json: all: must be true or false (got #{all.inspect})"
+          end
+          @stdout.puts "    [yml] capture_response_json: #{url_includes} .#{field} → ctx.#{as_key}#{all ? " (all)" : ""}"
           capture_response_json(
             url_includes: url_includes,
             exclude_url: exclude_url,
@@ -273,7 +278,8 @@ module Freentonic
             as: as_key,
             retries: Integer(step.fetch("retries", 0)),
             interval_seconds: Float(step.fetch("interval_seconds", 1)),
-            required: step.fetch("required", true)
+            required: step.fetch("required", true),
+            all: all
           )
         when "wait_for_selector"
           selector = step.fetch("selector")
@@ -303,6 +309,25 @@ module Freentonic
         when "click_if_present"
           @stdout.puts "    [yml] click_if_present: #{step.fetch("selector")}"
           click_selector(step.fetch("selector"), optional: true)
+        when "click_while_present"
+          spec = ClickWhilePresentSpec.validate!(step, "workflow click_while_present")
+          stop = lookback_stop(spec[:stop])
+          @stdout.print "    [yml] click_while_present: #{spec[:selector]} (max #{spec[:max_clicks]}" \
+                        "#{stop ? ", until #{stop[:from_date]}" : ""})"
+          clicks, capped, covered = click_while_present(spec, stop: stop)
+          outcome = if capped then ", stopped at max_clicks"
+                    elsif covered then " ✓ (lookback window covered)"
+                    else " ✓"
+                    end
+          @stdout.puts " → #{clicks} click(s)#{outcome}"
+          if capped
+            problem = "#{spec[:selector]} is still present after #{spec[:max_clicks]} clicks, so what it loads is incomplete"
+            if spec[:on_max_clicks] == "fail"
+              raise UserError, "workflow click_while_present: #{problem} — raise max_clicks, or set on_max_clicks: warn " \
+                               "if a capped load is acceptable"
+            end
+            @stderr.puts "    ⚠ click_while_present: #{problem}"
+          end
         when "click_text"
           text    = step.fetch("text")
           role    = step.fetch("role", "button")
@@ -771,51 +796,273 @@ module Freentonic
         @stdout.puts "      ✓ #{header}: captured"
       end
 
-      def capture_response_json(url_includes:, exclude_url:, field:, as:, retries:, interval_seconds:, required:)
-        value = find_response_json_field(url_includes, exclude_url, field)
+      # all: false → the field from the NEWEST matching response that has it
+      # (a value).
+      # all: true  → the field from EVERY matching response, oldest first (a
+      # list) — for paginated loads, where each page is its own response.
+      # Strict: a matched response whose body is gone or lacks the field
+      # fails the step, since a silently missing page is a silent gap in the
+      # data. `required` governs only the case where nothing matched at all.
+      def capture_response_json(url_includes:, exclude_url:, field:, as:, retries:, interval_seconds:, required:, all: false)
+        find = -> { all ? collect_all_response_json(url_includes, exclude_url, field) : newest_response_json(url_includes, exclude_url, field) }
+        outcome, value = find.call
 
         retries.times do
-          break unless value.nil?
+          break if outcome == :ok
 
           sleep interval_seconds
           @session.send_command("Runtime.evaluate", { expression: "1" }) rescue nil
-          value = find_response_json_field(url_includes, exclude_url, field)
+          outcome, value = find.call
         end
 
-        if value.nil?
-          raise UserError, "workflow capture_response_json could not find #{field.inspect} in response matching #{url_includes.inspect}" if required
+        case outcome
+        when :partial
+          raise UserError, "workflow capture_response_json #{as}: #{value}"
+        when :none
+          if required
+            raise UserError, "workflow capture_response_json could not find #{field.inspect} in response matching " \
+                             "#{url_includes.inspect} (#{response_json_diagnosis(url_includes, exclude_url, field)})"
+          end
+          # An explicit empty list means "no pages", which a plan can iterate.
+          @context[as.to_s] = [] if all
           return nil
         end
 
         @context[as.to_s] = value
-        @stdout.puts "      ✓ #{field}: captured"
+        @stdout.puts all ? "      ✓ #{field}: captured from #{value.size} response(s)" : "      ✓ #{field}: captured"
       end
 
-      def find_response_json_field(url_includes, exclude_url, field)
-        responses = @session.pending_events.select do |event|
-          event["method"] == "Network.responseReceived" &&
-            event.dig("params", "response", "url").to_s.include?(url_includes) &&
-            (exclude_url.nil? || !event.dig("params", "response", "url").to_s.include?(exclude_url))
+      # requestIds of the matching responses, oldest first, each once.
+      def matching_request_ids(url_includes, exclude_url)
+        @session.pending_events.filter_map do |event|
+          next unless event["method"] == "Network.responseReceived"
+
+          url = event.dig("params", "response", "url").to_s
+          next unless Array(url_includes).any? { |u| url.include?(u) }
+          next if exclude_url && url.include?(exclude_url)
+
+          event.dig("params", "requestId")
+        end.uniq
+      end
+
+      # The parsed JSON body of one response, or nil when Chrome doesn't hold
+      # it (yet, or any more) or it isn't JSON. Parsed bodies are cached for
+      # the run — a requestId's body never changes, and both the paging stop
+      # and the captures read the same pages. Misses aren't cached, so a
+      # body that wasn't ready yet is fetched again on the next look.
+      def response_json(request_id)
+        @response_json ||= {}
+        return @response_json[request_id] if @response_json.key?(request_id)
+
+        result = (@session.send_command("Network.getResponseBody", { requestId: request_id }) rescue nil)
+        body = result.is_a?(Hash) ? result["body"] : nil
+        return nil if body.nil? || body.empty?
+
+        body = Base64.decode64(body) if result["base64Encoded"]
+        parsed = (JSON.parse(body) rescue nil)
+        return nil if parsed.nil?
+
+        @response_json[request_id] = parsed
+      end
+
+      def newest_response_json(url_includes, exclude_url, field)
+        matching_request_ids(url_includes, exclude_url).reverse_each do |id|
+          json = response_json(id)
+          return [:ok, json[field]] if json.is_a?(Hash) && !json[field].nil?
         end
-        return nil if responses.empty?
+        [:none, nil]
+      end
 
-        responses.reverse_each do |event|
-          request_id = event.dig("params", "requestId")
-          next unless request_id
+      def collect_all_response_json(url_includes, exclude_url, field)
+        ids = matching_request_ids(url_includes, exclude_url)
+        return [:none, nil] if ids.empty?
 
-          begin
-            result = @session.send_command("Network.getResponseBody", { requestId: request_id })
-            body = result["body"]
-            next if body.nil? || body.empty?
+        values = ids.each_with_index.map do |id, i|
+          json = response_json(id)
+          next json[field] if json.is_a?(Hash) && !json[field].nil?
 
-            parsed = JSON.parse(body) rescue nil
-            return parsed[field] if parsed.is_a?(Hash) && !parsed[field].nil?
-          rescue StandardError
-            next
+          problem = json.nil? ? "has no retrievable body" : "has no #{field.inspect}"
+          return [:partial, "response #{i + 1} of #{ids.size} matching #{url_includes.inspect} #{problem} — " \
+                            "refusing to capture an incomplete set"]
+        end
+        [:ok, values]
+      end
+
+      # Why a capture came up empty — the three causes need different fixes:
+      # no matching request at all (the page served the data from a cache),
+      # bodies Chrome no longer holds (evicted, e.g. by a navigation), or
+      # bodies without the field (an error payload). Counts only, no values.
+      def response_json_diagnosis(url_includes, exclude_url, field)
+        ids = matching_request_ids(url_includes, exclude_url)
+        return "no matching response was seen" if ids.empty?
+
+        jsons = ids.map { |id| response_json(id) }
+        unavailable = jsons.count(&:nil?)
+        without_field = jsons.count { |j| !j.nil? && !(j.is_a?(Hash) && !j[field].nil?) }
+        "#{ids.size} matching response(s): #{unavailable} with no retrievable body, " \
+          "#{without_field} without #{field.inspect}"
+      end
+
+      # How many times a vanished element is looked for again before
+      # click_while_present believes it's gone — a re-render can briefly
+      # unmount a "Load more" button between pages.
+      ABSENT_RECHECKS = 2
+      # Seconds a disabled ("busy") element is waited on, per click, before
+      # the step fails rather than spinning on a button that never re-enables.
+      BUSY_BUDGET_SECONDS = 30
+
+      # Click spec[:selector] while it is present (see ClickWhilePresentSpec
+      # for the options). Each click waits for spec[:wait_for_response] when
+      # given, then settles. With a `stop` (see #lookback_stop) it stops —
+      # before the next click — once the loaded pages reach back past the
+      # run's lookback window. Returns [clicks, capped, covered]: capped when
+      # max_clicks was reached with the element still present, covered when
+      # the window stop fired.
+      def click_while_present(spec, stop: nil)
+        selector = spec[:selector]
+        clicks = 0
+        covered = false
+        while clicks < spec[:max_clicks]
+          if stop && lookback_window_covered?(stop)
+            covered = true
+            break
+          end
+
+          known = spec[:wait_for_response] && matching_request_ids(spec[:wait_for_response][:url_includes], nil)
+          break unless click_when_ready(selector)
+
+          clicks += 1
+          await_click_response(spec, known, clicks) if known
+          @session_drainer.call(@session, iterations: spec[:settle_seconds], sleep_seconds: 1)
+        end
+
+        covered ||= !stop.nil? && clicks >= spec[:max_clicks] && lookback_window_covered?(stop)
+        capped = !covered && clicks >= spec[:max_clicks] && element_present?(selector)
+        [clicks, capped, covered]
+      end
+
+      # One click on `selector`: waits out a disabled match (within
+      # BUSY_BUDGET_SECONDS) and re-checks an absent one ABSENT_RECHECKS
+      # times. true once clicked, false when the element is gone.
+      def click_when_ready(selector)
+        busy = 0
+        absent = 0
+        loop do
+          status = runtime_deep_call(<<~JS, selector)
+            (selector) => {
+              const element = deepQuery(document, selector);
+              if (!element) return "absent";
+              if (element.disabled || element.getAttribute("aria-disabled") === "true") return "busy";
+              element.click();
+              return "clicked";
+            }
+          JS
+          case status
+          when "clicked" then return true
+          when "busy"
+            busy += 1
+            if busy > BUSY_BUDGET_SECONDS
+              raise UserError, "workflow click_while_present: #{selector} stayed disabled for #{BUSY_BUDGET_SECONDS}s"
+            end
+          else
+            absent += 1
+            return false if absent > ABSENT_RECHECKS
+          end
+          @session_drainer.call(@session, iterations: 1, sleep_seconds: 1)
+        end
+      end
+
+      def element_present?(selector)
+        runtime_deep_call("(selector) => !!deepQuery(document, selector)", selector) == true
+      end
+
+      # Fails the step when click #n fetched nothing matching — the page
+      # ignored the click (e.g. before hydration) and paging would otherwise
+      # go on blind, or stop short and look complete.
+      def await_click_response(spec, known, n)
+        wait = spec[:wait_for_response]
+        wait[:timeout_seconds].times do
+          return if (matching_request_ids(wait[:url_includes], nil) - known).any?
+
+          @session_drainer.call(@session, iterations: 1, sleep_seconds: 1)
+        end
+        return if (matching_request_ids(wait[:url_includes], nil) - known).any?
+
+        raise UserError, "workflow click_while_present: click #{n} on #{spec[:selector]} fetched no response matching " \
+                         "#{wait[:url_includes].inspect} within #{wait[:timeout_seconds]}s"
+      end
+
+      # Resolves a validated stop spec against this run: the threshold is the
+      # lookback window start (ExtractPlan.window_start_ms — the same `from_ms`
+      # an extract plan filters on) minus margin_hours. nil when the step has
+      # no stop, or the run has no lookback (then paging runs to max_clicks).
+      #
+      # Scope: of the responses that already arrived before the step, only the
+      # newest counts (the page on screen); older ones may belong to another
+      # view and must not end paging early. Everything that arrives during
+      # the step counts.
+      def lookback_stop(spec)
+        return nil if spec.nil?
+
+        lookback = @runtime_context[:lookback_days] || @runtime_context["lookback_days"]
+        return nil if lookback.nil?
+
+        from_date = Date.today - Integer(lookback)
+        earlier = matching_request_ids(spec[:url_includes], nil)
+        spec.merge(from_date: from_date,
+                   threshold_ms: ExtractPlan.window_start_ms(from_date) - (spec[:margin_hours] * 3_600_000),
+                   ignored: earlier[0...-1].to_h { |id| [id, true] }, examined: {}, oldest_ms: nil)
+      end
+
+      # Timestamps below this (in ms) are taken as junk — 0, a missing value
+      # coerced to a number, or seconds where ms were declared — not as a
+      # date in 1973 that would end paging at once.
+      PLAUSIBLE_MS = 100_000_000_000
+
+      # True once an in-scope response holds a matching item older than the
+      # threshold. A body is marked examined only after it was read, so one
+      # Chrome hadn't finished yet is looked at again on the next check.
+      def lookback_window_covered?(stop)
+        matching_request_ids(stop[:url_includes], nil).each do |id|
+          next if stop[:ignored][id] || stop[:examined][id]
+
+          body = response_json(id)
+          next if body.nil?
+
+          stop[:examined][id] = true
+          stop[:items_paths].each do |path|
+            dig_items(body, path).each do |item|
+              ms = item_timestamp_ms(item, stop)
+              stop[:oldest_ms] = ms if ms && (stop[:oldest_ms].nil? || ms < stop[:oldest_ms])
+            end
           end
         end
+        !stop[:oldest_ms].nil? && stop[:oldest_ms] < stop[:threshold_ms]
+      end
 
-        nil
+      def item_timestamp_ms(item, stop)
+        return nil unless item.is_a?(Hash)
+        return nil unless stop[:items_where].all? { |k, v| item[k] == v }
+
+        ts = item[stop[:timestamp_field]]
+        return nil unless ts.is_a?(Numeric)
+
+        ms = stop[:timestamp_unit] == "s" ? ts * 1000 : ts
+        ms >= PLAUSIBLE_MS ? ms : nil
+      end
+
+      # The items at a dotted path, where a `*` segment fans out over every
+      # element of an array (or value of a hash): "data.modules.*.items"
+      # gathers the items of every module. Non-array leaves are dropped.
+      def dig_items(obj, path)
+        nodes = path.split(".").reduce([obj]) do |current, seg|
+          if seg == "*"
+            current.flat_map { |n| n.is_a?(Array) ? n : (n.is_a?(Hash) ? n.values : []) }
+          else
+            current.filter_map { |n| PathDig.step(n, seg) }
+          end
+        end
+        nodes.select { |n| n.is_a?(Array) }.flatten(1)
       end
 
       def fill_selector(selector, value, optional: false, resolve: true, clear: false)

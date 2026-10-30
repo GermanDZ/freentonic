@@ -28,7 +28,8 @@ the login flow.
 | `exclude_url`      | `string`  | no       | —       | Substring to exclude — responses whose URL contains this string are skipped. Useful for filtering out revoke/logout endpoints that match the same base pattern. |
 | `retries`          | `integer` | no       | `0`     | Number of times to retry if the field is not found. |
 | `interval_seconds` | `number`  | no       | `1`     | Seconds to sleep between retries. |
-| `required`         | `boolean` | no       | `true`  | When `true`, raises `UserError` if the field is not found. When `false`, silently returns `nil`. |
+| `required`         | `boolean` | no       | `true`  | When `true`, raises `UserError` if the field is not found. When `false`, silently returns `nil` (with `all: true`, stores `[]` when no response matched). |
+| `all`              | `boolean` | no       | `false` | When `true`, collects the field from **every** matching response, oldest first, and stores the list — for paginated loads where each page is its own response (see [`click_while_present`](workflow-action-click-while-present.md)). Strict: any matched response without the field fails the step. Validated at load. |
 
 ## Behaviour
 
@@ -36,7 +37,15 @@ the login flow.
   events matching `url_includes` (and not matching `exclude_url`).
 - For each matching response (newest first), calls
   `Network.getResponseBody` to retrieve the body and parses it as JSON.
-- Returns the first non-nil value for the given `field`.
+- Returns the first non-nil value for the given `field` (`false` is a
+  value, not a miss). Bodies are base64-decoded when Chrome sends them
+  encoded.
+- With `all: true`: walks every matching response in arrival order
+  (oldest first, one entry per request) and stores the list. It is
+  **strict**: if any matched response has no retrievable body or lacks the
+  field, the step fails — a silently dropped page would be a silent gap in
+  the data. `required` only decides what happens when *nothing* matched
+  (raise, or store `[]`). Retries apply to both cases.
 - On retries, sends a no-op `Runtime.evaluate` to flush pending events.
 
 ## Example

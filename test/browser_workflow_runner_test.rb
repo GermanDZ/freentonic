@@ -1407,6 +1407,396 @@ module Freentonic
         assert_nil context["access_token"]
       end
 
+      # ── capture_response_json all: true ──────────────────────────────
+
+      # A session whose Network.getResponseBody serves canned bodies by
+      # requestId, with matching responseReceived events queued in order.
+      def paged_session(bodies, url: "https://bank.example/graphql?op=getPage")
+        session = FakeSession.new
+        bodies.each_key do |id|
+          session.pending_events << { "method" => "Network.responseReceived",
+                                      "params" => { "requestId" => id, "response" => { "url" => url } } }
+        end
+        original = session.method(:send_command)
+        session.define_singleton_method(:send_command) do |method, params = {}, timeout: 30|
+          if method == "Network.getResponseBody" && bodies.key?(params[:requestId])
+            { "body" => bodies[params[:requestId]] }
+          else
+            original.call(method, params, timeout: timeout)
+          end
+        end
+        session
+      end
+
+      def run_login_steps(steps, session:, context: {}, stdout: StringIO.new, stderr: StringIO.new)
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new, session: session, schema: PromptSchemaDouble.new(steps),
+          context: context, secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: stdout, stderr: stderr
+        ).execute_phase("login")
+        context
+      end
+
+      def all_pages_step(extra = {})
+        [{ "action" => "capture_response_json", "url_includes" => "op=getPage",
+           "field" => "data", "as" => "pages", "all" => true }.merge(extra)]
+      end
+
+      def test_capture_response_json_all_collects_every_page_in_order
+        session = paged_session({
+          "req-1" => '{"data":{"page":1}}',
+          "req-2" => '{"data":{"page":2}}',
+          "req-3" => '{"data":{"page":3}}'
+        })
+        context = run_login_steps(all_pages_step, session: session)
+
+        assert_equal [{ "page" => 1 }, { "page" => 2 }, { "page" => 3 }], context["pages"]
+      end
+
+      # A page that errored or was evicted is a hole in the data — the step
+      # fails instead of capturing the rest as if they were everything.
+      def test_capture_response_json_all_fails_on_a_page_without_the_field
+        session = paged_session({ "req-1" => '{"data":{"page":1}}', "req-2" => '{"errors":[{"message":"x"}]}' })
+        err = assert_raises(UserError) { run_login_steps(all_pages_step("required" => false), session: session) }
+        assert_includes err.message, "response 2 of 2"
+        assert_includes err.message, "has no \"data\""
+      end
+
+      def test_capture_response_json_all_fails_on_an_unreadable_page
+        session = paged_session({ "req-1" => '{"data":{"page":1}}', "req-2" => nil })
+        err = assert_raises(UserError) { run_login_steps(all_pages_step, session: session) }
+        assert_includes err.message, "no retrievable body"
+      end
+
+      def test_capture_response_json_keeps_false_values
+        session = paged_session({ "req-1" => '{"flag":false}', "req-2" => '{"flag":true}' })
+        context = run_login_steps(all_pages_step("field" => "flag"), session: session)
+
+        assert_equal [false, true], context["pages"]
+      end
+
+      def test_capture_response_json_decodes_base64_bodies
+        session = paged_session({ "req-1" => nil })
+        original = session.method(:send_command)
+        session.define_singleton_method(:send_command) do |method, params = {}, timeout: 30|
+          next original.call(method, params, timeout: timeout) unless method == "Network.getResponseBody"
+
+          { "body" => Base64.strict_encode64('{"data":{"page":1}}'), "base64Encoded" => true }
+        end
+        context = run_login_steps(all_pages_step, session: session)
+
+        assert_equal [{ "page" => 1 }], context["pages"]
+      end
+
+      def test_capture_response_json_all_not_required_stores_empty_list
+        context = run_login_steps(
+          [{ "action" => "capture_response_json", "url_includes" => "op=getPage",
+             "field" => "data", "as" => "pages", "all" => true, "required" => false }],
+          session: FakeSession.new
+        )
+
+        assert_equal [], context["pages"]
+      end
+
+      def test_capture_response_json_all_required_raises_when_nothing_matches
+        err = assert_raises(UserError) do
+          run_login_steps(
+            [{ "action" => "capture_response_json", "url_includes" => "op=getPage",
+               "field" => "data", "as" => "pages", "all" => true }],
+            session: FakeSession.new
+          )
+        end
+        assert_includes err.message, "no matching response was seen"
+      end
+
+      # The failure says WHICH way it failed — no request, evicted bodies, or
+      # bodies without the field — since each needs a different fix.
+      def test_capture_response_json_failure_explains_why
+        session = paged_session({ "gone" => nil, "error" => '{"errors":[{"message":"x"}]}' })
+        err = assert_raises(UserError) do
+          run_login_steps(
+            [{ "action" => "capture_response_json", "url_includes" => "op=getPage",
+               "field" => "data", "as" => "page" }],
+            session: session
+          )
+        end
+        assert_includes err.message, "2 matching response(s): 1 with no retrievable body, 1 without \"data\""
+      end
+
+      def test_capture_response_json_all_must_be_boolean
+        err = assert_raises(UserError) do
+          run_login_steps(
+            [{ "action" => "capture_response_json", "url_includes" => "x", "field" => "data",
+               "as" => "pages", "all" => "yes" }],
+            session: FakeSession.new
+          )
+        end
+        assert_includes err.message, "all: must be true or false"
+      end
+
+      # ── click_while_present ──────────────────────────────────────────
+
+      # Runtime.evaluate answers from a script: one status per click attempt
+      # ("clicked" / "busy" / "absent"), then the final presence check.
+      def scripted_session(answers)
+        session = FakeSession.new
+        queue = answers.dup
+        session.define_singleton_method(:send_command) do |method, params = {}, timeout: 30|
+          commands << { method: method, params: params, timeout: timeout }
+          method == "Runtime.evaluate" ? { "result" => { "value" => queue.shift } } : {}
+        end
+        session
+      end
+
+      def click_step(max:, selector: "button[data-testid='load-more']")
+        { "action" => "click_while_present", "selector" => selector, "max_clicks" => max }
+      end
+
+      def test_click_while_present_clicks_until_the_element_is_gone
+        session = scripted_session(%w[clicked clicked clicked absent])
+        out = StringIO.new
+        run_login_steps([click_step(max: 10)], session: session, stdout: out)
+
+        assert_includes out.string, "→ 3 click(s) ✓"
+        # 3 clicks, then the absence seen once and re-checked twice.
+        assert_equal 6, session.commands.count { |c| c[:method] == "Runtime.evaluate" }
+      end
+
+      # A re-render can unmount the button for a moment between pages; that
+      # must not read as "no more pages".
+      def test_click_while_present_rechecks_a_briefly_absent_element
+        session = scripted_session(%w[clicked absent clicked absent absent absent])
+        out = StringIO.new
+        run_login_steps([click_step(max: 10)], session: session, stdout: out)
+
+        assert_includes out.string, "→ 2 click(s) ✓"
+      end
+
+      def test_click_while_present_fails_on_an_element_that_never_re_enables
+        session = scripted_session(["clicked"] + ["busy"] * 40)
+        err = assert_raises(UserError) { run_login_steps([click_step(max: 10)], session: session) }
+        assert_includes err.message, "stayed disabled"
+      end
+
+      def test_click_while_present_waits_out_a_busy_element_without_counting_it
+        session = scripted_session(%w[clicked busy busy clicked absent])
+        out = StringIO.new
+        run_login_steps([click_step(max: 10)], session: session, stdout: out)
+
+        assert_includes out.string, "→ 2 click(s) ✓"
+      end
+
+      def test_click_while_present_fails_at_max_when_still_present
+        session = scripted_session(["clicked", "clicked", true])
+        err = assert_raises(UserError) { run_login_steps([click_step(max: 2)], session: session) }
+        assert_includes err.message, "still present after 2 clicks"
+        assert_includes err.message, "on_max_clicks: warn"
+      end
+
+      def test_click_while_present_warns_at_max_when_asked_to
+        session = scripted_session(["clicked", "clicked", true])
+        out = StringIO.new
+        err = StringIO.new
+        run_login_steps([click_step(max: 2).merge("on_max_clicks" => "warn")], session: session, stdout: out, stderr: err)
+
+        assert_includes out.string, "→ 2 click(s), stopped at max_clicks"
+        assert_includes err.string, "still present after 2 clicks"
+      end
+
+      def test_click_while_present_rejects_out_of_range_max
+        assert_raises(UserError) { run_login_steps([click_step(max: 0)], session: FakeSession.new) }
+        assert_raises(UserError) { run_login_steps([click_step(max: 1001)], session: FakeSession.new) }
+      end
+
+      # ── click_while_present stop_when_older_than_lookback ────────────
+
+      DAY_MS = 86_400_000
+
+      # A "Load more" page whose items carry epoch-ms timestamps.
+      def page_body(*timestamps, type: "TRANSACTION")
+        JSON.generate("data" => { "timeline" => { "timelineItems" => timestamps.map { |t| { "type" => type, "timestamp" => t } } } })
+      end
+
+      # The button stays present; every click "loads" the next queued page by
+      # appending its responseReceived event and serving its body.
+      # `earlier` pages arrived before the one on screen (another view, an
+      # earlier visit); `respond: false` makes clicks fetch nothing.
+      def paging_session(first_page:, pages:, earlier: [], respond: true)
+        session = FakeSession.new
+        bodies = { "first" => first_page }
+        earlier.each_with_index do |body, i|
+          bodies["earlier-#{i}"] = body
+          session.pending_events << { "method" => "Network.responseReceived",
+                                      "params" => { "requestId" => "earlier-#{i}", "response" => { "url" => "https://x/graphql?op=firstPage" } } }
+        end
+        session.pending_events << { "method" => "Network.responseReceived",
+                                    "params" => { "requestId" => "first", "response" => { "url" => "https://x/graphql?op=firstPage" } } }
+        queue = pages.dup
+        n = 0
+        session.define_singleton_method(:send_command) do |method, params = {}, timeout: 30|
+          commands << { method: method, params: params, timeout: timeout }
+          case method
+          when "Network.getResponseBody" then { "body" => bodies[params[:requestId]] }
+          when "Runtime.evaluate"
+            expr = params[:expression].to_s
+            if expr.include?("element.click()")
+              page = queue.shift
+              if page && respond
+                n += 1
+                id = "page-#{n}"
+                bodies[id] = page
+                pending_events << { "method" => "Network.responseReceived",
+                                    "params" => { "requestId" => id, "response" => { "url" => "https://x/graphql?op=nextPage" } } }
+              end
+              { "result" => { "value" => "clicked" } }
+            else
+              { "result" => { "value" => true } } # presence check
+            end
+          else {}
+          end
+        end
+        session
+      end
+
+      def stop_step(max: 50, **stop)
+        {
+          "action" => "click_while_present", "selector" => "#more", "max_clicks" => max,
+          "stop_when_older_than_lookback" => {
+            "url_includes" => ["op=firstPage", "op=nextPage"],
+            "items_paths" => ["data.timeline.timelineItems"]
+          }.merge(stop.transform_keys(&:to_s))
+        }
+      end
+
+      def run_with_lookback(steps, session:, lookback_days:, stdout: StringIO.new, stderr: StringIO.new)
+        BrowserWorkflowRunner.new(
+          source: SourceDouble.new, session: session, schema: PromptSchemaDouble.new(steps),
+          context: {}, secret_resolver: FakeSecretResolver.new,
+          session_drainer: ->(_session, iterations:, sleep_seconds:) {},
+          stdout: stdout, stderr: stderr, runtime_context: { lookback_days: lookback_days }.compact
+        ).execute_phase("login")
+      end
+
+      def clicks_made(session) = session.commands.count { |c| c[:params][:expression].to_s.include?("element.click()") }
+
+      def days_ago_ms(days) = (Date.today - days).to_time.to_i * 1000 + 3_600_000 # 01:00 on that day
+
+      def test_stop_when_older_than_lookback_needs_no_click_when_the_first_page_covers_it
+        session = paging_session(first_page: page_body(days_ago_ms(1), days_ago_ms(10)), pages: [page_body(days_ago_ms(20))])
+        out = StringIO.new
+        run_with_lookback([stop_step], session: session, lookback_days: 7, stdout: out)
+
+        assert_equal 0, clicks_made(session)
+        assert_includes out.string, "lookback window covered"
+      end
+
+      def test_stop_when_older_than_lookback_clicks_until_a_page_reaches_past_the_window
+        session = paging_session(
+          first_page: page_body(days_ago_ms(1), days_ago_ms(3)),
+          pages: [page_body(days_ago_ms(5), days_ago_ms(8)), page_body(days_ago_ms(12), days_ago_ms(20)), page_body(days_ago_ms(40))]
+        )
+        out = StringIO.new
+        run_with_lookback([stop_step], session: session, lookback_days: 10, stdout: out)
+
+        assert_equal 2, clicks_made(session), "page 2 reaches past 10 days; page 3 is never loaded"
+        assert_includes out.string, "→ 2 click(s) ✓ (lookback window covered)"
+      end
+
+      def test_stop_when_older_than_lookback_pages_everything_without_a_lookback
+        session = paging_session(first_page: page_body(days_ago_ms(1)), pages: [page_body(days_ago_ms(40)), page_body(days_ago_ms(400))])
+        out = StringIO.new
+        err = StringIO.new
+        run_with_lookback([stop_step(max: 3).merge("on_max_clicks" => "warn")], session: session, lookback_days: nil, stdout: out, stderr: err)
+
+        assert_equal 3, clicks_made(session)
+        refute_includes out.string, "window covered"
+      end
+
+      # Only the newest response from before the step is the page on screen;
+      # an older one (another view) reaching past the window must not end
+      # paging before it started.
+      def test_stop_when_older_than_lookback_ignores_earlier_responses
+        session = paging_session(earlier: [page_body(days_ago_ms(90))], first_page: page_body(days_ago_ms(1)),
+                                 pages: [page_body(days_ago_ms(3)), page_body(days_ago_ms(20))])
+        run_with_lookback([stop_step], session: session, lookback_days: 10)
+
+        assert_equal 2, clicks_made(session)
+      end
+
+      def test_stop_when_older_than_lookback_only_counts_items_where_matches
+        session = paging_session(first_page: page_body(days_ago_ms(50), type: "HEADER"),
+                                 pages: [page_body(days_ago_ms(2)), page_body(days_ago_ms(20))])
+        run_with_lookback([stop_step(items_where: { "type" => "TRANSACTION" })], session: session, lookback_days: 10)
+
+        assert_equal 2, clicks_made(session), "the old HEADER item does not count"
+      end
+
+      def test_stop_when_older_than_lookback_ignores_implausible_timestamps
+        session = paging_session(first_page: page_body(0, 1_700_000), pages: [page_body(days_ago_ms(20))])
+        run_with_lookback([stop_step], session: session, lookback_days: 10)
+
+        assert_equal 1, clicks_made(session)
+      end
+
+      def test_stop_when_older_than_lookback_reads_second_timestamps
+        secs = ->(days) { days_ago_ms(days) / 1000 }
+        session = paging_session(first_page: page_body(secs.(1)), pages: [page_body(secs.(20)), page_body(secs.(40))])
+        run_with_lookback([stop_step(timestamp_unit: "s")], session: session, lookback_days: 10)
+
+        assert_equal 1, clicks_made(session)
+      end
+
+      # The margin widens the window for a feed dated in another zone than
+      # the run: an item 2h before the window start is not far enough back.
+      def test_stop_when_older_than_lookback_honours_the_margin
+        just_before = (Date.today - 10).to_time.to_i * 1000 - 2 * 3_600_000
+        session = paging_session(first_page: page_body(just_before), pages: [page_body(days_ago_ms(30))])
+        run_with_lookback([stop_step(margin_hours: 24)], session: session, lookback_days: 10)
+
+        assert_equal 1, clicks_made(session)
+      end
+
+      def test_stop_when_older_than_lookback_fans_out_over_wildcards
+        first = JSON.generate("data" => { "modules" => [{ "items" => [{ "timestamp" => days_ago_ms(1) }] },
+                                                         { "items" => [{ "timestamp" => days_ago_ms(30) }] }] })
+        session = paging_session(first_page: first, pages: [page_body(days_ago_ms(40))])
+        run_with_lookback([stop_step(items_paths: ["data.modules.*.items"])], session: session, lookback_days: 10)
+
+        assert_equal 0, clicks_made(session)
+      end
+
+      def test_wait_for_response_fails_when_a_click_fetches_nothing
+        session = paging_session(first_page: page_body(days_ago_ms(1)), pages: [page_body(days_ago_ms(3))], respond: false)
+        step = stop_step.merge("wait_for_response" => { "url_includes" => ["op=nextPage"], "timeout_seconds" => 1 })
+        err = assert_raises(UserError) { run_with_lookback([step], session: session, lookback_days: 10) }
+        assert_includes err.message, "click 1 on #more fetched no response matching"
+      end
+
+      def test_wait_for_response_passes_when_each_click_fetches_a_page
+        session = paging_session(first_page: page_body(days_ago_ms(1)), pages: [page_body(days_ago_ms(3)), page_body(days_ago_ms(20))])
+        step = stop_step.merge("wait_for_response" => { "url_includes" => ["op=nextPage"] })
+        run_with_lookback([step], session: session, lookback_days: 10)
+
+        assert_equal 2, clicks_made(session)
+      end
+
+      def test_stop_when_older_than_lookback_validates_its_shape
+        bad = stop_step.merge("stop_when_older_than_lookback" => { "url_includes" => [], "items_paths" => ["a"] })
+        assert_raises(UserError) { run_with_lookback([bad], session: FakeSession.new, lookback_days: 7) }
+        bad = stop_step.merge("stop_when_older_than_lookback" => { "url_includes" => ["x"], "items_paths" => "a" })
+        assert_raises(UserError) { run_with_lookback([bad], session: FakeSession.new, lookback_days: 7) }
+      end
+
+      def test_click_while_present_json_encodes_the_selector
+        tricky = %(button[data-x="quote\\"])
+        session = scripted_session(%w[absent])
+        run_login_steps([click_step(max: 1, selector: tricky)], session: session)
+
+        expr = session.commands.find { |c| c[:method] == "Runtime.evaluate" }[:params][:expression]
+        assert_includes expr, JSON.generate(tricky)
+      end
+
       # ── elevate_session ──────────────────────────────────────────────
 
       # Programmable fake session for elevate_session tests. The runner

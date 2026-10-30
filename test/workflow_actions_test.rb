@@ -100,6 +100,7 @@ module Freentonic
       when "prompt_stdin_and_fill"   then { "selector" => "#otp", "prompt" => "OTP?", "timeout" => 60 }
       when "pause"                   then { "message" => "hold", "timeout" => 60 }
       when "record_requests"         then { "url_matches" => ["/api/"] }
+      when "click_while_present"     then { "selector" => "#more", "max_clicks" => 10 }
       when "elevate_session"
         { "wait_for_first_of" => { "branches" => [{ "selector" => "#ok" }] } }
       else

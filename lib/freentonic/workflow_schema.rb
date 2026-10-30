@@ -2,6 +2,7 @@
 
 require "yaml"
 require_relative "workflow_actions"
+require_relative "click_while_present_spec"
 require_relative "path_confinement"
 require_relative "fn"
 
@@ -1080,6 +1081,13 @@ module Freentonic
       validate_when_context!(phase_name, step, index) if step.key?("when_context")
 
       case step["action"]
+      when "click_while_present"
+        ClickWhilePresentSpec.validate!(step, "workflow #{@path} phase #{phase_name.inspect} step #{index}: click_while_present")
+      when "capture_response_json"
+        if step.key?("all") && ![true, false].include?(step["all"])
+          raise UserError, "workflow #{@path} phase #{phase_name.inspect} step #{index}: capture_response_json " \
+                           "all: must be true or false (got #{step["all"].inspect})"
+        end
       when "click_text"
         loc = "workflow #{@path} phase #{phase_name.inspect} step #{index}: click_text"
         unless step["text"].is_a?(String) && !step["text"].empty?

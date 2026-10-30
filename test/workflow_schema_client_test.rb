@@ -229,6 +229,53 @@ module Freentonic
         }])
       end
 
+      # ─── click_while_present / capture_response_json load-time validation ───
+      # A bad option must fail at load, before login and 2FA, not mid-run.
+
+      def click_step(extra = {})
+        { "action" => "click_while_present", "selector" => "#more", "max_clicks" => 10 }.merge(extra)
+      end
+
+      def test_workflow_schema_accepts_a_full_click_while_present
+        schema_with_phase([click_step(
+          "settle_seconds" => 3, "on_max_clicks" => "warn",
+          "wait_for_response" => { "url_includes" => ["op=page"], "timeout_seconds" => 30 },
+          "stop_when_older_than_lookback" => {
+            "url_includes" => ["op=page"], "items_paths" => ["data.modules.*.items"],
+            "timestamp_field" => "ts", "timestamp_unit" => "s",
+            "items_where" => { "type" => "TRANSACTION" }, "margin_hours" => 24
+          }
+        )])
+      end
+
+      def test_workflow_schema_rejects_bad_click_while_present_options
+        {
+          { "max_clicks" => 0 }                                       => "max_clicks",
+          { "max_clicks" => "10" }                                    => "max_clicks",
+          { "settle_seconds" => 0 }                                   => "settle_seconds",
+          { "on_max_clicks" => "ignore" }                             => "on_max_clicks",
+          { "max_click" => 3 }                                        => "unknown option(s) max_click",
+          { "wait_for_response" => { "url_includes" => [] } }         => "wait_for_response.url_includes",
+          { "wait_for_response" => { "url_includes" => ["x"], "timeout_seconds" => 500 } } => "timeout_seconds",
+          { "stop_when_older_than_lookback" => { "url_includes" => ["x"], "items_paths" => "a" } } => "items_paths",
+          { "stop_when_older_than_lookback" => { "url_includes" => ["x"], "items_paths" => ["a"], "timestamp_unit" => "us" } } => "timestamp_unit",
+          { "stop_when_older_than_lookback" => { "url_includes" => ["x"], "items_paths" => ["a"], "items_where" => { "a" => [1] } } } => "items_where",
+          { "stop_when_older_than_lookback" => { "url_includes" => ["x"], "items_paths" => ["a"], "margin_hours" => -1 } } => "margin_hours",
+          { "stop_when_older_than_lookback" => { "url_includes" => ["x"], "items_paths" => ["a"], "until" => 1 } } => "unknown key(s) until"
+        }.each do |extra, expected|
+          err = assert_raises(UserError, extra.inspect) { schema_with_phase([click_step(extra)]) }
+          assert_includes err.message, expected, extra.inspect
+        end
+      end
+
+      def test_workflow_schema_rejects_non_boolean_capture_response_json_all
+        err = assert_raises(UserError) do
+          schema_with_phase([{ "action" => "capture_response_json", "url_includes" => "x",
+                               "field" => "data", "as" => "pages", "all" => "yes" }])
+        end
+        assert_includes err.message, "all: must be true or false"
+      end
+
       # ─── record_requests schema validation ───
 
       def test_workflow_schema_rejects_record_requests_without_url_matches
