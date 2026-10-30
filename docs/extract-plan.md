@@ -134,7 +134,7 @@ arrays in `args:`, `yield:`, and `output:` are resolved recursively.
 segment). This is the same whole-token rule the `api_client` param DSL
 uses, plus the dotted path.
 
-Five bindings are pre-seeded before the first step:
+Six bindings are pre-seeded before the first step:
 
 | Binding | Value |
 | --- | --- |
@@ -143,9 +143,56 @@ Five bindings are pre-seeded before the first step:
 | `now_ms` | now, epoch milliseconds |
 | `today` | today (`Date`) — for `days_ago:` arithmetic and end-of-range defaults |
 | `lookback_days` | `today - from_date` in days — the figure `when:` gates a `>N` extended-history fetch on |
+| `captured` | the values named by the workflow's top-level `captured:` declaration, keyed by `as:` (`{}` when none are declared) — see below |
 
 Every `as:` adds a binding. Loop variables (`as_item:`) are visible only
 inside that `for_each`'s `do:` block.
+
+#### Reading captured values (`captured`)
+
+Some providers can't be fetched from outside the browser at all — the
+data has to be captured from the app's own responses during connect
+(`capture_response_json`, `capture_local_storage`, …). A plan reads those
+through `captured`, declared in a top-level `captured:` list that is
+deliberately separate from `credentials:`:
+
+```yaml
+phases:
+  capture_credentials:
+    - action: capture_response_json
+      url_includes: "op=accountsOverview"
+      field: data
+      as: overview_response
+captured:
+  - from: overview_response   # a capture action's as:
+    as: overview              # optional: the name the plan reads (default: from)
+    required: true            # optional: fail before extract if missing or empty
+extract:
+  plan:
+    steps:
+      - select: { from: captured, path: overview.accounts, default: [] }
+        as: accounts
+    output:
+      accounts: "{accounts}"
+```
+
+- **Data, not auth.** `captured:` values never enter `credentials` (so never
+  reach the api_client), and `credentials:` values never enter `captured`.
+  A workflow whose data comes only through `captured:` doesn't need a
+  `credentials:` block at all.
+- **Checked at load.** Names must be unique plain identifiers; every
+  `{captured.<name>}` token and every `select: { from: captured, path: <name>… }`
+  must name a declared entry — a typo fails at load, not as a silently empty
+  sync. `--lint` warns when no capture action writes a declared `from`, or
+  when `captured:` is declared but `extract:` isn't a plan.
+- **`required: true`** stops the run before extraction when the value is
+  missing or empty (`nil`, `""`, `[]`, `{}`), instead of emitting a
+  successful-looking empty payload.
+- **Copies.** The plan gets a deep copy; plan steps can't freeze or alter the
+  connect stage's captured values.
+
+A plan's output is persisted (`--dump-raw`, run artifacts), so declare only
+data-bearing captures — never a cookie or token.
 
 Date formatting stays on the endpoint: pass a `Date` binding as an `arg:`
 and let the endpoint's `{name|iso}` / `{name|date}` param filter format it
@@ -395,3 +442,9 @@ never calls an arbitrary client method. A plan therefore cannot reach
 `raw_request`, `update_auth_headers!`, or any Ruby outside the declared
 endpoints. Declarative plans are strictly less powerful, and strictly
 safer, than the Ruby escape hatch.
+
+A plan never sees `credentials`: auth reaches it only through the
+api_client the stage builds. It reads browser-captured data only through
+the workflow's explicit `captured:` declaration. A `captured:` entry naming
+a cookie, bearer or CSRF capture should be treated as a red flag in review,
+since plan output is persisted.

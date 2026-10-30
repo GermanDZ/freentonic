@@ -34,6 +34,17 @@ module Freentonic
       assert_includes err.message, "credentials:"
     end
 
+    # A capture-only workflow (data via captured:, no api_client) needs no
+    # credentials: block.
+    def test_capture_only_workflow_has_empty_credentials
+      schema = FakeSchema.new(nil)
+      def schema.captured_declarations = [{ "from" => "overview", "as" => "overview", "required" => true }]
+      src = Source.new(workflow_path: "test.yml")
+      src.define_singleton_method(:workflow) { schema }
+      creds = src.extract_credentials(nil, workflow_context: { "overview" => {} }, stdout: StringIO.new, stderr: StringIO.new)
+      assert_equal({}, creds)
+    end
+
     def test_require_missing_key_is_user_error
       err = assert_raises(UserError) do
         extract({ "require" => %w[access_token] }, {})

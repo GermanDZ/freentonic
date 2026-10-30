@@ -57,9 +57,10 @@ module Freentonic
 
       # A workflow double that reports declared endpoints and hands back a
       # fake client — the two surfaces the plan path reads.
-      PlanWorkflowDouble = Struct.new(:api_client, :endpoint_names, :path) do
+      PlanWorkflowDouble = Struct.new(:api_client, :endpoint_names, :path, :captured) do
         def build_api_client(_credentials); api_client; end
         def api_client_endpoint_names; endpoint_names; end
+        def captured_declarations; captured || []; end
       end
 
       class PlanFakeClient
@@ -108,6 +109,45 @@ module Freentonic
           },
           ctx[:raw]
         )
+      end
+
+      def captured_stage_context(plan, decls, workflow_context)
+        workflow = PlanWorkflowDouble.new(nil, [], "/tmp/fake/workflow.yml", decls)
+        {
+          source:           SourceDouble.new(workflow, { "plan" => plan }),
+          credentials:      { cookie: "session=secret" },
+          workflow_context: workflow_context,
+          lookback_days:    30,
+          stdout:           StringIO.new,
+          stderr:           StringIO.new
+        }
+      end
+
+      # The stage reads declared values out of the connect stage's workflow
+      # context, keyed by as: — and credentials never reach the plan.
+      def test_extract_plan_reads_declared_captured_values_only
+        plan = {
+          "steps"  => [{ "select" => { "from" => "captured", "path" => "data.items" }, "as" => "items" }],
+          "output" => { "items" => "{items}", "all" => "{captured}" }
+        }
+        ctx = captured_stage_context(
+          plan,
+          [{ "from" => "overview_response", "as" => "data", "required" => false }],
+          { "overview_response" => { "items" => [1, 2] }, "cookie" => "session=secret" }
+        )
+        Extract.new(context: ctx).call
+        assert_equal({ "items" => [1, 2], "all" => { "data" => { "items" => [1, 2] } } }, ctx[:raw])
+      end
+
+      def test_required_captured_value_missing_or_empty_fails_before_extract
+        plan = { "steps" => [], "output" => { "all" => "{captured}" } }
+        decls = [{ "from" => "pages", "as" => "pages", "required" => true }]
+
+        [nil, [], {}, ""].each do |value|
+          ctx = captured_stage_context(plan, decls, value.nil? ? {} : { "pages" => value })
+          err = assert_raises(UserError) { Extract.new(context: ctx).call }
+          assert_match(/captured pages is (missing|empty)/, err.message)
+        end
       end
 
       # ── back-compat: legacy extractors keep working ─────────────────────

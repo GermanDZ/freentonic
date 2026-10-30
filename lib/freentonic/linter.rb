@@ -48,6 +48,7 @@ module Freentonic
         check_provider_ruby(schema, "normalize", normalize) unless normalize.is_a?(Hash) && normalize["plan"]
         check_api_client(schema)
         check_credentials(schema)
+        check_captured(schema)
         check_secrets(schema)
         check_timezones(schema)
         note_provider_ruby(schema)
@@ -154,6 +155,25 @@ module Freentonic
         next if from.nil? || captured.include?(from.to_s)
         warning("credentials.map: from: #{from.inspect} is never captured")
       end
+    end
+
+    # `captured:` entries must be written by a capture action, and are only
+    # read by an extract plan — declaring them for a Ruby extractor (or no
+    # extract at all) has no effect.
+    def check_captured(schema)
+      decls = schema.captured_declarations
+      return if decls.empty?
+
+      written = captured_context_keys(schema)
+      decls.each do |d|
+        next if written.include?(d["from"].to_s)
+        warning("captured: from: #{d["from"].inspect} is never captured (no capture action writes as: #{d["from"]})")
+      end
+
+      extract = schema.raw["extract"]
+      return if extract.is_a?(Hash) && extract["plan"]
+
+      warning("captured: is declared but extract: is not a plan — only an extract plan reads captured values")
     end
 
     def check_secrets(schema)

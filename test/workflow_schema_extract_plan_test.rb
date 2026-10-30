@@ -78,6 +78,84 @@ module Freentonic
       assert_includes err, "declares both plan: and ruby:/class:"
     end
 
+    # ── captured: (the top-level captured-data declaration) ────────────
+
+    def captured_plan(ref_path: "overview.items", output_ref: "{captured.overview}")
+      <<~YAML
+        captured:
+          - { from: overview, required: true }
+          - { from: timeline_pages, as: pages }
+        extract:
+          plan:
+            steps:
+              - select: { from: captured, path: #{ref_path}, default: [] }
+                as: items
+            output:
+              items: "{items}"
+              ref: "#{output_ref}"
+      YAML
+    end
+
+    def test_plan_may_reference_declared_captured_values
+      assert_nil load_error(captured_plan)
+      assert_nil load_error(captured_plan(ref_path: "pages", output_ref: "{captured}"))
+    end
+
+    def test_captured_typo_in_a_token_fails_at_load
+      err = load_error(captured_plan(output_ref: "{captured.overveiw}"))
+      assert_includes err, "captured.overveiw is not in the workflow's captured: list (declared: overview, pages)"
+    end
+
+    def test_captured_typo_in_a_select_path_fails_at_load
+      err = load_error(captured_plan(ref_path: "overveiw.items"))
+      assert_includes err, "select.path: captured.overveiw is not in the workflow's captured: list"
+    end
+
+    def test_captured_reference_without_any_declaration_fails_at_load
+      err = load_error(<<~YAML)
+        extract:
+          plan:
+            steps: []
+            output: { v: "{captured.overview}" }
+      YAML
+      assert_includes err, "captured.overview is not in the workflow's captured: list (none declared)"
+    end
+
+    def test_duplicate_captured_names_rejected
+      err = load_error(<<~YAML)
+        captured:
+          - { from: overview, as: data }
+          - { from: other, as: data }
+      YAML
+      assert_includes err, "captured[1]: duplicate name \"data\" (also captured[0])"
+    end
+
+    def test_captured_entry_shape_is_validated
+      assert_includes load_error("captured: { from: x }"), "captured: must be a list"
+      assert_includes load_error("captured: [{ as: x }]"), "captured[0]: must be a hash with a non-empty from:"
+      assert_includes load_error("captured: [{ from: x, required: \"yes\" }]"), "captured[0].required: must be true or false"
+      assert_includes load_error("captured: [{ from: x, plan: true }]"), "captured[0]: unknown key(s) plan"
+      assert_includes load_error("captured: [{ from: x, as: \"a.b\" }]"), "must be a plain identifier"
+    end
+
+    def test_captured_declarations_are_normalized
+      yaml = <<~YAML
+        version: 1
+        pipeline: []
+        phases: {}
+        captured:
+          - { from: overview, required: true }
+          - { from: timeline_pages, as: pages }
+      YAML
+      decls = Dir.mktmpdir do |d|
+        path = File.join(d, "workflow.yml")
+        File.write(path, yaml)
+        WorkflowSchema.load(path).captured_declarations
+      end
+      assert_equal [{ "from" => "overview", "as" => "overview", "required" => true },
+                    { "from" => "timeline_pages", "as" => "pages", "required" => false }], decls
+    end
+
     def test_fetch_unknown_endpoint_rejected
       err = load_error(<<~YAML)
         extract:

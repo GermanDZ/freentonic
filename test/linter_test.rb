@@ -110,6 +110,22 @@ module Freentonic
       end
     end
 
+    def test_captured_from_never_written_is_a_warning
+      yaml = CLEAN + "captured:\n  - { from: never_captured }\n"
+      with_workflow(yaml) do |path|
+        _code, out = lint(path)
+        assert_includes out, "captured: from: \"never_captured\" is never captured"
+      end
+    end
+
+    def test_captured_without_an_extract_plan_is_a_warning
+      yaml = CLEAN + "captured:\n  - { from: cookie }\n"
+      with_workflow(yaml) do |path|
+        _code, out = lint(path)
+        assert_includes out, "captured: is declared but extract: is not a plan"
+      end
+    end
+
     def test_credentials_require_not_captured_fails
       yaml = CLEAN.sub("require: [cookie]", "require: [cookie, missing_token]")
       with_workflow(yaml) do |path|

@@ -65,6 +65,49 @@ module Freentonic
                        stdout: StringIO.new, stderr: stderr)
       end
 
+      # ── captured: the workflow's captured-data declaration ──────────────
+
+      def run_captured(plan, captured:, credentials: {})
+        PlanExtractor.new(plan, endpoint_names: [], captured: captured)
+                     .call(client: nil, credentials: credentials, from_date: Date.new(2026, 1, 1),
+                           stdout: StringIO.new, stderr: StringIO.new)
+      end
+
+      def test_captured_values_are_readable_and_credentials_are_not
+        plan = {
+          "steps"  => [{ "select" => { "from" => "captured", "path" => "timeline.items", "default" => [] },
+                         "as" => "items" }],
+          "output" => { "items" => "{items}", "all" => "{captured}" }
+        }
+        raw = run_captured(plan, captured: { "timeline" => { "items" => %w[a b] } },
+                                 credentials: { token: "bearer-xyz" })
+
+        assert_equal %w[a b], raw["items"]
+        assert_equal({ "timeline" => { "items" => %w[a b] } }, raw["all"], "credentials never appear under captured")
+      end
+
+      def test_captured_is_an_empty_hash_when_nothing_is_declared
+        plan = { "steps" => [], "output" => { "all" => "{captured}" } }
+        raw = run_captured(plan, captured: {}, credentials: { token: "bearer-xyz" })
+
+        assert_equal({}, raw["all"])
+      end
+
+      # Plan steps freeze their apply: args (Fn.deep_freeze); the plan must
+      # get copies, never the connect stage's own objects.
+      def test_captured_values_are_copies
+        original = { "rows" => [{ "id" => 1 }] }
+        plan = {
+          "steps"  => [{ "apply" => "pluck", "args" => { "list" => "{captured.page.rows}", "key" => "id" }, "as" => "ids" }],
+          "output" => { "ids" => "{ids}" }
+        }
+        raw = run_captured(plan, captured: { "page" => original })
+
+        assert_equal [1], raw["ids"]
+        refute original["rows"].frozen?, "the original captured value must not be frozen"
+        original["rows"] << { "id" => 2 } # still mutable
+      end
+
       # ── single fetch → output ───────────────────────────────────────────
 
       def test_single_fetch_binds_and_assembles
