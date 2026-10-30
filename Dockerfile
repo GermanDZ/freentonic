@@ -1,7 +1,7 @@
 # ─── builder stage: fetch noVNC + websockify ─────────────────────────────
 # Isolated so git + its transitive deps don't end up in the final image.
 # Pinned versions; bump when you want a noVNC UI refresh.
-FROM debian:bookworm-slim AS novnc-builder
+FROM debian:trixie-slim AS novnc-builder
 
 ARG NOVNC_REF=v1.5.0
 ARG WEBSOCKIFY_REF=v0.12.0
@@ -15,10 +15,10 @@ RUN apt-get update \
 
 
 # ─── final stage ──────────────────────────────────────────────────────────
-FROM ruby:3.2-slim-bookworm
+FROM ruby:3.4.12-slim-trixie
 
 # Chromium is PINNED to a known-good version, installed from a Debian
-# snapshot. Debian bookworm-security *floats* the chromium package, so a
+# snapshot. Debian trixie-security *floats* the chromium package, so a
 # bare `apt-get install chromium` picks up whatever is current at build
 # time — and that silently broke us: 150.0.7871.46-1~deb12u1 SIGTRAPs
 # (exit 133) on launch inside this container, while 148.0.7778.96-1~deb12u1
@@ -29,6 +29,11 @@ FROM ruby:3.2-slim-bookworm
 # build (see docs — build to a throwaway tag and run a `--dump-dom
 # about:blank` smoke test before promoting).
 #
+# The base image (Ruby + Debian) is pinned to an exact patch for the same
+# reason: a cached stale base can't slip into a build, and upgrades show
+# up as a diff. Ruby 3.4 / Debian 13 (trixie); the Chromium pin follows
+# the Debian release (`~deb13uN` builds from trixie-security).
+#
 # The pinned version lives only in the snapshot once the live security
 # repo rolls forward. `chromium` strictly depends on
 # `chromium-common (= <version>)`, and apt will NOT downgrade
@@ -38,14 +43,14 @@ FROM ruby:3.2-slim-bookworm
 # `chromium*` group at priority 1001 (force, allows downgrade), so every
 # chromium sub-package resolves to the snapshot version consistently. Then
 # hold + drop the snapshot source again.
-ARG CHROMIUM_VERSION=148.0.7778.96-1~deb12u1
-# snapshot.debian.org state carrying that chromium in bookworm-security.
-ARG CHROMIUM_SNAPSHOT=20260507T164458Z
+ARG CHROMIUM_VERSION=156.0.8078.73-1~deb13u1
+# snapshot.debian.org state carrying that chromium in trixie-security.
+ARG CHROMIUM_SNAPSHOT=20261029T020000Z
 
 # procps for pgrep (ChromeCdp process management), fonts for page
 # rendering, xvfb + x11vnc for non-headless mode, tini so PID 1 reaps the
 # per-invoke children, python3 so websockify runs (pure-python).
-RUN echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ bookworm-security main" \
+RUN echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ trixie-security main" \
       > /etc/apt/sources.list.d/snapshot-chromium.list \
   && printf 'Package: chromium*\nPin: version %s\nPin-Priority: 1001\n' "${CHROMIUM_VERSION}" \
       > /etc/apt/preferences.d/chromium-pin \
