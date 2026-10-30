@@ -132,6 +132,22 @@ values**.
    alongside them and deserves the same care — it's URL + selectors, no
    secrets, but delete the run dir after use all the same.
 
+## Paging (`click_while_present`)
+
+`click_while_present` clicks a bank page's "Load more" button in a loop,
+and its lookback stop reads response bodies to decide when to stop.
+
+1. **Bounded.** `max_clicks` is required and capped at 1000, a disabled
+   button is waited on for at most 30 seconds per click, and every option
+   is validated at workflow load. A workflow can't turn a sync into an
+   unbounded click loop against a bank.
+2. **Bodies stay in memory.** The stop reads only item timestamps (and the
+   `items_where` fields) from bodies it parses in memory; nothing from a
+   body is logged or written. The log line carries the selector, the click
+   count and the window start date.
+3. **Selectors are JSON-encoded** into the page script (invariant 2), never
+   interpolated.
+
 ## Held-open step sessions (`--step`)
 
 `freentonic --step` (and the invoke server's `/sessions` endpoints, which

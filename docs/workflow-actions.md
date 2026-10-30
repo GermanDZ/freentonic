@@ -25,6 +25,7 @@ option tables, behaviour notes, and examples.
 | ------ | ----------- | ---- |
 | `click` | Click a CSS selector (required) | [workflow-action-click.md](workflow-action-click.md) |
 | `click_if_present` | Click a CSS selector (no-op if absent) | [workflow-action-click.md](workflow-action-click.md) |
+| `click_while_present` | Click a selector repeatedly while present ("Load more" pagination) | [workflow-action-click-while-present.md](workflow-action-click-while-present.md) |
 | `click_text` | Click an element by its visible text content | [workflow-action-click-text.md](workflow-action-click-text.md) |
 | `fill` | Type text into a form input (required) | [workflow-action-fill.md](workflow-action-fill.md) |
 | `fill_if_present` | Type text into a form input (no-op if absent) | [workflow-action-fill.md](workflow-action-fill.md) |

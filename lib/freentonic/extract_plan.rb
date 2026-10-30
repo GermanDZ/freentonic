@@ -21,6 +21,14 @@ module Freentonic
   # raw_request, mid-flow header rotation); a plan can express none of
   # those by design.
   module ExtractPlan
+    # The lookback window's start as epoch ms: local midnight of from_date.
+    # The single definition — `{from_ms}` in plans and the browser's
+    # click_while_present lookback stop both use it, so where paging stops
+    # and where a plan filters can't drift apart.
+    def self.window_start_ms(from_date)
+      from_date.nil? ? nil : from_date.to_time.to_i * 1000
+    end
+
     # Build the pre-seeded Scope shared by both the extract plan and the
     # elevate phase, so a `when:` gate or template sees the same bindings
     # in either locus: `from_date`, `from_ms`, `now_ms`, `today`,
@@ -29,7 +37,7 @@ module Freentonic
     def self.seed_scope(from_date, today: Date.today)
       scope = Scope.new
       scope.bind("from_date", from_date)
-      scope.bind("from_ms", from_date.nil? ? nil : from_date.to_time.to_i * 1000)
+      scope.bind("from_ms", window_start_ms(from_date))
       scope.bind("now_ms", (Time.now.to_f * 1000).to_i)
       scope.bind("today", today)
       scope.bind("lookback_days", from_date.nil? ? nil : (today - from_date).to_i)
