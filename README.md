@@ -211,7 +211,9 @@ phases:
 
 # Describe the credentials hash produced by the capture_credentials phase.
 # `map:` transforms the workflow_context into the final credentials dict
-# that downstream stages see.
+# that downstream stages see. (Browser-captured DATA an `extract: plan:`
+# reads goes in a separate top-level `captured:` list instead — see
+# docs/extract-plan.md.)
 credentials:
   require: [cookie]
   validate:

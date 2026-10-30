@@ -9,6 +9,7 @@ module Freentonic
   class WorkflowSchema
     CONFIG_KEY = "config"
     CREDENTIALS_KEY = "credentials"
+    CAPTURED_KEY = "captured"
     PHASES_KEY = "phases"
     PIPELINE_KEY = "pipeline"
     SECRETS_KEY = "secrets"
@@ -38,6 +39,23 @@ module Freentonic
 
     def credentials
       @raw[CREDENTIALS_KEY]
+    end
+
+    # The top-level `captured:` declaration: browser-captured DATA (e.g. API
+    # responses read off the page) that an `extract: plan:` may read as
+    # `{captured.<as>}`. Deliberately separate from `credentials:` — those are
+    # auth material handed to the api_client and never reach a plan; captured
+    # values never reach the api_client. Normalized (validated at load) to
+    # [{ "from" =>, "as" =>, "required" => }], `as` defaulting to `from`.
+    def captured_declarations
+      Array(@raw[CAPTURED_KEY]).map do |d|
+        { "from" => d["from"], "as" => d["as"] || d["from"], "required" => d["required"] == true }
+      end
+    end
+
+    # The names a plan may read under `captured`.
+    def captured_names
+      captured_declarations.map { |d| d["as"] }
     end
 
     def pipeline
@@ -318,6 +336,7 @@ module Freentonic
       end
 
       validate_error_signals!
+      validate_captured!
       validate_extract!
       validate_normalize!
       validate_elevate!
@@ -338,6 +357,43 @@ module Freentonic
         unless sig.key?("text") || sig.key?("selector") || sig.key?("title")
           raise UserError, "workflow #{@path} config.error_signals[#{i}] must have text:, selector:, or title:"
         end
+      end
+    end
+
+    # A captured name is a path segment in `{captured.<name>}` / select
+    # paths, so it must be a plain identifier.
+    CAPTURED_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
+
+    # `captured:` — a list of { from:, as:?, required:? }. Names must be
+    # unique: a plan reads `captured.<as>`, and two entries sharing one
+    # would make which value it gets depend on declaration order.
+    def validate_captured!
+      decls = @raw[CAPTURED_KEY]
+      return if decls.nil?
+
+      loc = "workflow #{@path} captured"
+      raise UserError, "#{loc}: must be a list of { from:, as:, required: } entries" unless decls.is_a?(Array)
+
+      seen = {}
+      decls.each_with_index do |d, i|
+        unless d.is_a?(Hash) && d["from"].is_a?(String) && !d["from"].empty?
+          raise UserError, "#{loc}[#{i}]: must be a hash with a non-empty from:"
+        end
+        unknown = d.keys - %w[from as required]
+        raise UserError, "#{loc}[#{i}]: unknown key(s) #{unknown.join(", ")} (allowed: from, as, required)" unless unknown.empty?
+        if d.key?("required") && ![true, false].include?(d["required"])
+          raise UserError, "#{loc}[#{i}].required: must be true or false (got #{d["required"].inspect})"
+        end
+
+        name = d.key?("as") ? d["as"] : d["from"]
+        unless name.is_a?(String) && name.match?(CAPTURED_NAME)
+          raise UserError, "#{loc}[#{i}]: #{d.key?("as") ? "as" : "from"}: #{name.inspect} must be a plain identifier " \
+                           "(letters, digits, _) — it is read as {captured.#{name}}"
+        end
+        if seen.key?(name)
+          raise UserError, "#{loc}[#{i}]: duplicate name #{name.inspect} (also captured[#{seen[name]}])"
+        end
+        seen[name] = i
       end
     end
 
@@ -451,6 +507,13 @@ module Freentonic
     # validation starts from this set so a plan (or the elevate phase) may
     # reference them without an explicit binding step.
     PLAN_SEED_BINDINGS = %w[from_date from_ms now_ms today lookback_days].freeze
+
+    # An extract plan additionally sees `captured`: the values the
+    # top-level `captured:` declaration names, keyed by `as:` (an empty Hash
+    # when none are declared). Scoped to extract plans only — elevate: keeps
+    # PLAN_SEED_BINDINGS; nothing needs captured data there yet, and adding
+    # it later is additive.
+    EXTRACT_PLAN_SEED_BINDINGS = (PLAN_SEED_BINDINGS + %w[captured]).freeze
 
     # ── elevate: validation ────────────────────────────────────────────
     #
@@ -583,13 +646,31 @@ module Freentonic
       end
 
       endpoints = api_client_endpoint_names
-      bound     = PLAN_SEED_BINDINGS.dup
+      bound     = EXTRACT_PLAN_SEED_BINDINGS.dup
+      # Names under `captured` this plan may read: a {captured.<typo>} or a
+      # select path into an undeclared name fails here, at load, instead of
+      # silently resolving to nil/default at sync time.
+      @declared_captured = captured_names
 
       steps.each_with_index do |step, i|
         validate_plan_step!(step, "#{loc}.steps[#{i}]", endpoints, bound, allow_yield: false)
       end
 
       validate_plan_refs!(plan["output"], "#{loc}.output", bound)
+    ensure
+      @declared_captured = nil
+    end
+
+    # Within an extract plan, a reference below `captured` must name a
+    # declared entry. `segments` is the dotted path after the root.
+    def validate_captured_ref!(segments, loc)
+      return if @declared_captured.nil?
+
+      name = segments.first
+      return if name.nil? || @declared_captured.include?(name)
+
+      declared = @declared_captured.empty? ? "none declared" : "declared: #{@declared_captured.join(", ")}"
+      raise UserError, "#{loc}: captured.#{name} is not in the workflow's captured: list (#{declared})"
     end
 
     # `verbs:` parameterizes the allowed verb set per context: extract
@@ -891,6 +972,10 @@ module Freentonic
         raise UserError, "#{loc}.select.from: #{spec["from"].inspect} is not bound by an earlier step " \
                          "(bound: #{bound.join(", ")})"
       end
+      if spec["from"].to_s == "captured"
+        # path: is one dotted path or a fallback list of them.
+        Array(spec["path"]).each { |p| validate_captured_ref!(p.to_s.split("."), "#{loc}.select.path") }
+      end
       unless step["as"].is_a?(String) && !step["as"].empty?
         raise UserError, "#{loc}.select: requires a non-empty as: to bind the result"
       end
@@ -965,11 +1050,12 @@ module Freentonic
       when String
         m = /\A\{([^}]+)\}\z/.match(node)
         return unless m
-        root = m[1].split(".").first
+        root, *rest = m[1].split(".")
         unless bound.include?(root)
           raise UserError, "#{loc}: {#{m[1]}} references unbound name #{root.inspect} " \
                            "(bound: #{bound.join(", ")})"
         end
+        validate_captured_ref!(rest, loc) if root == "captured"
       when Hash  then node.each_value { |v| validate_plan_refs!(v, loc, bound) }
       when Array then node.each { |v| validate_plan_refs!(v, loc, bound) }
       end

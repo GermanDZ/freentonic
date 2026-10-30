@@ -36,22 +36,38 @@ module Freentonic
       scope
     end
 
+    # The extract plan's seed: seed_scope plus `captured` — the values named
+    # by the workflow's `captured:` declaration, keyed by `as:`. The one
+    # place that binds it, matching WorkflowSchema::EXTRACT_PLAN_SEED_BINDINGS.
+    # A deep copy: plan steps freeze their apply: args, and the originals are
+    # the connect stage's workflow context.
+    def self.extract_seed_scope(from_date, captured: {}, today: Date.today)
+      scope = seed_scope(from_date, today: today)
+      scope.bind("captured", Marshal.load(Marshal.dump((captured || {}).to_h { |k, v| [k.to_s, v] })))
+      scope
+    end
+
     class PlanExtractor
       # @param plan [Hash] the validated `extract.plan` block.
       # @param endpoint_names [Array<String>] the workflow's declared
       #   api_client endpoint names — the whitelist `fetch:` resolves
       #   against (see Interpreter#invoke).
-      def initialize(plan, endpoint_names:)
+      # @param captured [Hash{String=>Object}] the values the workflow's
+      #   `captured:` declaration names (Stages::Extract#captured_values) —
+      #   read by the plan as `{captured.<as>}`. Never credentials.
+      def initialize(plan, endpoint_names:, captured: {})
         @plan           = plan || {}
-        @endpoint_names = endpoint_names
+        @endpoint_names = Array(endpoint_names)
+        @captured       = captured || {}
       end
 
       # Base 5-kwarg signature only: plans never do SCA, so they don't
       # accept remote_prompt_store/run_dir. The stage's kwarg filtering
       # (see Stages::Extract#call_extractor) means those are simply not
-      # passed.
+      # passed. `credentials` is deliberately unused: a plan reaches auth
+      # only through the api_client the stage built from it.
       def call(client:, credentials:, from_date:, stdout:, stderr:)
-        scope = ExtractPlan.seed_scope(from_date)
+        scope = ExtractPlan.extract_seed_scope(from_date, captured: @captured)
         Interpreter.new(@plan, endpoint_names: @endpoint_names,
                         stdout: stdout, stderr: stderr)
                    .run(client: client, scope: scope)

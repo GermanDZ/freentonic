@@ -59,6 +59,12 @@ regresses, it's a security bug — please report it.
    endpoint; it is strictly less powerful than the `{ruby:, class:}`
    escape hatch. (This narrows blast radius *within* the "YAML is code"
    trust boundary — a plan is data, unlike a sibling `extractor.rb`.)
+   A plan never receives `credentials`; auth reaches it only through the
+   api_client. It reads browser-captured data solely through the
+   workflow's top-level `captured:` declaration (bound as `captured`, a deep
+   copy, names validated at load). Plan output is persisted and its
+   `note:`/`warn:`/`abort:` messages can interpolate `{captured.*}` to
+   stderr, so a `captured:` entry must name data, never a cookie or token.
 
 6. **The HTTP exporter has a token environment fallback** (`--export-token`
    → `FREENTONIC_HTTP_TOKEN`) so secrets do not need to appear in your

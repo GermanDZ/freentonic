@@ -45,7 +45,12 @@ module Freentonic
     def extract_credentials(_session, workflow_context: {}, stdout:, stderr:)
       cred_schema = workflow&.credentials
       unless cred_schema
-        raise UserError, "workflow #{@workflow_path} must declare a top-level credentials: block"
+        # A capture-only workflow (its data comes through `captured:`, with
+        # no api_client to authenticate) has no credentials to map.
+        return {} if workflow.respond_to?(:captured_declarations) && !Array(workflow.captured_declarations).empty?
+
+        raise UserError, "workflow #{@workflow_path} must declare a top-level credentials: block " \
+                         "(or a captured: block, for a capture-only workflow)"
       end
 
       Array(cred_schema["require"]).each do |k|

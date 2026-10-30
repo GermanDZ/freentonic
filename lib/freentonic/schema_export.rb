@@ -33,6 +33,13 @@ module Freentonic
         "normalize_plan_verbs" => WorkflowSchema::NORMALIZE_PLAN_VERBS,
         "elevate_plan_verbs"   => WorkflowSchema::ELEVATE_STEP_VERBS,
         "plan_seed_bindings"      => WorkflowSchema::PLAN_SEED_BINDINGS,
+        "extract_plan_seed_bindings" => WorkflowSchema::EXTRACT_PLAN_SEED_BINDINGS,
+        "captured_entry" => {
+          "required" => %w[from],
+          "optional" => %w[as required],
+          "summary"  => "Top-level captured: list — browser-captured data (a capture action's as:) " \
+                        "that an extract plan reads as {captured.<as>}. Never auth material."
+        },
         "normalize_seed_bindings" => WorkflowSchema::NORMALIZE_SEED_BINDINGS,
         "normalize_output_keys"   => WorkflowSchema::NORMALIZE_OUTPUT_KEYS
       }

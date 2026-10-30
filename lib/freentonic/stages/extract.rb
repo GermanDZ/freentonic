@@ -82,6 +82,25 @@ module Freentonic
         end
       end
 
+      # The values the workflow's `captured:` declaration names, read from
+      # the connect stage's workflow context and keyed by `as:`. A
+      # `required: true` entry that came back missing or empty (nil, "",
+      # [], {}) stops the run here, before extraction, rather than letting
+      # the plan emit a successful-looking empty payload.
+      def captured_values
+        context = @context[:workflow_context] || {}
+        workflow = source.workflow
+        decls = workflow.respond_to?(:captured_declarations) ? Array(workflow.captured_declarations) : []
+        decls.each_with_object({}) do |decl, out|
+          value = context[decl["from"].to_s]
+          if decl["required"] && (value.nil? || (value.respond_to?(:empty?) && value.empty?))
+            raise UserError, "captured #{decl["from"]} is #{value.nil? ? "missing" : "empty"} — " \
+                             "was its capture step reached?"
+          end
+          out[decl["as"].to_s] = value
+        end
+      end
+
       def load_extractor
         spec = source.extract_spec
 
@@ -91,7 +110,8 @@ module Freentonic
         if spec.is_a?(Hash) && spec["plan"]
           return Freentonic::ExtractPlan::PlanExtractor.new(
             spec["plan"],
-            endpoint_names: source.workflow.api_client_endpoint_names
+            endpoint_names: source.workflow.api_client_endpoint_names,
+            captured: captured_values
           )
         end
 
