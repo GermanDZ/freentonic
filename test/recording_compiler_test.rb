@@ -135,6 +135,164 @@ module Freentonic
       end
     end
 
+    # A machine-generated id (strategy id-volatile) the recorder fell back to
+    # gets its own REVIEW line, distinct from the nth-child one, telling the
+    # author to swap in a stable attribute.
+    def test_id_volatile_selector_flagged_distinctly
+      Dir.mktmpdir do |dir|
+        path = write_recording(dir, [
+          { "kind" => "click", "selector" => "#widget-a1b2c3d4e5",
+            "selector_strategy" => "id-volatile", "needs_review" => true }
+        ])
+        yaml = compile(recording_path: path)
+        assert_includes yaml, "# REVIEW: auto-generated id"
+        refute_includes yaml, "# REVIEW: nth-child selector, may be fragile"
+      end
+    end
+
+    # Shadow-sourced events (probe sets "shadow": true when the element
+    # lives inside an open shadow root) compile to the SAME steps as light-
+    # DOM events — the runner's deepQuery pierces shadow roots at replay,
+    # so no special action is needed. The only difference is an
+    # informational NOTE comment so a reviewer isn't confused when the
+    # selector doesn't match in a browser console.
+    def test_shadow_events_compile_to_ordinary_steps_with_note
+      Dir.mktmpdir do |dir|
+        path = write_recording(dir, [
+          { "kind" => "click", "selector" => "button[name='submit']",
+            "selector_strategy" => "name", "needs_review" => false, "shadow" => true },
+          { "kind" => "fill", "selector" => "input[name='secret']",
+            "selector_strategy" => "name", "needs_review" => false,
+            "input_type" => "password", "mask" => true, "shadow" => true }
+        ])
+        yaml = compile(recording_path: path)
+        steps = login_steps(yaml)
+
+        # Same step shapes as a light-DOM recording.
+        assert_equal %w[wait_for_selector click fill], steps.map { |s| s["action"] }
+        assert_equal "button[name='submit']", steps[0]["selector"]
+        # Masking still routes through secret(...) for shadow fills.
+        assert_match(/\Asecret\(.+\)\z/, steps[2]["value"])
+        # The NOTE rides above the wait step and the fill.
+        assert_includes yaml, "# NOTE: element is inside shadow DOM"
+        assert_equal 2, yaml.scan("# NOTE: element is inside shadow DOM").size
+      end
+    end
+
+    # A run of single-digit-key clicks (a numeric keypad) is DROPPED — the
+    # digits never reach the draft — and a scaffold for the keypad action is
+    # left in their place. This is both a security fix (no leaked PIN) and
+    # guidance (the per-key clicks would never replay against a scrambled pad).
+    def test_keypad_digit_clicks_are_dropped_and_scaffolded
+      Dir.mktmpdir do |dir|
+        path = write_recording(dir, [
+          { "kind" => "navigate", "url" => "https://bank.example/login" },
+          { "kind" => "click", "selector" => "span.k7", "text" => "7", "needs_review" => false },
+          { "kind" => "click", "selector" => "span.k4", "text" => "4", "needs_review" => false },
+          { "kind" => "click", "selector" => "span.k9", "text" => "9", "needs_review" => false },
+          { "kind" => "click", "selector" => "span.k1", "text" => "1", "needs_review" => false }
+        ])
+        yaml = compile(recording_path: path)
+
+        # No digit-bearing selector survives — the keys are gone.
+        %w[k7 k4 k9 k1].each { |k| refute_includes yaml, k, "keypad key #{k} leaked into the draft" }
+        # The scaffold names the count but not the digits, and points at the action.
+        assert_includes yaml, "4 single-digit key presses"
+        assert_includes yaml, "action: enter_pin_pad"
+        assert_includes yaml, "secret(USER_PIN)"
+        # Only the navigate is a real step; the keypad scaffold is comment-only.
+        assert_equal %w[navigate], login_steps(yaml).map { |s| s["action"] }
+      end
+    end
+
+    def test_short_digit_run_is_not_treated_as_keypad
+      Dir.mktmpdir do |dir|
+        # Two digit clicks is below the keypad threshold — kept as clicks.
+        path = write_recording(dir, [
+          { "kind" => "click", "selector" => "#a", "text" => "1", "needs_review" => false },
+          { "kind" => "click", "selector" => "#b", "text" => "2", "needs_review" => false }
+        ])
+        actions = login_steps(compile(recording_path: path)).map { |s| s["action"] }
+        assert_equal %w[wait_for_selector click wait_for_selector click], actions
+      end
+    end
+
+    # The probe records a digit key as a bare flagged click (no text or
+    # selector), so even a short run of them can't be replayed as clicks —
+    # it's always a keypad scaffold.
+    def test_flagged_keypad_clicks_always_collapse
+      Dir.mktmpdir do |dir|
+        path = write_recording(dir, [
+          { "kind" => "navigate", "url" => "https://bank.example/login" },
+          { "kind" => "click", "keypad_digit" => true },
+          { "kind" => "click", "keypad_digit" => true }
+        ])
+        yaml = compile(recording_path: path)
+
+        assert_includes yaml, "2 single-digit key presses"
+        assert_equal %w[navigate], login_steps(yaml).map { |s| s["action"] }
+      end
+    end
+
+    # recording.jsonl is appended to, so a re-recorded login leaves the
+    # failed attempt in the file too; only the last session is compiled.
+    def test_only_the_last_recording_session_is_compiled
+      Dir.mktmpdir do |dir|
+        path = write_recording(dir, [
+          { "kind" => "recorder_started", "t" => 1 },
+          { "kind" => "navigate", "url" => "https://bank.example/old-attempt" },
+          { "kind" => "recorder_started", "t" => 2 },
+          { "kind" => "navigate", "url" => "https://bank.example/login" }
+        ])
+        stderr = StringIO.new
+        yaml = compile(recording_path: path, stderr: stderr)
+
+        refute_includes yaml, "old-attempt"
+        assert_includes yaml, "https://bank.example/login"
+        assert_includes stderr.string, "2 recording sessions"
+      end
+    end
+
+    # A click on a text-entry input with no fill for it (a managed/custom
+    # input whose value the recorder couldn't see) scaffolds a fill so the
+    # secret isn't silently missing.
+    def test_clicked_unfilled_text_input_is_scaffolded
+      Dir.mktmpdir do |dir|
+        path = write_recording(dir, [
+          { "kind" => "click", "selector" => "input[name='userid']",
+            "input_type" => "text", "needs_review" => false }
+        ])
+        yaml = compile(recording_path: path)
+        assert_includes yaml, "clicked but no typed value was captured"
+        assert_includes yaml, "secret(REPLACE_ME)"
+        # The scaffold is a comment; the only real steps are the click pair.
+        assert_equal %w[wait_for_selector click], login_steps(yaml).map { |s| s["action"] }
+      end
+    end
+
+    def test_clicked_text_input_with_fill_is_not_scaffolded
+      Dir.mktmpdir do |dir|
+        path = write_recording(dir, [
+          { "kind" => "click", "selector" => "input[name='userid']",
+            "input_type" => "text", "needs_review" => false },
+          { "kind" => "fill", "selector" => "input[name='userid']",
+            "input_type" => "text", "value" => "abc", "needs_review" => false }
+        ])
+        yaml = compile(recording_path: path)
+        refute_includes yaml, "no typed value was captured"
+      end
+    end
+
+    def test_clicked_checkbox_is_not_scaffolded_as_fill
+      Dir.mktmpdir do |dir|
+        path = write_recording(dir, [
+          { "kind" => "click", "selector" => "#remember",
+            "input_type" => "checkbox", "needs_review" => false }
+        ])
+        refute_includes compile(recording_path: path), "no typed value was captured"
+      end
+    end
+
     def test_unmasked_fill_is_flagged_and_kept_literal
       Dir.mktmpdir do |dir|
         path = write_recording(dir, [

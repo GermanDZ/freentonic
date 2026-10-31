@@ -77,7 +77,10 @@ start_vnc_stack_if_enabled() {
   echo "[entrypoint] VNC ready. Connect with:"
   echo "[entrypoint]   Browser:  http://localhost:6080/vnc.html?host=localhost&port=6080&autoconnect=true"
   echo "[entrypoint]   Raw VNC:  vnc://localhost:5900"
-  if [ "$mode" = "cli" ]; then
+  if [ "$mode" = "cli" ] && [ -n "${FREENTONIC_VNC_PASSWORD:-}" ]; then
+    # The operator chose it — don't copy it into the container logs.
+    echo "[entrypoint]   Password: the one set in FREENTONIC_VNC_PASSWORD"
+  elif [ "$mode" = "cli" ]; then
     echo "[entrypoint]   Password: ${pw}"
   else
     echo "[entrypoint]   Password: per-invoke — send { \"vnc_password\": ... } on /invoke"
@@ -113,6 +116,53 @@ if [ "${1:-}" = "cli" ]; then
   start_xvfb
   start_vnc_stack_if_enabled cli
   exec ruby -I/opt/freentonic/lib /opt/freentonic/bin/freentonic --no-sandbox "$@"
+fi
+
+# Authoring loop: `docker run freentonic:latest author [freentonic-args...]`.
+# A held-open developer container for building or repairing a provider by
+# hand — the environment the record → compile → lint → step loop runs in.
+# Sibling to the `cli` branch above; it reuses the same static-password VNC
+# path (so you watch Chrome over noVNC) but instead of exec'ing one workflow
+# and exiting, it points every artifact at a writable workspace mount and
+# drops into a shell you iterate in.
+#
+# The whole trick is FREENTONIC_RUN_DIR pointed at the mounted workspace: it
+# already routes recording.jsonl, screenshots, events.ndjson, failures.ndjson,
+# and prompts into that dir (stages/connect.rb, browser_workflow_runner.rb,
+# reporter.rb), so record/dump output lands on the host with no extra flags.
+if [ "${1:-}" = "author" ]; then
+  shift
+  start_xvfb
+  start_vnc_stack_if_enabled cli          # static, log-printed password
+  export FREENTONIC_RUN_DIR="${FREENTONIC_RUN_DIR:-/home/freentonic/authoring}"
+  # Keep Chrome's profile INSIDE the writable workspace mount, not the shared
+  # `freentonic-chrome-profile` named volume. The bind mount is always writable
+  # regardless of the container uid, so this sidesteps the stale-volume-ownership
+  # crash (Chrome "Failed to create SingletonLock: Permission denied") the shared
+  # volume hits once the image's pinned uid no longer matches an older volume's
+  # owner. Persists per workspace on the host; honors an explicit override.
+  export FREENTONIC_CHROME_PROFILE_DIR="${FREENTONIC_CHROME_PROFILE_DIR:-/home/freentonic/authoring/.chrome-profile}"
+  # The container drops all capabilities, so Chrome's sandbox can't start —
+  # every launch needs --no-sandbox. The cli/author first-command paths pass it
+  # explicitly; this makes a bare `freentonic --recording ...` typed in the
+  # iterate shell work too instead of hanging silently on the debug port.
+  export FREENTONIC_NO_SANDBOX=1
+  # Capture a per-step DOM+shadow snapshot (dom/NNNN.html, input values
+  # stripped) alongside recording.jsonl — the offline signal for mining
+  # stable field selectors (name/placeholder/aria) when a bank buries its
+  # login in web components. On by default in author mode; set
+  # FREENTONIC_RECORD_DOM=0 to skip.
+  export FREENTONIC_RECORD_DOM="${FREENTONIC_RECORD_DOM:-1}"
+  cd /home/freentonic/authoring 2>/dev/null || true
+  echo "[entrypoint] author mode: workspace at /home/freentonic/authoring (artifacts route here via FREENTONIC_RUN_DIR)."
+  echo "[entrypoint] loop:  freentonic --recording --workflow ...  →  --compile-recording ...  →  --lint ...  →  --step ..."
+  if [ "$#" -gt 0 ]; then
+    # Run the passed command once, but never let a non-zero exit (a failed
+    # lint, a bad selector) tear the container down — the point is to keep
+    # noVNC connected and stay in the loop. `|| true` survives `set -e`.
+    ruby -I/opt/freentonic/lib /opt/freentonic/bin/freentonic --no-sandbox "$@" || true
+  fi
+  exec bash                               # iterate loop; container lives until you exit
 fi
 
 # Warn if the workflows directory is empty — the first /invoke will 404

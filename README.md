@@ -31,7 +31,7 @@ See **[docs/getting-started.md](docs/getting-started.md)** for the
 full step-by-step guide covering multiple export formats, offline
 iteration, and pushing to an API.
 
-Prefer Docker? Two paths:
+Prefer Docker? Three paths:
 
 - **Run freentonic as a long-running HTTP server** that your web app
   drives over `/invoke` — see
@@ -41,6 +41,9 @@ Prefer Docker? Two paths:
   credentials.
 - **Run one-off workflows in a throwaway container** from your
   terminal — see **[docs/running-in-docker.md](docs/running-in-docker.md)**.
+- **Author or repair a provider** in a held-open container with a
+  writable workspace and noVNC — the record → compile → lint → step loop
+  in one command. See **[docs/authoring-in-docker.md](docs/authoring-in-docker.md)**.
 
 ## The pipeline
 
@@ -95,6 +98,16 @@ step keys, the `when_context` operator set, and the extract/normalize/
 elevate plan-verb names — always in lockstep with the installed gem. It is
 the machine-readable contract for tooling and workflow-authoring agents.
 
+### Building a new workflow
+
+New provider? The end-to-end loop — bootstrap (`--init`) → record → compile →
+review → lint → step — is written up in
+**[docs/authoring-a-workflow.md](docs/authoring-a-workflow.md)**, and the
+container it runs in is **[docs/authoring-in-docker.md](docs/authoring-in-docker.md)**.
+`freentonic --init` writes a lint-clean stub `workflow.yml` (prompts for the
+login URL, or pass `--url`) so the record loop has something to launch at. The
+individual tools are documented in the sections below.
+
 ### Compiling a recording into a draft workflow
 
 `freentonic --compile-recording PATH` turns a `recording.jsonl` (the file
@@ -109,7 +122,12 @@ no-Chrome, no-network data transform:
   matching `secrets:` entry, so credentials are correct by construction;
 - unmasked field values are kept literally but flagged
   `# REVIEW: literal from recording` (they can be usernames/PII), and a
-  fragile or missing selector is flagged with its own `# REVIEW:` line.
+  fragile or missing selector is flagged with its own `# REVIEW:` line;
+- interactions inside **open shadow DOM** (banks that render login as web
+  components) are captured with root-scoped selectors and compile to
+  ordinary steps — the runner's `deepQuery` pierces shadow roots at replay.
+  Such steps carry a `# NOTE:` comment since their selector won't match in
+  a browser console's plain `querySelector`.
 
 The output is a **draft, not a finished provider** — read it, edit the
 selectors and REVIEW lines, then `freentonic --lint` it before use.

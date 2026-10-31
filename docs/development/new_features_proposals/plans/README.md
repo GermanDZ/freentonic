@@ -8,16 +8,23 @@ diverges from its proposal.
 
 ## Status
 
-_Updated 2026-07-17._ Deliverables **1–4 are implemented**. 1–3 landed on
-branch `feat/authoring-loop-schema-compile-inspect` (code commit `affc168`):
+_Updated 2026-07-17._ Deliverables **1–5 are implemented** — the Tier-1
+authoring loop is complete end to end. 1–3 landed on branch
+`feat/authoring-loop-schema-compile-inspect` (code commit `affc168`):
 `--schema-json`, `--compile-recording` (fresh-draft), and `inspect_page` +
 `failures.ndjson` (step-session **Tier 1**). **Deliverable 4 — the held-open
 step session (step Tier 2)** — is on branch `feat/authoring-loop-step-session`
 in two commits: **4a** the CLI `--step` REPL (`run_action` + `StepSession` +
 Connect step mode) and **4b** the server `/sessions` endpoints + per-session
-idle watchdog. +62 tests, full suite green (1173 runs), `../freentonic-providers`
-green. Only deliverable **5** — the `author` container — plus the fast-follows
-remain **open**. See the ✅ / ⏳ column below.
+idle watchdog. **Deliverable 5 — the `author` container (Tier 1)** — is on
+branch `feat/authoring-loop-author-container`: the entrypoint `author` branch +
+wrapper `cmd_author` (writable workspace, static-password noVNC, git-worktree
+refusal, `cmd_server` hardening), `docs/authoring-in-docker.md`, and two reused-
+piece unit tests (recorder-path routing + the shell git-worktree guard). Because
+#2 and #4 shipped first, the author loop now promises the **full**
+record → compile → lint → step chain, not a subset. Only the **fast-follows**
+(compile graft mode, author Tier 2, docs regeneration) remain **open**. See the
+✅ column below.
 
 | Plan | Proposal | Depends on | Rough effort |
 | --- | --- | --- | --- |
@@ -42,13 +49,14 @@ until its prerequisite (Tier 1 observation) exists.
 | 2 | **`--compile-recording`** (fresh-draft) | ✅ shipped | compile-recording | ~1d | P0, highest value-per-diff: turns a `recording.jsonl` freentonic *already* writes into a `--lint`-clean draft. Soft-depends on #1, no hard dep. Defer graft mode (see fast-follows). |
 | 3 | **`inspect_page` + `failures.ndjson`** (step Tier 1) | ✅ shipped | incremental-step-session | ~1–1.5d | P0/P1 boundary. `PageObserver` backs everything downstream, and `failures.ndjson` is P0-value machine-actionable output on its own. Tier 2 hard-depends on it — so it ships as its own slot, not bundled with the REPL. |
 | 4 | **Held-open step session** (`--step` + `/sessions`, step Tier 2) | ✅ shipped | incremental-step-session | ~3–4d | P1. The architectural centerpiece — closes `observe → act → observe`. Depends on #3. Carries the single biggest net-new infra: the per-session idle watchdog. |
-| 5 | **`author` container** (Tier 1) | ⏳ pending | authoring-container | ~1d | Pure packaging; works with today's flags the day it lands, but *most* useful once #2/#4 exist (its inner loop calls `--compile-recording` / `--step`). Slot it here so its docs only promise shipped commands. |
+| 5 | **`author` container** (Tier 1) | ✅ shipped | authoring-container | ~1d | Pure packaging; works with today's flags the day it lands, but *most* useful once #2/#4 exist (its inner loop calls `--compile-recording` / `--step`). Shipped after them, so its docs promise the full record → compile → lint → step loop. |
 
-**Critical path ≈ 6–8 days** (#1→#5). **#1–#4 are now done** — #1–#3 landed
+**Critical path ≈ 6–8 days** (#1→#5). **#1–#5 are now done** — #1–#3 landed
 together on `feat/authoring-loop-schema-compile-inspect`; #4 (the long pole)
 on `feat/authoring-loop-step-session`, in two commits (4a CLI `--step`, 4b
-server `/sessions`). **Remaining:** only #5 (~1d, the `author` container) plus
-the fast-follows.
+server `/sessions`); #5 (the `author` container) on
+`feat/authoring-loop-author-container`. **Remaining:** only the fast-follows
+below.
 
 ### Fast-follows (off the critical path, land opportunistically)
 
@@ -56,9 +64,25 @@ the fast-follows.
   fresh draft delivers most of the value; graft must preserve an existing
   file's comments (+0.5–1d). Fast-follow to #2.
 - **`author` container Tier 2** (shared step-server port for the co-pilot
-  loop) — additive; gated on #4. Must not block #5's Tier 1.
+  loop) — additive; **now unblocked** (#4's `/sessions` shipped and #5's
+  Tier 1 is in). Publish the step server on a second loopback port so an LLM
+  agent drives the same held-open Chrome the human watches over noVNC.
 - **Docs regeneration from the registry** (`--schema-json --format
   markdown`) — kills the registry↔runner↔docs drift for good. Follow-up to #1.
+- **Shadow-DOM-aware recorder** — ✅ **shipped** (same day it was found).
+  Discovered during the first live authoring run against a real bank: events
+  inside a web component's shadow root are *retargeted* to the host element,
+  so the probe recorded every in-component click as a click on the host and
+  dropped fills entirely — `--compile-recording` yielded a skeleton for
+  shadow-DOM sites. Fixed on `feat/authoring-loop-author-container`: the probe
+  recovers deep targets via `ev.composedPath()` (open roots; closed roots
+  degrade to the old behavior), the shared selector heuristics scope
+  uniqueness to `el.getRootNode()` and gained a `placeholder` strategy,
+  `elementSummary`/`inspect_page` flag `shadow: true`, and the compiler
+  annotates shadow steps with a `# NOTE:`. Replay needed no changes —
+  `deepQuery` already pierces roots. Follow-on recorder work (composed-event
+  fills, form-associated custom elements, per-step DOM snapshots,
+  `--reset-profile`, auto-generated-id demotion) landed on the same branch.
 
 ## Cross-cutting corrections found during verification
 

@@ -75,6 +75,43 @@ module Freentonic
       assert_nil stage.send(:initial_url_from_workflow)
     end
 
+    # ─── recording_output_path (FREENTONIC_RUN_DIR routing) ───
+    #
+    # The `author` container mounts a writable workspace and points
+    # FREENTONIC_RUN_DIR at it, so `--recording` writes recording.jsonl onto
+    # the host with no extra flags. Pin that routing here.
+
+    def with_env(name, value)
+      previous = ENV[name]
+      value.nil? ? ENV.delete(name) : ENV[name] = value
+      yield
+    ensure
+      previous.nil? ? ENV.delete(name) : ENV[name] = previous
+    end
+
+    def test_recording_output_path_routes_to_run_dir
+      stage = connect_stage(source: SourceDouble.new)
+      with_env("FREENTONIC_RUN_DIR", "/mnt/authoring") do
+        assert_equal "/mnt/authoring/recording.jsonl", stage.send(:recording_output_path)
+      end
+    end
+
+    def test_recording_output_path_falls_back_to_tmp_without_run_dir
+      stage = connect_stage(source: SourceDouble.new)
+      with_env("FREENTONIC_RUN_DIR", nil) do
+        path = stage.send(:recording_output_path)
+        assert_equal Dir.tmpdir, File.dirname(path)
+        assert_match(/\Afreentonic-recording-\d+\.jsonl\z/, File.basename(path))
+      end
+    end
+
+    def test_recording_output_path_ignores_empty_run_dir
+      stage = connect_stage(source: SourceDouble.new)
+      with_env("FREENTONIC_RUN_DIR", "") do
+        assert_equal Dir.tmpdir, File.dirname(stage.send(:recording_output_path))
+      end
+    end
+
     # ─── error wrapping in #call ───
 
     # Fake chrome_cdp injected via context[:chrome_cdp]. Raises from

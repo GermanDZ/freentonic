@@ -53,6 +53,54 @@ module Freentonic
       end
     end
 
+    # ─── --reset-profile wipe (reset_profile_dir!) ───
+
+    def test_reset_profile_dir_removes_contents
+      Dir.mktmpdir do |root|
+        prof = File.join(root, "chrome-profile")
+        FileUtils.mkdir_p(File.join(prof, "Default"))
+        File.write(File.join(prof, "Default", "Cookies"), "stale")
+
+        ChromeCdp.reset_profile_dir!(prof)
+
+        refute File.exist?(prof), "reset must remove the profile dir (configure recreates it empty)"
+      end
+    end
+
+    # FREENTONIC_CHROME_PROFILE_DIR pointed at the authoring workspace itself
+    # must not wipe the recordings in it.
+    def test_reset_profile_dir_refuses_a_directory_that_is_not_a_profile
+      Dir.mktmpdir do |root|
+        workspace = File.join(root, "authoring")
+        FileUtils.mkdir_p(workspace)
+        File.write(File.join(workspace, "recording.jsonl"), "{}\n")
+
+        err = assert_raises(UserError) { ChromeCdp.reset_profile_dir!(workspace) }
+        assert_includes err.message, "doesn't look like a Chrome profile"
+        assert File.exist?(File.join(workspace, "recording.jsonl"))
+      end
+    end
+
+    def test_reset_profile_dir_tolerates_a_missing_directory
+      Dir.mktmpdir do |root|
+        ChromeCdp.reset_profile_dir!(File.join(root, "never-created"))
+      end
+    end
+
+    def test_reset_profile_dir_refuses_root
+      err = assert_raises(UserError) { ChromeCdp.reset_profile_dir!("/") }
+      assert_match(/refusing to wipe/, err.message)
+    end
+
+    def test_reset_profile_dir_refuses_home
+      err = assert_raises(UserError) { ChromeCdp.reset_profile_dir!(File.expand_path("~")) }
+      assert_match(/refusing to wipe/, err.message)
+    end
+
+    def test_reset_profile_dir_refuses_empty
+      assert_raises(UserError) { ChromeCdp.reset_profile_dir!("") }
+    end
+
     # ─── pgrep pattern escaping ───
 
     def test_pgrep_pattern_escapes_regex_metacharacters

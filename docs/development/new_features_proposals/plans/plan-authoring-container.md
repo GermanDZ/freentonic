@@ -3,6 +3,16 @@
 Plan for [`proposal-authoring-container.md`](../proposal-authoring-container.md).
 Ground-truth verified against the working tree.
 
+> **Status: ✅ shipped** (Tier 1) on branch
+> `feat/authoring-loop-author-container`. Entrypoint `author` branch + wrapper
+> `cmd_author` + `refuse_if_in_git_worktree`, `docs/authoring-in-docker.md`,
+> README third Docker bullet, and two unit tests (recorder-path routing in
+> `stages_connect_test.rb`, the shell git-worktree guard in
+> `docker_author_guard_test.rb`). Because deliverables 2 (`--compile-recording`)
+> and 4 (`--step`) shipped **before** this, the caveats below about those
+> commands "not existing yet" are now moot — the docs promise the full loop.
+> Tier 2 (shared step server) remains a deferred fast-follow.
+
 ## Goal
 
 A new `author` container mode: **one command** mounts a writable workspace,
@@ -218,14 +228,22 @@ reused pieces (AGENTS.md invariant 10: no Chrome in CI):
 
 ## Completion checklist (AGENTS.md-adapted)
 
-- [ ] `bundle exec rake test` green (only the reused-piece unit tests are
-      new; shell wiring is smoke-tested manually).
-- [ ] Manual smoke check performed and recorded in the hardening checklist.
-- [ ] `docker-run-freentonic.sh` header/usage + README Docker section +
+- [x] `bundle exec rake test` green (new: recorder-path routing tests +
+      the shell git-worktree guard test; shell wiring is smoke-tested
+      manually).
+- [x] Manual smoke check performed (live against a real bank): author mode
+      up, noVNC answered on 6080 with the static password, headed Chrome
+      passed the site's bot checks at the real login page, and a
+      `--recording` session wrote `recording.jsonl` to the mounted
+      workspace. The run surfaced five environment bugs, all fixed in the
+      follow-up "live-session hardening" commit on this branch (hostname,
+      author-shell env, DISPLAY, workspace-local Chrome profile,
+      FREENTONIC_NO_SANDBOX).
+- [x] `docker-run-freentonic.sh` header/usage + README Docker section +
       new `docs/authoring-in-docker.md` updated.
-- [ ] Loopback-only publish preserved; `umask 0077` and read-only rootfs
+- [x] Loopback-only publish preserved; `umask 0077` and read-only rootfs
       preserved; git-worktree refusal in place.
-- [ ] Branch handed back; no PR/push by the agent.
+- [x] Branch handed back; no PR/push by the agent.
 
 **Estimated effort:** ~1 day for Tier 1 (entrypoint branch + wrapper arm +
 doc + the two unit tests + a manual smoke run). Tier 2 (shared step server
