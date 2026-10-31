@@ -194,6 +194,11 @@ extract:
 A plan's output is persisted (`--dump-raw`, run artifacts), so declare only
 data-bearing captures — never a cookie or token.
 
+Getting a web app to actually fetch what you want to capture — clicks
+rather than navigation, letting the page hydrate first, paging "Load more"
+history within the lookback — is covered in
+[capturing data from a web app's own responses](workflow-action-capture-response-json.md#capturing-data-from-a-web-apps-own-responses).
+
 Date formatting stays on the endpoint: pass a `Date` binding as an `arg:`
 and let the endpoint's `{name|iso}` / `{name|date}` param filter format it
 (see the `api_client` DSL). The plan doesn't re-implement date filters.
