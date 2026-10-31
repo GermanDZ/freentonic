@@ -165,13 +165,16 @@ optionally a DOM snapshot per step to `dom/<session>/NNNN.html`, for
    so it never reaches `recording.jsonl` or the draft (which gets a
    `secret(...)` reference instead). The check reads the field's `type`,
    `autocomplete`, `name`, `id`, `placeholder` and `aria-label`, and errs
-   toward masking. A click on a single-digit key (a PIN keypad) records
-   only that a key was pressed, with no text, label or selector, and takes
-   no snapshot.
-2. **Snapshots hold structure, not values.** Input values are stripped and
-   attributes are allowlisted to selector hooks. Text the page renders stays
-   (labels, balances, names, anything a component echoes as you type), so
-   `dom/` is as sensitive as the page itself.
+   toward masking. A click on a single-digit key (a PIN keypad), detected
+   from its text, value, aria-label, title, alt or selector, records only
+   that a key was pressed, with no text, label or selector. From the first
+   such press on, no step on that page is snapshotted, since the pad's
+   display may echo the digits.
+2. **Snapshots hold structure, not values.** Input values and the text inside
+   `contenteditable` regions are stripped, and attributes are allowlisted to
+   selector hooks. Other text the page renders stays (labels, balances,
+   names, anything a component echoes as you type), so `dom/` is as
+   sensitive as the page itself.
 3. **Owner-only files, no symlinks.** The recording and snapshots are
    created mode `0600` (the `author` container also runs with `umask 0077`),
    and a snapshot is never written through an existing file or symlink.
