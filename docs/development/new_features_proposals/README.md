@@ -12,9 +12,11 @@ The four below form the MVP of the **autonomous workflow-authoring
 loop** analyzed in
 [`docs/llm-workflow-authoring-review.md`](../../llm-workflow-authoring-review.md)
 and sequenced in [`plans/README.md`](plans/README.md). **Status
-(2026-07-16):** #1, #2, and #3's **Tier 1** are implemented on branch
-`feat/authoring-loop-schema-compile-inspect`; #3's Tier 2 and #4 remain open.
-They are independently shippable; the suggested order is:
+(2026-07-17):** all four are implemented — #1, #2, and #3's **Tier 1** on
+branch `feat/authoring-loop-schema-compile-inspect`; #3's **Tier 2** on
+`feat/authoring-loop-step-session`; and #4's **Tier 1** on
+`feat/authoring-loop-author-container`. The Tier-1 authoring loop is complete
+end to end. They are independently shippable; the suggested order is:
 
 1. **✅ Shipped.** [`proposal-schema-json-export.md`](proposal-schema-json-export.md) —
    `--schema-json`. Emit the action dialect (names, keys, plan verbs,
@@ -32,19 +34,23 @@ They are independently shippable; the suggested order is:
    `/sessions`). The closed `observe → act → observe` loop: try one
    action against a live session, get structured page observation back,
    iterate — instead of paying a full re-login per guess.
-4. **⏳ Open.** [`proposal-authoring-container.md`](proposal-authoring-container.md) —
+4. **✅ Shipped** (Tier 1; shared-step-server Tier 2 deferred).
+   [`proposal-authoring-container.md`](proposal-authoring-container.md) —
    an `author` container mode: one command mounts a writable workspace,
    serves noVNC on a fixed loopback port with a known password, and drops
    into an iterate loop where `--recording` / `--compile-recording` /
    `--lint` / `--step` all run against the mounted dir. The environment
    the three tools above run in; extends the existing
-   `docker-run-freentonic.sh` and `docker-entrypoint.sh`.
+   `docker-run-freentonic.sh` and `docker-entrypoint.sh`. Documented in
+   [`docs/authoring-in-docker.md`](../../authoring-in-docker.md).
 
 ## Completed
 
 See [`completed/`](completed/) — `pause`, `record_requests` /
 `dump_requests`, `prompt_stdin_and_fill`, and the `inline_fd` secret
 backend. The drafts above build directly on that debug/record plumbing.
-Proposals #1 and #2 (fully shipped) move here once
-`feat/authoring-loop-schema-compile-inspect` merges to `main`; #3 stays open
-until its Tier 2 lands.
+All four authoring-loop proposals (#1–#4) are now shipped; they stay in this
+directory with a **✅ Shipped** status marker rather than moving to
+`completed/`, so the epic reads as one set until it wraps — then the whole
+group relocates together. Only the fast-follows in
+[`plans/README.md`](plans/README.md) remain.

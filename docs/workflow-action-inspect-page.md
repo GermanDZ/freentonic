@@ -44,10 +44,17 @@ When `as:` is given, `context["<as>"]` holds:
     { "tag": "input", "selector": "#pwd", "selector_strategy": "id",
       "needs_review": false, "type": "password", "label": "Password", "masked": true },
     { "tag": "button", "selector": "#submit", "selector_strategy": "id",
-      "needs_review": false, "text": "Entrar" }
+      "needs_review": false, "text": "Entrar" },
+    { "tag": "button", "selector": "button[name='continue']", "selector_strategy": "name",
+      "needs_review": false, "text": "Continue", "shadow": true }
   ]
 }
 ```
+
+An element inside an open shadow root carries `"shadow": true`: its
+selector is scoped to that root, so a plain `document.querySelector` in a
+browser console won't match it — freentonic's selector actions pierce
+shadow roots via `deepQuery` and replay it fine.
 
 ## Behaviour
 

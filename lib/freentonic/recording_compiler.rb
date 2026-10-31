@@ -40,6 +40,19 @@ module Freentonic
     # most specific/common wins first.
     SECRET_KEYWORDS = %w[password otp pin cvv cvc sms 2fa token pwd secret].freeze
 
+    # Input types whose value is text the user typed. A click on one of these
+    # with no fill for its selector means the value wasn't captured (a managed
+    # / custom-element input) — the compiler scaffolds a fill so the secret
+    # isn't silently missing.
+    TEXTLIKE_INPUT_TYPES = %w[text email tel number password search url
+                              date datetime-local month week time].freeze
+
+    # A run of this many consecutive single-digit-key clicks is treated as a
+    # numeric keypad: the per-key clicks are DROPPED (they won't replay — key
+    # positions shuffle each load — and they encode the secret) and a scaffold
+    # for the dedicated keypad action is left in their place.
+    KEYPAD_MIN_RUN = 3
+
     # A single emitted YAML step: an action name, ordered scalar pairs, and
     # any leading `# REVIEW:` comment lines the renderer places above it.
     Step = Struct.new(:action, :pairs, :comments, keyword_init: true)
@@ -65,7 +78,7 @@ module Freentonic
               "compile to a fresh draft and merge by hand"
       end
 
-      events = coalesce_navigates(read_events)
+      events = collapse_keypad_runs(coalesce_navigates(last_session(read_events)))
       steps = build_steps(events)
       warn_on_literals
       render(steps)
@@ -90,6 +103,19 @@ module Freentonic
       events
     end
 
+    # recording.jsonl is appended to, so a re-recorded login leaves every
+    # attempt in one file, each opened by a `recorder_started` line. Only the
+    # last attempt describes the login to compile; merging them would replay
+    # the failed tries too.
+    def last_session(events)
+      starts = events.each_index.select { |i| events[i]["kind"] == "recorder_started" }
+      return events if starts.length < 2
+
+      @stderr.puts "[compile-recording] #{starts.length} recording sessions in the file; " \
+                   "compiling only the last one"
+      events[starts.last..]
+    end
+
     # Collapse runs of consecutive `navigate` events with the same URL into
     # one — a single click frequently emits several identical frameNavigated
     # frames.
@@ -104,12 +130,48 @@ module Freentonic
       end
     end
 
+    # A click on a single-digit key (a numeric keypad button). The probe
+    # records one as a bare `keypad_digit: true` click — no text, label or
+    # selector, so the digit never reaches recording.jsonl; older recordings
+    # carry the digit as the click's visible text.
+    def keypad_key?(ev)
+      ev["kind"] == "click" &&
+        (ev["keypad_digit"] == true || ev["text"].to_s.strip.match?(/\A\d\z/))
+    end
+
+    # Replace each run of >= KEYPAD_MIN_RUN consecutive single-digit-key clicks
+    # with one synthetic `keypad` event. This DROPS the per-key clicks (which
+    # leak the entered digits into the draft and won't replay against a
+    # scrambled pad) before they ever become steps.
+    def collapse_keypad_runs(events)
+      out = []
+      i = 0
+      while i < events.length
+        if keypad_key?(events[i])
+          j = i
+          j += 1 while j < events.length && keypad_key?(events[j])
+          # A flagged key has no selector to replay, so any run of them is a
+          # keypad; an old-format short run may be ordinary "1"/"2" buttons.
+          if (j - i) >= KEYPAD_MIN_RUN || events[i...j].any? { |e| e["keypad_digit"] == true }
+            out << { "kind" => "keypad", "count" => j - i }
+            i = j
+            next
+          end
+        end
+        out << events[i]
+        i += 1
+      end
+      out
+    end
+
     def build_steps(events)
+      fill_selectors = events.select { |e| e["kind"] == "fill" }
+                             .map { |e| e["selector"].to_s }
       steps = []
       seen_navigate = false
       events.each do |ev|
         kind = ev["kind"]
-        next unless INTERACTION_KINDS.include?(kind)
+        next unless INTERACTION_KINDS.include?(kind) || kind == "keypad"
 
         case kind
         when "navigate"
@@ -121,11 +183,51 @@ module Freentonic
           end
         when "click", "submit"
           steps.concat(click_steps(ev))
+          steps << unfilled_input_scaffold(ev) if unfilled_text_input?(ev, fill_selectors)
         when "fill"
           steps << fill_step(ev)
+        when "keypad"
+          steps << keypad_scaffold(ev)
         end
       end
       steps
+    end
+
+    # True when a click landed on a text-entry input that never received a
+    # fill — the value was typed but not observable (a managed / custom-element
+    # input). We scaffold a fill so the secret isn't silently dropped.
+    def unfilled_text_input?(ev, fill_selectors)
+      return false unless ev["kind"] == "click"
+      return false unless TEXTLIKE_INPUT_TYPES.include?(ev["input_type"].to_s.downcase)
+      !fill_selectors.include?(ev["selector"].to_s)
+    end
+
+    # Comment-only scaffold (action: nil renders just the comment lines) for a
+    # clicked-but-unfilled text field. Invisible to YAML parsing, so it never
+    # affects lint or the step list — pure guidance the author pastes in.
+    def unfilled_input_scaffold(ev)
+      Step.new(action: nil, pairs: [], comments: [
+        "# REVIEW: this input was clicked but no typed value was captured — a",
+        "# managed / custom-element input can hide its value from the recorder.",
+        "# If it takes typed input, add a fill (and a matching secrets: entry):",
+        "#   - action: fill",
+        "#     selector: #{yq(ev["selector"].to_s)}",
+        '#     value: "secret(REPLACE_ME)"'
+      ])
+    end
+
+    # Comment-only scaffold replacing a dropped keypad run. Names the count of
+    # dropped keys but never the digits themselves.
+    def keypad_scaffold(ev)
+      Step.new(action: nil, pairs: [], comments: [
+        "# REVIEW: #{ev["count"]} single-digit key presses were recorded here and DROPPED.",
+        "# They look like a numeric keypad: the per-key clicks won't replay (key",
+        "# positions shuffle each load) AND they encode the secret. Replace with the",
+        "# keypad action for this pad (see docs/workflow-action-enter-pin-pad.md):",
+        "#   - action: enter_pin_pad",
+        '#     selector: "REPLACE_ME: the pad container selector"',
+        '#     pin: "secret(USER_PIN)"'
+      ])
     end
 
     # First navigate -> the workflow entry URL.
@@ -187,12 +289,21 @@ module Freentonic
     end
 
     # `# REVIEW:` lines an interaction event earns from its selector quality.
+    # A `shadow` event also gets an informational NOTE: the selector is
+    # root-scoped, so it won't match in a browser console's plain
+    # querySelector — but freentonic's actions pierce shadow roots at
+    # runtime, so the step replays fine.
     def review_comments(ev)
       comments = []
       if ev["selector"].to_s.empty? || ev["selector_strategy"] == "none"
         comments << "# REVIEW: no selector captured"
+      elsif ev["selector_strategy"] == "id-volatile"
+        comments << "# REVIEW: auto-generated id — regenerates each load; replace with a stable attribute (name/placeholder/aria-label)"
       elsif ev["needs_review"] == true
         comments << "# REVIEW: nth-child selector, may be fragile"
+      end
+      if ev["shadow"] == true
+        comments << "# NOTE: element is inside shadow DOM (freentonic actions pierce it; a browser-console querySelector won't match)"
       end
       comments
     end
@@ -286,6 +397,10 @@ module Freentonic
         step.comments.each do |comment|
           out << "    #{comment}\n"
         end
+        # A comment-only scaffold (action: nil) renders just its comments —
+        # no `- action:` line, so it is invisible to YAML parsing.
+        next if step.action.nil?
+
         first_key, first_value = step.pairs.first
         out << "    - action: #{step.action}\n"
         out << "      #{first_key}: #{first_value}\n" if first_key

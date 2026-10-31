@@ -101,6 +101,7 @@ module Freentonic
         chrome_cdp.configure(
           port: @context[:cdp_port] || DEFAULT_CDP_PORT,
           isolated: @context[:isolated] || false,
+          reset_profile: @context[:reset_profile] || false,
           headless: @context[:headless] || false,
           no_sandbox: @context[:no_sandbox] || false
         )
@@ -523,22 +524,26 @@ module Freentonic
         nil
       end
 
-      # Install the recording probe. Writes events to
-      # <run_dir>/recording.jsonl when FREENTONIC_RUN_DIR is set
-      # (always true under the invoke server). Falls back to a path
-      # under the system temp dir for direct CLI use, so a developer
-      # running `freentonic --recording` from the shell still gets a
-      # capture.
+      # Install the recording probe, writing events to recording_output_path.
       def install_recorder
-        run_dir = ENV["FREENTONIC_RUN_DIR"]
-        recording_path =
-          if run_dir && !run_dir.empty?
-            File.join(run_dir, "recording.jsonl")
-          else
-            File.join(Dir.tmpdir, "freentonic-recording-#{Process.pid}.jsonl")
-          end
-        @recorder = Freentonic::Recorder.new(path: recording_path, stdout: stdout)
+        @recorder = Freentonic::Recorder.new(path: recording_output_path, stdout: stdout)
         @recorder.install(@session)
+      end
+
+      # Where the recorder writes its JSONL. Routed to
+      # <run_dir>/recording.jsonl whenever FREENTONIC_RUN_DIR names a location
+      # — always true under the invoke server, and the `author` container
+      # points it at the mounted workspace so the capture lands on the host.
+      # Falls back to a temp-dir path for a bare `freentonic --recording` shell
+      # run so a developer without a run dir still gets a capture. Pure (no
+      # session, no Chrome), so it is unit-tested directly.
+      def recording_output_path
+        run_dir = ENV["FREENTONIC_RUN_DIR"]
+        if run_dir && !run_dir.empty?
+          File.join(run_dir, "recording.jsonl")
+        else
+          File.join(Dir.tmpdir, "freentonic-recording-#{Process.pid}.jsonl")
+        end
       end
 
       def navigate_to_initial_url(label: "Recording")

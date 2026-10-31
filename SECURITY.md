@@ -154,6 +154,36 @@ and its lookback stop reads response bodies to decide when to stop.
 3. **Selectors are JSON-encoded** into the page script (invariant 2), never
    interpolated.
 
+## Recording a login (`--recording`, the `author` container)
+
+The recorder writes what you do in the browser to `recording.jsonl`, and
+optionally a DOM snapshot per step to `dom/<session>/NNNN.html`, for
+`--compile-recording` to turn into a draft workflow.
+
+1. **Secrets are masked at capture.** A fill into a field that looks like a
+   credential or PII has its value dropped before the event leaves the page,
+   so it never reaches `recording.jsonl` or the draft (which gets a
+   `secret(...)` reference instead). The check reads the field's `type`,
+   `autocomplete`, `name`, `id`, `placeholder` and `aria-label`, and errs
+   toward masking. A click on a single-digit key (a PIN keypad) records
+   only that a key was pressed, with no text, label or selector, and takes
+   no snapshot.
+2. **Snapshots hold structure, not values.** Input values are stripped and
+   attributes are allowlisted to selector hooks. Text the page renders stays
+   (labels, balances, names, anything a component echoes as you type), so
+   `dom/` is as sensitive as the page itself.
+3. **Owner-only files, no symlinks.** The recording and snapshots are
+   created mode `0600` (the `author` container also runs with `umask 0077`),
+   and a snapshot is never written through an existing file or symlink.
+   Each recording session gets its own snapshot folder.
+4. **Kept out of git.** `--out` refuses a path inside a git work tree, and the
+   `docker-run-freentonic.sh author` wrapper refuses a workspace inside one.
+5. **noVNC stays local.** The `author` container publishes VNC and noVNC on
+   `127.0.0.1` only. A password you choose is passed to the container by
+   name (never on its command line) and isn't echoed to the logs.
+6. **Delete the workspace when you're done** — it holds a logged-in browser
+   profile, recordings and snapshots of real bank pages.
+
 ## Held-open step sessions (`--step`)
 
 `freentonic --step` (and the invoke server's `/sessions` endpoints, which

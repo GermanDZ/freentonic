@@ -17,6 +17,7 @@ require "base64"
 require "securerandom"
 
 require_relative "display_geometry"
+require_relative "errors"
 
 module Freentonic
   module ChromeCdp
@@ -62,7 +63,7 @@ module Freentonic
       attr_reader :port, :profile_dir
     end
 
-    def self.configure(port: DEFAULT_PORT, isolated: false, headless: false, no_sandbox: false)
+    def self.configure(port: DEFAULT_PORT, isolated: false, reset_profile: false, headless: false, no_sandbox: false)
       @port = port
       @isolated = isolated
       @headless = headless
@@ -74,8 +75,33 @@ module Freentonic
       else
         @profile_dir = resolve_profile_dir_from_env
         require "fileutils"
+        reset_profile_dir!(@profile_dir) if reset_profile
         FileUtils.mkdir_p(@profile_dir)
       end
+    end
+
+    # Delete the persistent profile so the next launch starts logged-out
+    # (no remembered user / device trust). Guarded against obviously-wrong
+    # targets so a stray FREENTONIC_CHROME_PROFILE_DIR can't turn --reset-
+    # profile into `rm -rf /` or a home-directory wipe — nor into wiping a
+    # workspace full of recordings: a non-empty target must look like a
+    # Chrome profile (Chrome writes `Local State` and `Default/`).
+    CHROME_PROFILE_MARKERS = ["Local State", "Default"].freeze
+
+    def self.reset_profile_dir!(dir)
+      require "fileutils"
+      abs = File.expand_path(dir.to_s)
+      home = (File.expand_path("~") rescue nil) # raises when HOME is unset
+      unsafe = abs.empty? || abs == "/" || abs == home ||
+               abs == File.expand_path(".") || File.dirname(abs) == abs
+      raise UserError, "--reset-profile: refusing to wipe #{abs.inspect} (not a profile subdirectory)" if unsafe
+      return unless File.directory?(abs)
+
+      unless Dir.empty?(abs) || CHROME_PROFILE_MARKERS.any? { |m| File.exist?(File.join(abs, m)) }
+        raise UserError, "--reset-profile: refusing to wipe #{abs.inspect} — it doesn't look like a " \
+                         "Chrome profile (no #{CHROME_PROFILE_MARKERS.join(" / ")})"
+      end
+      FileUtils.rm_rf(abs)
     end
 
     # Precedence when running under the invoke server (non-isolated mode):

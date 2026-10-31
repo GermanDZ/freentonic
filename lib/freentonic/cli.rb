@@ -20,14 +20,16 @@ module Freentonic
   class Cli
     STAGE_NAMES = %w[connect elevate extract normalize export].freeze
 
-    def initialize(stdout: $stdout, stderr: $stderr)
+    def initialize(stdout: $stdout, stderr: $stderr, stdin: $stdin)
       @stdout = stdout
       @stderr = stderr
+      @stdin = stdin
     end
 
     def run(argv)
       argv = pre_process_requires(argv.dup)
       options = parse(argv)
+      return run_init(options) if options[:init] # before validate!; CREATES the workflow
       return run_schema_json(options) if options[:schema_json] # before validate!; needs no --workflow
       return run_compile_recording(options) if options[:compile_recording] # before validate!; needs no --workflow
       validate!(options)
@@ -72,8 +74,14 @@ module Freentonic
         workflow: nil,
         lookback_days: nil,
         isolated: false,
+        reset_profile: false,
         headless: false,
-        no_sandbox: false,
+        # Env default so a container can make sandbox-less launch the shell-wide
+        # baseline (the author container exports it: with --cap-drop ALL the
+        # Chrome sandbox can't start, and a bare `freentonic --recording` typed
+        # in the iterate shell would otherwise hang silently on the debug port).
+        # The --no-sandbox flag still works and an explicit flag always wins.
+        no_sandbox: ENV["FREENTONIC_NO_SANDBOX"] == "1",
         cdp_port: nil,
         only_stage: nil,
         through_stage: nil,
@@ -93,6 +101,10 @@ module Freentonic
         lint: false,
         schema_json: false,
         compile_recording: nil,
+        init: false,
+        url: nil,
+        init_secrets: [],
+        ready_url: nil,
         out: nil
       }
 
@@ -102,6 +114,7 @@ module Freentonic
         opts.on("--workflow PATH", "Path to workflow YAML") { |v| options[:workflow] = v }
         opts.on("--lookback DAYS", Integer, "Days of history to fetch") { |v| options[:lookback_days] = v }
         opts.on("--isolated", "Use a temporary Chrome profile (fresh login)") { options[:isolated] = true }
+        opts.on("--reset-profile", "Wipe the persistent Chrome profile before launch (clean slate; keeps persisting after). Handy for --recording a bank's full-entry login when the remembered profile skips it.") { options[:reset_profile] = true }
         opts.on("--headless", "Run Chrome in headless mode (no visible window)") { options[:headless] = true }
         opts.on("--no-sandbox", "Disable Chrome sandbox (required in Docker)") { options[:no_sandbox] = true }
         opts.on("--port PORT", Integer, "Chrome debug port (default 9222)") { |v| options[:cdp_port] = v }
@@ -140,7 +153,11 @@ module Freentonic
         opts.on("--schema-json", "Print the workflow dialect (actions, keys, plan verbs) as JSON and exit") { options[:schema_json] = true }
 
         opts.on("--compile-recording PATH", "Compile a recording.jsonl into a draft connect: pipeline (YAML to stdout). A DRAFT, not a finished provider — read, edit, then --lint it.") { |v| options[:compile_recording] = v }
-        opts.on("--out PATH", "Write --compile-recording output to PATH instead of stdout (refused inside a git work tree)") { |v| options[:out] = v }
+        opts.on("--init", "Bootstrap a stub workflow YAML at --out/--workflow (default workflow.yml): prompts for the initial login URL, the secret names the login needs, and an optional post-login (ready) URL. Refuses to overwrite. Then --recording it.") { options[:init] = true }
+        opts.on("--url URL", "Initial login URL for --init (skips the interactive prompts)") { |v| options[:url] = v }
+        opts.on("--secret NAME", "A secret name the login needs, for --init's secrets: block (repeatable; names only, never values)") { |v| options[:init_secrets] << v }
+        opts.on("--ready-url URL", "Post-login URL that confirms success, for --init (scaffolds a wait_url)") { |v| options[:ready_url] = v }
+        opts.on("--out PATH", "Write --compile-recording / --init output to PATH instead of stdout/workflow.yml (compile output is refused inside a git work tree)") { |v| options[:out] = v }
 
         opts.on("--purge", "Remove all freentonic data (Chrome profile, Keychain entries, temp files)") { options[:purge] = true }
         opts.on("--force", "Skip confirmation prompt (use with --purge)") { options[:force] = true }
@@ -275,6 +292,145 @@ module Freentonic
       0
     end
 
+    # Bootstrap a minimal workflow YAML so `--recording`/`--step` (which both
+    # require a --workflow with an initial URL to launch at) have something to
+    # point at for a brand-new provider. Prompts for the login URL unless --url
+    # is given. Writes nothing over an existing file. Unlike --compile-recording,
+    # the stub has no captured PII, so it is NOT refused inside a git work tree —
+    # a stub is meant to grow into a committed provider.
+    def run_init(options)
+      path = File.expand_path(init_output_path(options))
+      if File.exist?(path)
+        raise UserError, "--init: #{path} already exists — refusing to overwrite. " \
+                         "Delete it, or pass --out PATH for a new file."
+      end
+
+      # --url present ⇒ non-interactive: take everything from flags. Otherwise
+      # prompt for the three pieces on stdin.
+      if options[:url]
+        url         = options[:url]
+        secret_names = normalize_secret_names(options[:init_secrets])
+        ready_url   = options[:ready_url]
+      else
+        url          = prompt("Initial login URL (https://...): ")
+        secret_names = normalize_secret_names(
+          split_names(prompt("Secret names the login needs, space-separated " \
+                             "(names only, e.g. USER_ID USER_PIN), blank for none: "))
+        )
+        ready_url    = presence(prompt("Post-login URL that confirms success (optional, blank to skip): "))
+      end
+
+      url = url.to_s.strip
+      raise UserError, "--init: an initial login URL is required (pass --url or answer the prompt)" if url.empty?
+      validate_http_url!(url, "initial")
+      ready_url = presence(ready_url)
+      validate_http_url!(ready_url, "ready") if ready_url
+
+      # 0600 to match the workspace's recording/dump discipline; the stub is
+      # created fresh (guarded above) and NOFOLLOW refuses a planted symlink.
+      File.open(path, secure_write_flags(File::TRUNC), 0o600) do |f|
+        f.chmod(0o600)
+        f.write(init_stub_yaml(url, secret_names, ready_url))
+      end
+      @stdout.puts "Wrote stub workflow to #{path}#{secret_names.empty? ? "" : " (#{secret_names.length} secret name(s))"}."
+      @stdout.puts "Next: freentonic --recording --workflow #{init_output_path(options)}"
+      0
+    end
+
+    def init_output_path(options)
+      options[:out] || options[:workflow] || "workflow.yml"
+    end
+
+    def prompt(label)
+      @stderr.print label
+      @stderr.flush
+      @stdin.gets
+    end
+
+    def presence(str)
+      s = str.to_s.strip
+      s.empty? ? nil : s
+    end
+
+    def split_names(str)
+      str.to_s.split(/[\s,]+/).reject(&:empty?)
+    end
+
+    # No whitespace anywhere: the URL is written into the stub verbatim, and a
+    # newline would end the YAML line (or comment) it sits on.
+    def validate_http_url!(url, which)
+      return if url.to_s.strip.match?(%r{\Ahttps?://\S+\z}i)
+      raise UserError, "--init: #{which} URL must be an http:// or https:// URL with no spaces " \
+                       "(got #{url.to_s.strip.inspect})"
+    end
+
+    # Keep only valid secret-name tokens (an identifier), deduped in order.
+    # A stray value pasted in a name field is dropped rather than written —
+    # secret VALUES never belong in a workflow file (they arrive at runtime
+    # via --secrets). A token that isn't a clean identifier is skipped with a
+    # note so the operator notices.
+    def normalize_secret_names(tokens)
+      seen = []
+      Array(tokens).each do |raw|
+        name = raw.to_s.strip
+        next if name.empty?
+        unless name.match?(/\A[A-Za-z][A-Za-z0-9_]*\z/)
+          @stderr.puts "--init: skipping #{name.inspect} — not a valid secret name (letters, digits, underscore)"
+          next
+        end
+        seen << name unless seen.include?(name)
+      end
+      seen
+    end
+
+    # A double-quoted YAML scalar body: backslash-escape the two characters a
+    # double-quoted scalar can't hold literally. URLs/prompts here won't
+    # contain a newline (inputs are single-line), so no block-scalar handling.
+    def yaml_dq(str)
+      %("#{str.to_s.gsub(/[\\"]/) { |c| "\\#{c}" }}")
+    end
+
+    def init_stub_yaml(url, secret_names, ready_url)
+      out = +"version: 1\n\n"
+      out << "# Stub created by `freentonic --init`. Set config.key, then record the\n"
+      out << "# login by hand with `freentonic --recording` and turn the capture into a\n"
+      out << "# draft with `freentonic --compile-recording recording.jsonl`.\n\n"
+      out << "config:\n  key: REPLACE_ME\n\n"
+
+      unless secret_names.empty?
+        out << "secrets:\n"
+        secret_names.each do |name|
+          out << "  #{name}:\n"
+          out << "    prompt: #{yaml_dq("REPLACE_ME: describe #{name}")}\n"
+        end
+        out << "\n"
+      end
+
+      out << "pipeline:\n  - connect\n\n"
+      out << "phases:\n  connect:\n"
+      out << "    - action: navigate\n      url: #{yaml_dq(url)}\n"
+
+      if ready_url
+        out << "    # After your login steps, confirm success by waiting for the\n"
+        out << "    # post-login URL (move this below the steps you add):\n"
+        out << "    #   - action: wait_url\n"
+        out << "    #     includes: #{yaml_dq(url_path_tail(ready_url))}\n"
+      end
+      out
+    end
+
+    # The distinctive tail of a URL for a wait_url `includes:` — the path, or
+    # the host when the path is empty/root.
+    def url_path_tail(url)
+      require "uri"
+      parsed = URI.parse(url.to_s.strip)
+      tail = parsed.path.to_s
+      tail = parsed.host.to_s if tail.empty? || tail == "/"
+      tail.empty? ? url.to_s.strip : tail
+    rescue URI::InvalidURIError
+      url.to_s.strip
+    end
+
     def run_compile_recording(options)
       require_relative "recording_compiler"
 
@@ -379,6 +535,7 @@ module Freentonic
         secret_resolver: secret_resolver,
         lookback_days: options[:lookback_days] || source&.default_lookback_days || 14,
         isolated: options[:isolated],
+        reset_profile: options[:reset_profile],
         headless: options[:headless],
         no_sandbox: options[:no_sandbox],
         cdp_port: options[:cdp_port],

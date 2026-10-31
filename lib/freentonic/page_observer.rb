@@ -25,9 +25,11 @@ module Freentonic
     OBSERVE_JS          = File.read(OBSERVE_JS_PATH).freeze
 
     # The only element keys allowed to leave the page. Notably absent:
-    # anything that could carry a field's value.
+    # anything that could carry a field's value. `shadow` marks an element
+    # inside a shadow root (its selector is root-scoped — deepQuery reaches
+    # it, a plain document.querySelector won't).
     ALLOWED_ELEMENT_KEYS = %w[
-      tag selector selector_strategy needs_review text role href type label masked
+      tag selector selector_strategy needs_review text role href type label masked shadow
     ].freeze
 
     module_function

@@ -31,6 +31,22 @@ module Freentonic
     SHARED_SELECTORS_PATH = File.expand_path("recorder/selectors.js", __dir__)
     SHARED_SELECTORS_MARKER = "// __FREENTONIC_SHARED_SELECTORS__"
 
+    # Per-step DOM snapshots. When enabled the probe attaches a serialized
+    # deep DOM (light + open shadow roots, input VALUES stripped) to each
+    # interaction event; the recorder peels it off into
+    # <run_dir>/dom/<session>/NNNN.html (0600; <session> is the recorder's
+    # start time in epoch ms, so a later recording into the same run dir
+    # never overwrites an earlier one's snapshots) and leaves a `dom_ref` on
+    # the JSONL line so tooling can reprocess
+    # the exact page a step acted on to mine better field selectors. The probe
+    # reads the boolean spliced in at this marker. OFF unless the caller opts
+    # in (the author container defaults it on via FREENTONIC_RECORD_DOM=1).
+    RECORD_DOM_MARKER = "__FREENTONIC_RECORD_DOM__"
+    DOM_SUBDIR = "dom"
+    # Guardrail so a runaway page can't fill the workspace; the probe also
+    # caps its own serialization, this is the server-side backstop.
+    MAX_DOM_BYTES = 4 * 1024 * 1024
+
     # Name of the CDP binding the probe calls to ship events. Has to
     # be unique enough that a page script can't accidentally call it
     # before the probe captures the reference (Chrome exposes the
@@ -45,16 +61,21 @@ module Freentonic
     # (typically <run_dir>/recording.jsonl). Created O_APPEND with mode
     # 0600 so multiple drain() ticks append atomically and credentials
     # adjacent in the JSONL aren't world-readable.
-    def initialize(path:, stdout: $stdout)
+    def initialize(path:, stdout: $stdout, record_dom: ENV["FREENTONIC_RECORD_DOM"] == "1")
       @path = path
       @stdout = stdout
       @file = nil
       @installed = false
+      @record_dom = record_dom
+      @dom_dir = nil # per recording session, set by #install
+      @dom_seq = 0
       # Block form of sub so the shared source (which contains backslash
       # escapes in cssEscape) isn't reinterpreted as replacement
       # backreferences.
       shared = File.read(SHARED_SELECTORS_PATH)
-      @probe_source = File.read(PROBE_PATH).sub(SHARED_SELECTORS_MARKER) { shared }
+      @probe_source = File.read(PROBE_PATH)
+                          .sub(SHARED_SELECTORS_MARKER) { shared }
+                          .sub(RECORD_DOM_MARKER) { @record_dom ? "true" : "false" }
     end
 
     # Open the JSONL sink, enable the CDP domains we need, register
@@ -71,7 +92,9 @@ module Freentonic
       session.send_command("Page.enable")
       session.send_command("Runtime.addBinding", { name: BINDING_NAME })
       session.send_command("Page.addScriptToEvaluateOnNewDocument", { source: @probe_source })
-      append({ "kind" => "recorder_started", "t" => (Time.now.to_f * 1000).to_i })
+      started_ms = (Time.now.to_f * 1000).to_i
+      @dom_dir = File.join(File.dirname(@path), DOM_SUBDIR, started_ms.to_s)
+      append({ "kind" => "recorder_started", "t" => started_ms })
       @stdout.puts "Recorder: probe injected, writing to #{@path}"
       @installed = true
     end
@@ -153,9 +176,32 @@ module Freentonic
       raw = params["payload"]
       return unless raw.is_a?(String)
       payload = JSON.parse(raw)
+      offload_dom!(payload)
       append(payload)
     rescue JSON::ParserError
       # malformed probe event — silently drop; operator can re-record
+    end
+
+    # Peel a probe event's inline `dom` string into its own file and replace
+    # it with a `dom_ref` so recording.jsonl stays a compact one-line-per-event
+    # log. Best-effort: a write failure drops the snapshot (the event line and
+    # the rest of the recording are unaffected). The file holds page STRUCTURE
+    # only (the probe strips input values) but can still carry visible page
+    # text, so it inherits the 0600 + workspace-only discipline of the
+    # recording itself.
+    def offload_dom!(payload)
+      dom = payload.delete("dom")
+      return unless dom.is_a?(String) && !dom.empty?
+      dom = dom.byteslice(0, MAX_DOM_BYTES) if dom.bytesize > MAX_DOM_BYTES
+      @dom_seq += 1
+      FileUtils.mkdir_p(@dom_dir, mode: 0o700)
+      abs = File.join(@dom_dir, format("%04d.html", @dom_seq))
+      # EXCL + NOFOLLOW: never write through a pre-planted file or symlink —
+      # the 0600 mode only applies to a file this call creates.
+      File.open(abs, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) { |f| f.write(dom) }
+      payload["dom_ref"] = abs.delete_prefix("#{File.dirname(@path)}/")
+    rescue StandardError => e
+      @stdout.puts "Recorder: could not write DOM snapshot (#{e.class}); continuing without it"
     end
 
     def append(payload)

@@ -126,6 +126,12 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 USER freentonic
 ENV HOME=/home/freentonic
 ENV PATH="/opt/freentonic/bin:${PATH}"
+# Every mode's entrypoint starts Xvfb on :99 before Chrome launches, and each
+# path already `export DISPLAY=:99` at runtime. Bake it into the image ENV too
+# so a `docker exec` shell (e.g. `docker-run-freentonic.sh author-shell`) — which
+# inherits only image ENV, never the entrypoint's runtime exports — can also run
+# headed Chrome (recording/step) instead of hanging on an empty DISPLAY.
+ENV DISPLAY=:99
 
 # 5900: raw VNC (optional, debug).
 # 6080: noVNC HTML client (optional, debug) — same content as 5900, over HTTP+WebSocket.

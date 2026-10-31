@@ -118,12 +118,29 @@ module Freentonic
       assert_includes expr, "contentDocument"
       assert_includes expr, "shadowRoot"
       assert_includes expr, "JSON.stringify"
+      # Shared selector heuristics are root-aware: uniqueness is checked
+      # against the element's ShadowRoot, not the outer document.
+      assert_includes expr, "getRootNode"
     end
 
     def test_allowed_element_keys_excludes_value
       refute_includes PageObserver::ALLOWED_ELEMENT_KEYS, "value"
       assert_includes PageObserver::ALLOWED_ELEMENT_KEYS, "masked"
       assert_includes PageObserver::ALLOWED_ELEMENT_KEYS, "selector"
+      assert_includes PageObserver::ALLOWED_ELEMENT_KEYS, "shadow"
+    end
+
+    def test_observe_passes_shadow_flag_through
+      session = SeededSession.new(
+        value: JSON.generate(canned_inventory(extra_input_keys: { "shadow" => true }))
+      )
+      observation = PageObserver.observe(session)
+
+      pwd = observation["interactive"].find { |e| e["type"] == "password" }
+      assert_equal true, pwd["shadow"]
+      # Elements not flagged stay unflagged (no key invented).
+      dni = observation["interactive"].find { |e| e["type"] == "text" }
+      refute dni.key?("shadow")
     end
   end
 end

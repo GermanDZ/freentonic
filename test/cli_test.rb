@@ -102,6 +102,170 @@ module Freentonic
       refute_includes stderr.string, "invalid option"
     end
 
+    # FREENTONIC_NO_SANDBOX=1 makes sandbox-less launch the default without
+    # the flag — the author container exports it so a bare `freentonic
+    # --recording` typed in its shell doesn't hang on a sandbox Chrome can't
+    # start under --cap-drop ALL.
+    def test_no_sandbox_env_default
+      prev = ENV["FREENTONIC_NO_SANDBOX"]
+      ENV["FREENTONIC_NO_SANDBOX"] = "1"
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml"])
+      assert_equal true, opts[:no_sandbox]
+    ensure
+      prev.nil? ? ENV.delete("FREENTONIC_NO_SANDBOX") : ENV["FREENTONIC_NO_SANDBOX"] = prev
+    end
+
+    def test_no_sandbox_env_unset_defaults_false
+      prev = ENV["FREENTONIC_NO_SANDBOX"]
+      ENV.delete("FREENTONIC_NO_SANDBOX")
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml"])
+      assert_equal false, opts[:no_sandbox]
+    ensure
+      prev.nil? ? ENV.delete("FREENTONIC_NO_SANDBOX") : ENV["FREENTONIC_NO_SANDBOX"] = prev
+    end
+
+    def test_reset_profile_flag_parsed
+      opts = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml", "--reset-profile"])
+      assert_equal true, opts[:reset_profile]
+      off = Cli.new(stderr: StringIO.new).send(:parse, ["--workflow", "x.yml"])
+      assert_equal false, off[:reset_profile]
+    end
+
+    # ─── --init: bootstrap a stub workflow ───
+
+    def test_init_writes_lint_clean_stub_from_url_flag
+      require "freentonic/linter"
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "workflow.yml")
+        code = Cli.new(stdout: StringIO.new, stderr: StringIO.new)
+                  .run(["--init", "--url", "https://bank.example/login", "--out", out])
+        assert_equal 0, code
+        assert File.exist?(out)
+
+        yaml = YAML.safe_load(File.read(out))
+        assert_equal 1, yaml["version"]
+        assert_equal ["connect"], yaml["pipeline"]
+        nav = yaml.dig("phases", "connect", 0)
+        assert_equal "navigate", nav["action"]
+        assert_equal "https://bank.example/login", nav["url"]
+
+        # The stub must lint clean so the record loop starts on solid ground.
+        lint = Linter.new(workflow_path: out, stdout: StringIO.new, stderr: StringIO.new).run
+        assert_equal 0, lint
+        assert_equal "600", format("%o", File.stat(out).mode & 0o777)
+      end
+    end
+
+    def test_init_prompts_for_url_when_flag_absent
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "workflow.yml")
+        stdin = StringIO.new("https://bank.example/app-login/\n")
+        code = Cli.new(stdout: StringIO.new, stderr: StringIO.new, stdin: stdin)
+                  .run(["--init", "--out", out])
+        assert_equal 0, code
+        nav = YAML.safe_load(File.read(out)).dig("phases", "connect", 0)
+        assert_equal "https://bank.example/app-login/", nav["url"]
+      end
+    end
+
+    def test_init_refuses_to_overwrite
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "workflow.yml")
+        File.write(out, "keep me\n")
+        stderr = StringIO.new
+        code = Cli.new(stdout: StringIO.new, stderr: stderr)
+                  .run(["--init", "--url", "https://bank.example/login", "--out", out])
+        assert_equal 1, code
+        assert_includes stderr.string, "already exists"
+        assert_equal "keep me\n", File.read(out)
+      end
+    end
+
+    def test_init_rejects_non_http_url
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "workflow.yml")
+        stderr = StringIO.new
+        code = Cli.new(stdout: StringIO.new, stderr: stderr)
+                  .run(["--init", "--url", "file:///etc/passwd", "--out", out])
+        assert_equal 1, code
+        assert_includes stderr.string, "http"
+        refute File.exist?(out)
+      end
+    end
+
+    # The URL is written into the stub verbatim; a newline would end the YAML
+    # comment it sits in and inject live YAML.
+    def test_init_rejects_a_ready_url_with_a_newline
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "workflow.yml")
+        stderr = StringIO.new
+        code = Cli.new(stdout: StringIO.new, stderr: stderr).run([
+          "--init", "--url", "https://bank.example/login",
+          "--ready-url", "https://bank.example/home\nsecrets: {}", "--out", out
+        ])
+        assert_equal 1, code
+        assert_includes stderr.string, "no spaces"
+        refute File.exist?(out)
+      end
+    end
+
+    def test_init_treats_a_blank_ready_url_as_none
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "workflow.yml")
+        code = Cli.new(stdout: StringIO.new, stderr: StringIO.new).run([
+          "--init", "--url", "https://bank.example/login", "--ready-url", "   ", "--out", out
+        ])
+        assert_equal 0, code
+        refute_includes File.read(out), "action: wait_url"
+      end
+    end
+
+    def test_init_scaffolds_secret_names_and_ready_url
+      require "freentonic/linter"
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "workflow.yml")
+        stderr = StringIO.new
+        code = Cli.new(stdout: StringIO.new, stderr: stderr).run([
+          "--init", "--url", "https://bank.example/login",
+          "--secret", "USER_ID", "--secret", "USER_PIN",
+          "--secret", "not a name",
+          "--ready-url", "https://bank.example/home/#dash", "--out", out
+        ])
+        assert_equal 0, code
+
+        yaml = YAML.safe_load(File.read(out))
+        assert_equal %w[USER_ID USER_PIN], yaml["secrets"].keys
+        # An invalid secret token is dropped, with a note — never written.
+        refute_includes File.read(out), "not a name"
+        assert_includes stderr.string, "skipping"
+        # The ready URL is scaffolded as a wait_url comment (not a live step,
+        # since it must follow the login steps the author adds).
+        assert_includes File.read(out), "action: wait_url"
+        assert_includes File.read(out), 'includes: "/home/"'
+        nav = yaml.dig("phases", "connect", 0)
+        assert_equal "navigate", nav["action"]
+        # Declaring secrets the connect phase doesn't yet reference still lints.
+        assert_equal 0, Linter.new(workflow_path: out, stdout: StringIO.new, stderr: StringIO.new).run
+      end
+    end
+
+    def test_init_prompts_for_secrets_and_ready_url
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "workflow.yml")
+        stdin = StringIO.new([
+          "https://bank.example/login",
+          "USER_ID USER_PIN",
+          "https://bank.example/home"
+        ].join("\n") + "\n")
+        code = Cli.new(stdout: StringIO.new, stderr: StringIO.new, stdin: stdin)
+                  .run(["--init", "--out", out])
+        assert_equal 0, code
+        yaml = YAML.safe_load(File.read(out))
+        assert_equal %w[USER_ID USER_PIN], yaml["secrets"].keys
+        assert_includes File.read(out), "action: wait_url"
+      end
+    end
+
     def test_invalid_option_returns_error
       stderr = StringIO.new
       status = Cli.new(stdout: StringIO.new, stderr: stderr).run(["--headless-disable"])
