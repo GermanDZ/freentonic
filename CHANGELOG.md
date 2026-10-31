@@ -10,6 +10,24 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.19.1 — Declarative provider scaffold
+
+**`rake new[name]` generates a declarative provider (#53).** The
+`Freentonic::Providers::Scaffold` template still wrote `extractor.rb`,
+`normalizer.rb` and `extract/normalize: ruby:`, which a declarative-only
+server (the default since 0.18.0) refuses at run start. It now writes
+`workflow.yml` with an extract plan and a normalize plan, a `config.yml`,
+and tests for the credentials map, the extract plan and the normalize plan.
+`Scaffold#files` lists what it writes. A new test checks the generated
+provider lints clean, has no Ruby outside `test/`, and its own tests pass.
+
+**Docs (#52).** `capture_response_json` gains a section on capturing data
+from a web app's own responses: why a capture finds nothing before the
+page hydrates, clicking rather than navigating, what each failure message
+means, and paging "Load more" history within the lookback.
+
+No workflow-dialect or invoke-server change.
+
 ## 0.19.0 — Captured data for plans, "Load more" paging, authoring loop, Ruby 3.4
 
 Everything here is additive to the workflow dialect (`version: 1` and
