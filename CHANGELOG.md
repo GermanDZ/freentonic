@@ -10,6 +10,49 @@ changelog is their version signal. Every release below corresponds to a
 one-release dual-accept window before `version: 2`) is spelled out in
 [docs/workflow-schema-versioning.md](docs/workflow-schema-versioning.md).
 
+## 0.19.0 — Captured data for plans, "Load more" paging, authoring loop, Ruby 3.4
+
+Everything here is additive to the workflow dialect (`version: 1` and
+`DIALECT_VERSION` unchanged) and the invoke-server API gains endpoints
+without changing existing ones. Existing workflows run unchanged.
+
+**`captured:` — browser-captured data for extract plans (#49).** A new
+top-level list names values a capture action stored during connect; an
+`extract: plan:` reads exactly those as `{captured.*}` (a deep copy). It is
+deliberately separate from `credentials:` — the plan never sees credentials,
+and captured values never reach the api_client. Entries are
+`{ from, as?, required? }`; names and every `{captured.<name>}` reference
+are validated at load, and `required: true` stops the run before
+extraction when the value is missing or empty. A capture-only workflow
+needs no `credentials:` block. This is what lets a provider whose API
+can't be replayed (client-side encrypted requests) stay declarative.
+
+**"Load more" pagination (#50).**
+- `click_while_present` clicks a selector while it is present, with
+  `max_clicks` (required, ≤ 1000) and `on_max_clicks: fail | warn`
+  (default `fail`). `wait_for_response` makes every click prove it fetched
+  a page, and `stop_when_older_than_lookback` stops paging once the loaded
+  items reach past the sync's lookback (the same `from_ms` a plan filters
+  on), with `items_where`, `timestamp_unit`, `margin_hours` and `*` paths.
+  All options are validated at load.
+- `capture_response_json` gains `all: true`: the field from every matching
+  response, oldest first, strict — a matched response without a body or
+  the field fails the step. Bodies are base64-decoded when needed, and a
+  `false` value now counts as found. A failed capture says whether no
+  response matched, the body was gone, or the field was missing.
+
+**Authoring loop (#46, #47).** `--schema-json` exports the whole dialect as
+version-locked JSON; `--compile-recording` turns a `recording.jsonl` into a
+lint-clean draft `connect:` pipeline with credentials masked into
+`secret(...)`; the `inspect_page` action and a `failures.ndjson` on wait
+timeouts record page metadata (never values); `--step` and the server's
+`/sessions` endpoints hold one browser session open and run one action per
+line. See SECURITY.md for the bounds on each. Design notes in `docs/` (#45).
+
+**Base image (#48).** `ruby:3.4.12-slim-trixie` (Ruby 3.2 is end-of-life)
+and Chromium 156 from trixie-security. An existing Chrome profile carries
+over from 148.
+
 ## 0.18.1 — Clear stale X lock on boot (reboot resilience)
 
 Operational fix. The accessory runs with `--restart unless-stopped`, so a
