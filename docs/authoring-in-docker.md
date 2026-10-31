@@ -120,12 +120,13 @@ A `--recording` session writes, in the workspace:
   line points at the snapshot.
 
 Both hold live page structure, so they inherit the workspace's `umask 0077`
-(owner-only) and the wrapper's git-work-tree refusal. Input values are
-stripped from the DOM snapshots, and a PIN-keypad press is recorded without
-its digit and without a snapshot. Text a page renders is kept, though: labels,
-post-login balances and names, and anything a component echoes into the page
-as you type (a `contenteditable` field, a masked-PIN display). Treat `dom/` as
-sensitive, and delete the workspace when you're done.
+(owner-only) and the wrapper's git-work-tree refusal. Input values and the
+text inside `contenteditable` regions are stripped from the DOM snapshots. A
+PIN-keypad press is recorded without its digit, and after the first one no
+step on that page is snapshotted. Other text a page renders is kept, though:
+labels, post-login balances and names, and anything a component echoes into
+the page as you type. Treat `dom/` as sensitive, and delete the workspace
+when you're done.
 
 You can also pass the first command straight through the wrapper, then keep
 iterating in the shell it leaves you in:

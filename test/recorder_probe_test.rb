@@ -267,8 +267,56 @@ module Freentonic
       src = probe_source(record_dom: true)
       # A single-digit key emits a bare flagged click — no text, label or
       # selector that could carry the digit — and skips the DOM snapshot.
+      assert_includes src, "if (isKeypadKey(el)) {"
       assert_includes src, 'emit({ kind: "click", keypad_digit: true, url: location.href });'
-      assert_includes src, "!payload.keypad_digit"
+      # A pad's display can echo digits, so after the first key press no
+      # later step on that page is snapshotted either.
+      assert_includes src, "if (payload.keypad_digit) keypadUsed = true;"
+      assert_includes src, "DOM_KINDS[payload.kind] && !keypadUsed"
+    end
+
+    def test_dom_serializer_drops_contenteditable_text
+      src = probe_source(record_dom: true)
+      # Typed text in an editable region is page text, not an input value.
+      assert_includes src, "if (node.isContentEditable) {"
+    end
+
+    # Runs isKeypadKey itself under node: every place a key can show or name
+    # its digit (text, an input's value, aria-label/title/alt, an image's
+    # alt, the selector we'd record) must count, and ordinary buttons not.
+    def test_keypad_detection_covers_every_place_a_key_names_its_digit
+      skip "node not installed" unless system("node", "--version", out: File::NULL, err: File::NULL)
+
+      script = <<~JS
+        // eval of this repo's own selectors.js in a throwaway node process — no outside input.
+        const src = require("fs").readFileSync(#{JSON.generate(Recorder::SHARED_SELECTORS_PATH)}, "utf8");
+        globalThis.selectorFor = (el) => ({ css: el.css });
+        eval(src.slice(src.indexOf("var MAX_TEXT_LEN"), src.indexOf("// Derive a candidate CSS selector")));
+        const key = (o) => ({ tagName: o.tag || "BUTTON", textContent: o.text || "", value: o.value,
+                              css: o.css || "button.x",
+                              getAttribute: (n) => (o.attrs || {})[n] || null,
+                              querySelector: () => (o.img ? { getAttribute: (n) => (n === "alt" ? o.img : null) } : null) });
+        const cases = {
+          text: key({ text: "7" }), input_value: key({ tag: "INPUT", value: "7" }),
+          aria_digit: key({ attrs: { "aria-label": "Digit 7" } }), title_tecla: key({ attrs: { title: "Tecla 3" } }),
+          img_alt: key({ img: "4" }), id_key: key({ css: "#key7" }), testid: key({ css: "[data-testid='digit-7']" }),
+          data_key: key({ css: "span[data-key='9']" }), btn_class: key({ css: ".btn-5" }),
+          login: key({ text: "Log in", css: "button[data-testid='login-button']" }),
+          step: key({ text: "Step 2 of 3", css: "a.step" }), nth: key({ text: "Next", css: "ul > li:nth-child(2) > button" }),
+          year: key({ text: "2017", css: "a.year" })
+        };
+        const out = {};
+        for (const [k, el] of Object.entries(cases)) out[k] = isKeypadKey(el);
+        console.log(JSON.stringify(out));
+      JS
+      out, status = Open3.capture2("node", "-e", script)
+      assert status.success?, out
+      detected = JSON.parse(out)
+
+      %w[text input_value aria_digit title_tecla img_alt id_key testid data_key btn_class].each do |k|
+        assert detected[k], "#{k} must be detected as a keypad key"
+      end
+      %w[login step nth year].each { |k| refute detected[k], "#{k} must not be treated as a keypad key" }
     end
 
     # Runs the shared masking function itself (needs node; the Ruby suite
@@ -278,6 +326,7 @@ module Freentonic
       skip "node not installed" unless system("node", "--version", out: File::NULL, err: File::NULL)
 
       script = <<~JS
+        // eval of this repo's own selectors.js in a throwaway node process — no outside input.
         const src = require("fs").readFileSync(#{JSON.generate(Recorder::SHARED_SELECTORS_PATH)}, "utf8");
         eval(src.slice(src.indexOf("var SENSITIVE_HINT"), src.indexOf("function elementSummary")));
         const el = (name, attrs = {}) => ({ type: "text", name, value: "typed", getAttribute: (n) => attrs[n] || null });
